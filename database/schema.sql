@@ -45,22 +45,95 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- ──────────────────────────────────────────────
 -- Migration: add subscription_plan to existing databases
--- Run this only if the users table already exists without the column.
+-- Safe to re-run — only applies when the column is missing.
 -- ──────────────────────────────────────────────
--- ALTER TABLE users
---     ADD COLUMN subscription_plan ENUM('trial','weekly','monthly') DEFAULT NULL
---     AFTER subscription_status;
+SET @users_has_subscription_plan := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'subscription_plan'
+);
+SET @users_sql := IF(@users_has_subscription_plan = 0,
+    "ALTER TABLE users ADD COLUMN subscription_plan ENUM('trial','weekly','monthly') DEFAULT NULL AFTER subscription_status",
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
 
 -- ──────────────────────────────────────────────
 -- Migration: add Telegram columns to existing databases
--- Run these only if the columns do not already exist.
+-- Safe to re-run — only applies when the columns/keys are missing.
 -- ──────────────────────────────────────────────
--- ALTER TABLE users
---     ADD COLUMN telegram_user_id   BIGINT UNSIGNED DEFAULT NULL AFTER subscription_expires_at,
---     ADD COLUMN telegram_username  VARCHAR(100)    DEFAULT NULL AFTER telegram_user_id,
---     ADD COLUMN telegram_linked_at DATETIME        DEFAULT NULL AFTER telegram_username,
---     ADD UNIQUE KEY uq_tg_user (telegram_user_id),
---     ADD INDEX idx_tg_user_id (telegram_user_id);
+SET @users_has_tg_user_id := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'telegram_user_id'
+);
+SET @users_sql := IF(@users_has_tg_user_id = 0,
+    'ALTER TABLE users ADD COLUMN telegram_user_id BIGINT UNSIGNED DEFAULT NULL AFTER subscription_expires_at',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
+
+SET @users_has_tg_username := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'telegram_username'
+);
+SET @users_sql := IF(@users_has_tg_username = 0,
+    'ALTER TABLE users ADD COLUMN telegram_username VARCHAR(100) DEFAULT NULL AFTER telegram_user_id',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
+
+SET @users_has_tg_linked_at := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'telegram_linked_at'
+);
+SET @users_sql := IF(@users_has_tg_linked_at = 0,
+    'ALTER TABLE users ADD COLUMN telegram_linked_at DATETIME DEFAULT NULL AFTER telegram_username',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
+
+SET @users_has_uq_tg_user := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND INDEX_NAME = 'uq_tg_user'
+);
+SET @users_sql := IF(@users_has_uq_tg_user = 0,
+    'ALTER TABLE users ADD UNIQUE KEY uq_tg_user (telegram_user_id)',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
+
+SET @users_has_idx_tg_user_id := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND INDEX_NAME = 'idx_tg_user_id'
+);
+SET @users_sql := IF(@users_has_idx_tg_user_id = 0,
+    'ALTER TABLE users ADD INDEX idx_tg_user_id (telegram_user_id)',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
 
 -- ──────────────────────────────────────────────
 -- Strategy access grants per user
