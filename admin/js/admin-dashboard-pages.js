@@ -381,12 +381,13 @@
         const adaptiveStats = await api('/admin/adaptive_intelligence?action=stats');
         const strategyEntry = (adaptiveStats.by_strategy || []).find((item) => item.strategy === strategy) || { count: 0, avg_confidence: 0 };
         const rulesEntry = (adaptiveStats.rules_by_strategy || []).find((item) => item.strategy === strategy) || { count: 0 };
+        const tradeHistoryEntry = (adaptiveStats.trade_history_by_strategy || []).find((item) => item.strategy === strategy) || { count: 0 };
         const grid = host.querySelector('#learningKpis');
         [
           ['Learning Profiles', formatNumber(strategyEntry.count), 'brain', 'info'],
           ['Qualification Rules', formatNumber(rulesEntry.count), 'sliders', 'success'],
           ['Avg Confidence', formatPercent(strategyEntry.avg_confidence || 0, 1), 'shield', 'primary'],
-          ['Trade History Records', formatNumber(adaptiveStats.trade_history_count), 'clock-rotate-left', 'warning']
+          ['Trade History Records', formatNumber(tradeHistoryEntry.count), 'clock-rotate-left', 'warning']
         ].forEach((item) => grid.insertAdjacentHTML('beforeend', AdminComponents.createKPICard({ title: item[0], value: item[1], icon: item[2], color: item[3], size: 'md' })));
         host.querySelector('#learningNotes').innerHTML = [
           `${formatNumber(strategyEntry.count)} adaptive learning profiles tracked for ${escapeHtml(strategyLabel)}.`,

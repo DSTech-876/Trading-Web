@@ -155,6 +155,13 @@ try {
                 GROUP BY strategy_key
                 ORDER BY count DESC
             ");
+
+            $trade_history_by_strategy = $db->fetchAll("
+                SELECT strategy_key, COUNT(*) as count
+                FROM adaptive_trade_history
+                GROUP BY strategy_key
+                ORDER BY count DESC
+            ");
             
             echo json_encode([
                 'success' => true,
@@ -178,12 +185,18 @@ try {
                         'strategy' => $s['strategy_key'],
                         'count' => (int) $s['count']
                     ];
-                }, $rules_by_strategy)
+                }, $rules_by_strategy),
+                'trade_history_by_strategy' => array_map(function($s) {
+                    return [
+                        'strategy' => $s['strategy_key'],
+                        'count' => (int) $s['count']
+                    ];
+                }, $trade_history_by_strategy)
             ]);
         }
         elseif ($action === 'all_profiles') {
             // System-wide, real-paginated listing of learning profiles across all users
-            $page = (int) ($_GET['page'] ?? 1);
+            $page = max(1, (int) ($_GET['page'] ?? 1));
             $per_page = min(max((int) ($_GET['per_page'] ?? 25), 5), 200);
             $offset = ($page - 1) * $per_page;
             $search = trim((string) ($_GET['search'] ?? ''));
@@ -210,7 +223,7 @@ try {
                 FROM adaptive_learning_profiles alp
                 JOIN users u ON u.id = alp.user_id
                 $where
-                ORDER BY alp.updated_at DESC
+                ORDER BY alp.updated_at DESC, alp.id DESC
                 LIMIT $per_page OFFSET $offset
             ", $params);
 
@@ -225,7 +238,7 @@ try {
         }
         elseif ($action === 'all_rules') {
             // System-wide, real-paginated listing of qualification rules across all users
-            $page = (int) ($_GET['page'] ?? 1);
+            $page = max(1, (int) ($_GET['page'] ?? 1));
             $per_page = min(max((int) ($_GET['per_page'] ?? 25), 5), 200);
             $offset = ($page - 1) * $per_page;
             $search = trim((string) ($_GET['search'] ?? ''));
@@ -252,7 +265,7 @@ try {
                 FROM adaptive_qualification_rules aqr
                 JOIN users u ON u.id = aqr.user_id
                 $where
-                ORDER BY aqr.updated_at DESC
+                ORDER BY aqr.updated_at DESC, aqr.id DESC
                 LIMIT $per_page OFFSET $offset
             ", $params);
 
