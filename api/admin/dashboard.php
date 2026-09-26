@@ -71,7 +71,7 @@ try {
             case 'telegram':
                 return [
                     'telegram_linked'    => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM users WHERE telegram_user_id IS NOT NULL AND telegram_linked_at IS NOT NULL")['cnt'],
-                    'telegram_messages_24h' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE DATE(sent_at) = CURDATE()")['cnt'],
+                    'telegram_messages_24h' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE sent_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)")['cnt'],
                     'telegram_failures'  => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE status = 'failed' AND sent_at > DATE_SUB(NOW(), INTERVAL 7 DAY)")['cnt'],
                 ];
             
@@ -86,6 +86,7 @@ try {
                     'adaptive_factor_stats'        => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_factor_stats")['cnt'],
                     'adaptive_qualification_rules' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_qualification_rules")['cnt'],
                     'adaptive_trade_history'       => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_trade_history")['cnt'],
+                    'adaptive_signal_decisions'    => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_signal_decisions")['cnt'],
                 ];
             
             default:
