@@ -43,13 +43,13 @@ class SchemaValidator
             'locked_at', 'locked_by_user_id', 'locked_reason', 'created_at', 'updated_at'
         ],
         'adaptive_trade_history' => [
-            'id', 'user_id', 'trade_id', 'market_category', 'strategy_key',
-            'symbol', 'entry_price', 'exit_price', 'win_loss', 'r_multiple',
-            'recorded_by_actor', 'recorded_by_user', 'created_at'
+            'id', 'user_id', 'trade_id', 'symbol', 'market_category', 'strategy_key',
+            'entry_price', 'exit_price', 'result', 'r_multiple', 'created_at'
         ],
         'adaptive_signal_decisions' => [
-            'id', 'user_id', 'signal_id', 'factor_key', 'market_category',
-            'strategy_key', 'symbol', 'action', 'confidence_score', 'created_at'
+            'id', 'user_id', 'signal_id', 'symbol', 'market_category',
+            'strategy_key', 'direction', 'signal_timestamp', 'telegram_action', 
+            'qualification_band', 'signal_score', 'final_confidence_score', 'created_at'
         ],
         'adaptive_qualification_rules' => [
             'id', 'user_id', 'market_category', 'strategy_key', 'symbol_scope',
@@ -60,7 +60,9 @@ class SchemaValidator
             'enabled', 'created_at', 'updated_at'
         ],
         'adaptive_learning_profiles' => [
-            'id', 'user_id', 'profile_name', 'profile_data', 'is_active', 'created_at', 'updated_at'
+            'id', 'user_id', 'market_category', 'strategy_key', 'symbol_scope',
+            'scope_type', 'trade_count', 'wins', 'losses', 'cancelled',
+            'avg_r_multiple', 'confidence_score', 'created_at', 'updated_at'
         ],
         'trade_outcomes' => [
             'id', 'user_id', 'trade_id', 'strategy', 'entry_time', 'exit_time',

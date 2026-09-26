@@ -59,8 +59,6 @@ try {
     $offset = max(0, (int) ($_GET['offset'] ?? 0));
 
     $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
-    $params[] = $limit;
-    $params[] = $offset;
 
     $lastQuery = "SELECT l.id, l.user_id, u.username, l.signal_id, l.notification_type, l.strategy,
                 l.symbol, l.status, l.telegram_response, l.error_detail, l.sent_at
@@ -71,16 +69,39 @@ try {
           LIMIT ? OFFSET ?";
     $lastParams = $params;
     $stmt = $pdo->prepare($lastQuery);
-    $stmt->execute($lastParams);
+    
+    // Bind all parameters with explicit types
+    $paramIndex = 1;
+    
+    // Bind filter parameters
+    foreach ($params as $value) {
+        if (is_int($value)) {
+            $stmt->bindValue($paramIndex++, $value, \PDO::PARAM_INT);
+        } else {
+            $stmt->bindValue($paramIndex++, $value, \PDO::PARAM_STR);
+        }
+    }
+    
+    // Bind LIMIT and OFFSET as integers
+    $stmt->bindValue($paramIndex++, $limit, \PDO::PARAM_INT);
+    $stmt->bindValue($paramIndex++, $offset, \PDO::PARAM_INT);
+    
+    $stmt->execute();
     $rows = $stmt->fetchAll() ?: [];
 
     // Count total
-    array_pop($params); // Remove OFFSET
-    array_pop($params); // Remove LIMIT
     $lastQuery = "SELECT COUNT(*) FROM telegram_delivery_log l $whereSql";
     $lastParams = $params;
     $countStmt = $pdo->prepare($lastQuery);
-    $countStmt->execute($lastParams);
+    $paramIndex = 1;
+    foreach ($params as $value) {
+        if (is_int($value)) {
+            $countStmt->bindValue($paramIndex++, $value, \PDO::PARAM_INT);
+        } else {
+            $countStmt->bindValue($paramIndex++, $value, \PDO::PARAM_STR);
+        }
+    }
+    $countStmt->execute();
     $total = (int) ($countStmt->fetchColumn() ?: 0);
 
     // Get status stats

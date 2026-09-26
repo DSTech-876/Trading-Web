@@ -10,7 +10,7 @@ function read(filePath) {
 test('layouts nested rewrite is present before generic admin rewrite', () => {
   const htaccess = read('.htaccess');
   const nestedIndex = htaccess.indexOf('RewriteRule ^api/admin/layouts/(.+)$ api/admin/layouts.php?path=$1 [L,QSA]');
-  const genericIndex = htaccess.indexOf('RewriteRule ^api/admin/(users|user|strategies|strategy_access|auth_guard|telegram|profiles|adaptive|notification_preferences|telegram_delivery_log|dashboard|preferences|audit_trail|impersonate|notifications_center|search|users_management|strategy_stats|adaptive_intelligence|logs|telegram_queue|performance|layouts|optimize-db)$ api/admin/$1.php [L,QSA]');
+  const genericIndex = htaccess.indexOf('RewriteRule ^api/admin/(users|user|strategies|strategy_access|auth_guard|telegram|profiles|adaptive|notification_preferences|telegram_delivery_log|dashboard|preferences|audit_trail|impersonate|notifications_center|search|users_management|strategy_stats|adaptive_intelligence|logs|telegram_queue|performance|layouts|optimize-db|schema_validation)$ api/admin/$1.php [L,QSA]');
   assert.ok(nestedIndex >= 0);
   assert.ok(genericIndex > nestedIndex);
 });
