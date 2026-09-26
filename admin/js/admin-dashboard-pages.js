@@ -735,11 +735,14 @@
 
       async function load() {
         try {
-          const [summary, apiTimes, queue] = await Promise.all([
+          const [summaryRaw, apiTimesRaw, queueRaw] = await Promise.all([
             api('/admin/performance'),
             api('/admin/performance?action=api-response-times&interval=hour'),
             api('/admin/telegram_queue')
           ]);
+          const summary = summaryRaw || {};
+          const apiTimes = apiTimesRaw || {};
+          const queue = queueRaw || {};
           const gauges = document.getElementById('performanceGauges');
           gauges.innerHTML = '';
           [
