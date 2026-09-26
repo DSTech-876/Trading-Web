@@ -65,8 +65,8 @@ class SchemaValidator
             'avg_r_multiple', 'confidence_score', 'created_at', 'updated_at'
         ],
         'trade_outcomes' => [
-            'id', 'user_id', 'trade_id', 'strategy', 'entry_time', 'exit_time',
-            'entry_price', 'exit_price', 'direction', 'outcome', 'r_multiple', 'created_at'
+            'id', 'user_id', 'trade_id', 'strategy_type', 'entry_timestamp', 'exit_timestamp',
+            'entry_price', 'exit_price', 'direction', 'outcome', 'created_at'
         ]
     ];
 
