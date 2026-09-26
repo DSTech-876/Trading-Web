@@ -55,7 +55,7 @@ SET @users_has_subscription_plan := (
       AND COLUMN_NAME = 'subscription_plan'
 );
 SET @users_sql := IF(@users_has_subscription_plan = 0,
-    "ALTER TABLE users ADD COLUMN subscription_plan ENUM('trial','weekly','monthly') DEFAULT NULL AFTER subscription_status",
+    'ALTER TABLE users ADD COLUMN subscription_plan ENUM(''trial'',''weekly'',''monthly'') DEFAULT NULL AFTER subscription_status',
     'SELECT 1');
 PREPARE users_stmt FROM @users_sql;
 EXECUTE users_stmt;
