@@ -531,6 +531,136 @@ CREATE TABLE IF NOT EXISTS adaptive_trade_history (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ──────────────────────────────────────────────
+-- Migration: Add lifecycle/notification columns to adaptive_trade_history
+-- for existing deployments, and widen the result enum
+-- ──────────────────────────────────────────────
+SET @adaptive_trade_has_terminal_reason := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'terminal_reason'
+);
+SET @sql := IF(@adaptive_trade_has_terminal_reason = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN terminal_reason VARCHAR(50) DEFAULT NULL AFTER result',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_completion_timestamp := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'completion_timestamp'
+);
+SET @sql := IF(@adaptive_trade_has_completion_timestamp = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN completion_timestamp DATETIME DEFAULT NULL AFTER terminal_reason',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_partial_tp_hit := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'partial_tp_hit'
+);
+SET @sql := IF(@adaptive_trade_has_partial_tp_hit = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN partial_tp_hit TINYINT(1) NOT NULL DEFAULT 0 AFTER profit_points',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_partial_tp_level := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'partial_tp_level'
+);
+SET @sql := IF(@adaptive_trade_has_partial_tp_level = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN partial_tp_level DECIMAL(18,8) DEFAULT NULL AFTER partial_tp_hit',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_partial_tp_timestamp := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'partial_tp_timestamp'
+);
+SET @sql := IF(@adaptive_trade_has_partial_tp_timestamp = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN partial_tp_timestamp DATETIME DEFAULT NULL AFTER partial_tp_level',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_entry_alert_sent := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'entry_alert_sent'
+);
+SET @sql := IF(@adaptive_trade_has_entry_alert_sent = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN entry_alert_sent TINYINT(1) NOT NULL DEFAULT 0 AFTER partial_tp_timestamp',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_outcome_notification_sent := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'outcome_notification_sent'
+);
+SET @sql := IF(@adaptive_trade_has_outcome_notification_sent = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN outcome_notification_sent TINYINT(1) NOT NULL DEFAULT 0 AFTER entry_alert_sent',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_has_partial_tp_notification_sent := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'partial_tp_notification_sent'
+);
+SET @sql := IF(@adaptive_trade_has_partial_tp_notification_sent = 0,
+    'ALTER TABLE adaptive_trade_history ADD COLUMN partial_tp_notification_sent TINYINT(1) NOT NULL DEFAULT 0 AFTER outcome_notification_sent',
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @adaptive_trade_result_type := (
+    SELECT COLUMN_TYPE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'adaptive_trade_history'
+      AND COLUMN_NAME = 'result'
+);
+SET @sql := IF(@adaptive_trade_result_type NOT LIKE '%EXPIRED%',
+    "ALTER TABLE adaptive_trade_history MODIFY COLUMN result ENUM('WIN','LOSS','CANCELLED','EXPIRED','BREAKEVEN') NOT NULL",
+    'SELECT 1');
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- ──────────────────────────────────────────────
 -- Persistent confluence factor statistics
 -- ──────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS adaptive_factor_stats (
