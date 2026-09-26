@@ -743,7 +743,7 @@
           const gauges = document.getElementById('performanceGauges');
           gauges.innerHTML = '';
           [
-            ['CPU (derived)', Math.min(100, Math.round((summary.processing.active_requests || 0) * 12 + 18)), 'microchip', 'primary'],
+            ['CPU (derived)', Math.min(100, Math.round((summary.processing?.active_requests || 0) * 12 + 18)), 'microchip', 'primary'],
             ['Memory', Math.round(summary.memory?.percentage_used || 0), 'memory', 'warning'],
             ['Database', Math.min(100, Math.round((summary.database?.active_connections || 0) * 6 + 24)), 'database', 'info'],
             ['Queue Health', queue.health_indicators?.queue_healthy ? 92 : 54, 'paper-plane', queue.health_indicators?.queue_healthy ? 'success' : 'danger']
