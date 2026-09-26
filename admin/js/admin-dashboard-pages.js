@@ -326,25 +326,29 @@
       ].forEach((item) => grid.insertAdjacentHTML('beforeend', AdminComponents.createKPICard({ title: item[0], value: item[1], icon: item[2], color: item[3], size: 'md' })));
     }
 
-    function renderPerformance(stats) {
+    async function renderPerformance(stats) {
       const host = document.getElementById('tab-performance');
-      host.innerHTML = `<div class="row g-4"><div class="col-12 col-xl-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Performance Trend</h3><div class="chart-canvas"><canvas id="strategyPerformanceChart"></canvas></div></div></div><div class="col-12 col-xl-4"><div class="chart-panel p-3"><h3 class="h6 mb-3">Trade Outcome Mix</h3><div class="chart-canvas" style="min-height:240px"><canvas id="strategyOutcomeChart"></canvas></div></div></div></div>`;
+      host.innerHTML = `<div class="row g-4"><div class="col-12 col-xl-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Performance Trend (Last 4 Weeks)</h3><div class="chart-canvas"><canvas id="strategyPerformanceChart"></canvas></div></div></div><div class="col-12 col-xl-4"><div class="chart-panel p-3"><h3 class="h6 mb-3">Trade Outcome Mix</h3><div class="chart-canvas" style="min-height:240px"><canvas id="strategyOutcomeChart"></canvas></div></div></div></div>`;
       const palette = chartPalette();
-      const labels = ['Week 1', 'Week 2', 'Week 3', 'Week 4', 'Today'];
-      createChart(document.getElementById('strategyPerformanceChart'), {
-        type: 'line',
-        data: { labels, datasets: [
-          { label: 'Win Rate %', data: deriveSeries(stats.trades_30d?.win_rate || 0, labels.length, 4), borderColor: palette.success, tension: .35 },
-          { label: 'Avg Return %', data: deriveSeries(stats.trades_30d?.avg_return || 0, labels.length, 1.1), borderColor: palette.primary, tension: .35 },
-          { label: 'Trades', data: deriveSeries(stats.trades_30d?.total || 0, labels.length, 3), borderColor: palette.warning, tension: .35, yAxisID: 'y1' }
-        ] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y1: { position: 'right', ticks: { color: palette.text }, grid: { drawOnChartArea: false } } } }
-      }, { get instance() { return charts.perf; }, set instance(v) { charts.perf = v; } });
       createChart(document.getElementById('strategyOutcomeChart'), {
         type: 'doughnut',
         data: { labels: ['Wins', 'Losses', 'Breakeven'], datasets: [{ data: [stats.trades_30d?.wins || 0, stats.trades_30d?.losses || 0, stats.trades_30d?.breakeven || 0], backgroundColor: [palette.success, palette.danger, palette.warning] }] },
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } } }
       }, { get instance() { return charts.signals; }, set instance(v) { charts.signals = v; } });
+      try {
+        const trend = await api(`/admin/strategy_stats?action=trend&strategy=${encodeURIComponent(strategy)}`);
+        createChart(document.getElementById('strategyPerformanceChart'), {
+          type: 'line',
+          data: { labels: trend.labels || [], datasets: [
+            { label: 'Win Rate %', data: trend.win_rate || [], borderColor: palette.success, tension: .35 },
+            { label: 'Avg Return %', data: trend.avg_return || [], borderColor: palette.primary, tension: .35 },
+            { label: 'Trades', data: trend.total_trades || [], borderColor: palette.warning, tension: .35, yAxisID: 'y1' }
+          ] },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y1: { position: 'right', ticks: { color: palette.text }, grid: { drawOnChartArea: false } } } }
+        }, { get instance() { return charts.perf; }, set instance(v) { charts.perf = v; } });
+      } catch (error) {
+        renderError(document.getElementById('strategyPerformanceChart').closest('.chart-panel'), error.message || 'Performance trend unavailable.');
+      }
     }
 
     async function loadSignals(page, perPage) {
@@ -370,27 +374,34 @@
       }
     }
 
-    async function loadLearning(stats) {
+    async function loadLearning() {
       const host = document.getElementById('tab-learning');
-      host.innerHTML = '<div class="row g-3 mb-4" id="learningKpis"></div><div class="row g-4"><div class="col-12 col-xl-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Adaptive Confidence Trend</h3><div class="chart-canvas"><canvas id="learningChart"></canvas></div></div></div><div class="col-12 col-xl-4"><div class="section-surface h-100"><h3 class="h6 mb-3">Learning Notes</h3><div class="mini-list" id="learningNotes"></div></div></div></div>';
-      const grid = host.querySelector('#learningKpis');
-      [
-        ['Profiles Influenced', formatNumber(stats.signals?.active || 0), 'brain', 'info'],
-        ['Qualified Rules', formatNumber(stats.trades_30d?.profitable_trades || 0), 'sliders', 'success'],
-        ['Confidence', formatPercent((stats.trades_30d?.win_rate || 0) / 100 * .92 * 100, 1), 'shield', 'primary'],
-        ['Learning Velocity', formatNumber(stats.today?.wins || 0), 'gauge', 'warning']
-      ].forEach((item) => grid.insertAdjacentHTML('beforeend', AdminComponents.createKPICard({ title: item[0], value: item[1], icon: item[2], color: item[3], size: 'md' })));
-      host.querySelector('#learningNotes').innerHTML = [
-        `Rule confidence improving for ${escapeHtml(strategyLabel)}.`,
-        `${formatNumber(stats.today?.wins)} winning samples added today.`,
-        `${formatNumber(stats.signals?.active)} active signals currently influencing adaptations.`
-      ].map((text) => `<div class="mini-item"><div class="text-muted small">${text}</div></div>`).join('');
-      const palette = chartPalette();
-      createChart(document.getElementById('learningChart'), {
-        type: 'line',
-        data: { labels: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], datasets: [{ label: 'Confidence %', data: deriveSeries(stats.trades_30d?.win_rate || 0, 7, 3), borderColor: palette.violet, backgroundColor: 'rgba(139,92,246,.15)', fill: true, tension: .35 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } }
-      }, { get instance() { return charts.learning; }, set instance(v) { charts.learning = v; } });
+      host.innerHTML = '<div class="row g-3 mb-4" id="learningKpis"></div><div class="row g-4"><div class="col-12 col-xl-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Adaptive Confidence by Strategy</h3><div class="chart-canvas"><canvas id="learningChart"></canvas></div></div></div><div class="col-12 col-xl-4"><div class="section-surface h-100"><h3 class="h6 mb-3">Learning Notes</h3><div class="mini-list" id="learningNotes"></div></div></div></div>';
+      try {
+        const adaptiveStats = await api('/admin/adaptive_intelligence?action=stats');
+        const strategyEntry = (adaptiveStats.by_strategy || []).find((item) => item.strategy === strategy) || { count: 0, avg_confidence: 0 };
+        const rulesEntry = (adaptiveStats.rules_by_strategy || []).find((item) => item.strategy === strategy) || { count: 0 };
+        const grid = host.querySelector('#learningKpis');
+        [
+          ['Learning Profiles', formatNumber(strategyEntry.count), 'brain', 'info'],
+          ['Qualification Rules', formatNumber(rulesEntry.count), 'sliders', 'success'],
+          ['Avg Confidence', formatPercent(strategyEntry.avg_confidence || 0, 1), 'shield', 'primary'],
+          ['Trade History Records', formatNumber(adaptiveStats.trade_history_count), 'clock-rotate-left', 'warning']
+        ].forEach((item) => grid.insertAdjacentHTML('beforeend', AdminComponents.createKPICard({ title: item[0], value: item[1], icon: item[2], color: item[3], size: 'md' })));
+        host.querySelector('#learningNotes').innerHTML = [
+          `${formatNumber(strategyEntry.count)} adaptive learning profiles tracked for ${escapeHtml(strategyLabel)}.`,
+          `${formatNumber(rulesEntry.count)} qualification rules configured for this strategy.`,
+          `Average confidence score across users: ${formatPercent(strategyEntry.avg_confidence || 0, 1)}.`
+        ].map((text) => `<div class="mini-item"><div class="text-muted small">${text}</div></div>`).join('');
+        const palette = chartPalette();
+        createChart(document.getElementById('learningChart'), {
+          type: 'bar',
+          data: { labels: (adaptiveStats.by_strategy || []).map((item) => item.strategy), datasets: [{ label: 'Avg Confidence Score', data: (adaptiveStats.by_strategy || []).map((item) => Number(item.avg_confidence || 0)), backgroundColor: (adaptiveStats.by_strategy || []).map((item) => item.strategy === strategy ? palette.violet : palette.grid) }] },
+          options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } }
+        }, { get instance() { return charts.learning; }, set instance(v) { charts.learning = v; } });
+      } catch (error) {
+        renderError(host, error.message || 'Adaptive learning data unavailable.');
+      }
     }
 
     async function loadNotifications() {
@@ -476,16 +487,20 @@
       host.innerHTML = '<div class="row g-3" id="adaptiveOverviewKpis"></div><div class="row g-4 mt-1"><div class="col-12 col-xl-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Profiles by Strategy</h3><div class="chart-canvas"><canvas id="adaptiveStrategyChart"></canvas></div></div></div><div class="col-12 col-xl-4"><div class="section-surface h-100"><h3 class="h6 mb-3">System Snapshot</h3><div class="mini-list" id="adaptiveSnapshot"></div></div></div></div>';
       const grid = host.querySelector('#adaptiveOverviewKpis');
       [
-        ['Total Profiles', formatNumber(stats.total_profiles), 'brain', 'primary'],
+        ['Learning Profiles', formatNumber(stats.total_profiles), 'brain', 'primary'],
         ['Total Rules', formatNumber(stats.total_rules), 'sliders', 'info'],
         ['Active Profiles', formatNumber(stats.active_profiles), 'chart-line', 'success'],
-        ['Users Learning', formatNumber(stats.users_with_adaptive), 'users', 'warning']
+        ['Users Learning', formatNumber(stats.users_with_adaptive), 'users', 'warning'],
+        ['Raw Adaptive Profiles', formatNumber(stats.raw_adaptive_profiles), 'database', 'primary'],
+        ['Factor Stats', formatNumber(stats.factor_stats_count), 'sliders', 'info'],
+        ['Trade History Records', formatNumber(stats.trade_history_count), 'clock-rotate-left', 'success'],
+        ['Signal Decisions', formatNumber(stats.signal_decisions_count), 'bullhorn', 'warning']
       ].forEach((item) => grid.insertAdjacentHTML('beforeend', AdminComponents.createKPICard({ title: item[0], value: item[1], icon: item[2], color: item[3], size: 'md' })));
-      host.querySelector('#adaptiveSnapshot').innerHTML = (stats.by_strategy || []).map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.strategy)}</div><div class="text-muted small">${formatNumber(item.count)} profiles</div></div><div class="fw-semibold text-primary">${formatPercent((item.avg_confidence || 0) * 100, 1)}</div></div>`).join('');
+      host.querySelector('#adaptiveSnapshot').innerHTML = (stats.by_strategy || []).map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.strategy)}</div><div class="text-muted small">${formatNumber(item.count)} profiles</div></div><div class="fw-semibold text-primary">${formatPercent((item.avg_confidence || 0), 1)}</div></div>`).join('') || '<div class="text-muted small">No strategy breakdown available.</div>';
       const palette = chartPalette();
       createChart(document.getElementById('adaptiveStrategyChart'), {
         type: 'bar',
-        data: { labels: (stats.by_strategy || []).map((item) => item.strategy), datasets: [{ label: 'Profiles', data: (stats.by_strategy || []).map((item) => item.count), backgroundColor: palette.primary }, { label: 'Avg Confidence %', data: (stats.by_strategy || []).map((item) => Number(item.avg_confidence || 0) * 100), backgroundColor: palette.info }] },
+        data: { labels: (stats.by_strategy || []).map((item) => item.strategy), datasets: [{ label: 'Profiles', data: (stats.by_strategy || []).map((item) => item.count), backgroundColor: palette.primary }, { label: 'Avg Confidence %', data: (stats.by_strategy || []).map((item) => Number(item.avg_confidence || 0)), backgroundColor: palette.info }] },
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } }
       }, { get instance() { return chartRefs.strategy; }, set instance(v) { chartRefs.strategy = v; } });
     }
@@ -494,16 +509,11 @@
       const host = document.getElementById('adaptive-rules');
       renderSkeleton(host, 6, 4);
       try {
-        const users = await api('/admin/search?q=ad&type=users&limit=8').catch(() => ({ results: { users: [] } }));
-        const candidates = (users.results?.users || []).slice(0, 4);
-        const rulePayloads = await Promise.all(candidates.map((user) => api(`/admin/adaptive_intelligence?action=rules&user_id=${user.id}&page=1&per_page=50`).catch(() => ({ rules: [] }))));
-        let rows = rulePayloads.flatMap((payload, index) => (payload.rules || []).map((rule) => ({ ...rule, user_title: candidates[index]?.title || `User #${rule.user_id}` })));
-        if (rulesState.search) rows = rows.filter((item) => JSON.stringify(item).toLowerCase().includes(rulesState.search.toLowerCase()));
-        rows.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
-        const pageRows = rows.slice((rulesState.page - 1) * rulesState.per_page, rulesState.page * rulesState.per_page);
-        host.innerHTML = `<div class="d-flex flex-column flex-lg-row gap-2 mb-3"><input id="adaptiveRulesSearch" class="form-control" placeholder="Search rules, strategy, user" value="${escapeHtml(rulesState.search)}"></div><div class="table-responsive"><table class="table table-hover align-middle"><thead><tr><th>Rule</th><th>User</th><th>Strategy</th><th>Type</th><th>Threshold</th><th>Success</th><th>Updated</th></tr></thead><tbody>${pageRows.map((rule) => `<tr><td>${escapeHtml(rule.rule_name)}</td><td>${escapeHtml(rule.user_title)}</td><td>${escapeHtml(rule.strategy_type)}</td><td>${escapeHtml(rule.rule_type)}</td><td>${escapeHtml(rule.confidence_threshold)}</td><td>${formatNumber(rule.success_count)}/${formatNumber(rule.total_applications)}</td><td>${escapeHtml(formatRelativeOrDate(rule.updated_at))}</td></tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted py-4">No adaptive rules found.</td></tr>'}</tbody></table></div><div id="adaptiveRulesPagination" class="mt-3"></div>`;
+        const payload = await api(`/admin/adaptive_intelligence?action=all_rules&page=${rulesState.page}&per_page=${rulesState.per_page}&search=${encodeURIComponent(rulesState.search)}`);
+        const rows = payload.rules || [];
+        host.innerHTML = `<div class="d-flex flex-column flex-lg-row gap-2 mb-3"><input id="adaptiveRulesSearch" class="form-control" placeholder="Search user, strategy, category" value="${escapeHtml(rulesState.search)}"></div><div class="table-responsive"><table class="table table-hover align-middle"><thead><tr><th>User</th><th>Category</th><th>Strategy</th><th>Symbol Scope</th><th>Reject Below</th><th>Watchlist Below</th><th>High Confidence Min</th><th>Min Samples</th><th>Enabled</th><th>Updated</th></tr></thead><tbody>${rows.map((rule) => `<tr><td>${escapeHtml(rule.display_name || rule.username || ('User #' + rule.user_id))}</td><td>${escapeHtml(rule.market_category)}</td><td>${escapeHtml(rule.strategy_key)}</td><td>${escapeHtml(rule.symbol_scope)}</td><td>${escapeHtml(rule.reject_below)}</td><td>${escapeHtml(rule.watchlist_below)}</td><td>${escapeHtml(rule.high_confidence_min)}</td><td>${formatNumber(rule.min_sample_size)}</td><td>${Number(rule.enabled) ? 'Yes' : 'No'}</td><td>${escapeHtml(formatRelativeOrDate(rule.updated_at))}</td></tr>`).join('') || '<tr><td colspan="10" class="text-center text-muted py-4">No adaptive rules found.</td></tr>'}</tbody></table></div><div class="small text-muted mb-2">Showing ${rows.length} of ${formatNumber(payload.total)} rules</div><div id="adaptiveRulesPagination" class="mt-3"></div>`;
         host.querySelector('#adaptiveRulesSearch').addEventListener('input', AdminComponents.debounce((e) => { rulesState.search = e.target.value; rulesState.page = 1; loadRules(); }, 250));
-        buildPagination(host.querySelector('#adaptiveRulesPagination'), { page: rulesState.page, per_page: rulesState.per_page, last_page: Math.max(1, Math.ceil(rows.length / rulesState.per_page)) }, (page, size) => { rulesState.page = page; rulesState.per_page = size || rulesState.per_page; loadRules(); });
+        buildPagination(host.querySelector('#adaptiveRulesPagination'), { page: payload.page, per_page: payload.per_page, last_page: payload.last_page }, (page, size) => { rulesState.page = page; rulesState.per_page = size || rulesState.per_page; loadRules(); });
       } catch (error) {
         renderError(host, error.message || 'Adaptive rules unavailable.');
       }
@@ -511,32 +521,55 @@
 
     function loadWeights(stats) {
       const host = document.getElementById('adaptive-weights');
-      host.innerHTML = '<div class="row g-4"><div class="col-12 col-xl-7"><div class="chart-panel p-3"><h3 class="h6 mb-3">Confluence Weight Distribution</h3><div class="chart-canvas"><canvas id="adaptiveWeightsChart"></canvas></div></div></div><div class="col-12 col-xl-5"><div class="section-surface h-100"><h3 class="h6 mb-3">Weight Notes</h3><div class="mini-list">' + (stats.by_strategy || []).map((item, index) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.strategy)}</div><div class="text-muted small">Weight band ${index + 1}</div></div><div class="fw-semibold">${formatPercent((item.avg_confidence || 0) * 100, 1)}</div></div>`).join('') + '</div></div></div></div>';
+      const strategies = stats.by_strategy || [];
+      host.innerHTML = '<div class="row g-4"><div class="col-12 col-xl-7"><div class="chart-panel p-3"><h3 class="h6 mb-3">Average Confidence by Strategy</h3><div class="chart-canvas"><canvas id="adaptiveWeightsChart"></canvas></div></div></div><div class="col-12 col-xl-5"><div class="section-surface h-100"><h3 class="h6 mb-3">Strategy Confidence</h3><div class="mini-list">' + (strategies.map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.strategy)}</div><div class="text-muted small">${formatNumber(item.count)} learning profiles</div></div><div class="fw-semibold">${formatPercent(item.avg_confidence || 0, 1)}</div></div>`).join('') || '<div class="text-muted small">No adaptive strategy data available.</div>') + '</div></div></div></div>';
       const palette = chartPalette();
       createChart(document.getElementById('adaptiveWeightsChart'), {
-        type: 'radar',
-        data: { labels: ['Trend', 'Momentum', 'Volume', 'Volatility', 'Risk', 'Session'], datasets: (stats.by_strategy || []).slice(0, 3).map((item, index) => ({ label: item.strategy, data: deriveSeries((item.avg_confidence || 0) * 100, 6, 6), borderColor: [palette.primary, palette.success, palette.warning][index], backgroundColor: ['rgba(59,130,246,.15)','rgba(16,185,129,.15)','rgba(245,158,11,.15)'][index] })) },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { r: { angleLines: { color: palette.grid }, grid: { color: palette.grid }, pointLabels: { color: palette.text }, ticks: { color: palette.text } } } }
+        type: 'bar',
+        data: { labels: strategies.map((item) => item.strategy), datasets: [{ label: 'Avg Confidence Score', data: strategies.map((item) => Number(item.avg_confidence || 0)), backgroundColor: palette.primary }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } }
       }, { get instance() { return chartRefs.weights; }, set instance(v) { chartRefs.weights = v; } });
     }
 
-    async function loadUsers(stats) {
+    async function loadUsers() {
       const host = document.getElementById('adaptive-users');
-      const search = await api('/admin/search?q=user&type=users&limit=12').catch(() => ({ results: { users: [] } }));
-      const users = search.results?.users || [];
-      host.innerHTML = `<div class="row g-3">${users.slice(0, 6).map((user, index) => `<div class="col-12 col-md-6 col-xl-4"><div class="section-surface h-100"><div class="d-flex justify-content-between mb-2"><div><div class="fw-semibold">${escapeHtml(user.title)}</div><div class="text-muted small">${escapeHtml(user.subtitle)}</div></div><span class="badge bg-info">Stage ${index + 1}</span></div><div class="small text-muted mb-2">Adaptive footprint estimate based on aggregated rule density.</div><div class="progress mb-2" style="height:8px"><div class="progress-bar" style="width:${Math.min(100, 35 + index * 9)}%"></div></div><div class="small text-muted">Confidence ${formatPercent(55 + index * 6, 0)}</div></div></div>`).join('') || '<div class="text-muted small">No user learning data available.</div>'}</div>`;
+      renderSkeleton(host, 3, 3);
+      try {
+        const payload = await api('/admin/adaptive_intelligence?action=all_profiles&page=1&per_page=6');
+        const rows = payload.profiles || [];
+        host.innerHTML = `<div class="row g-3">${rows.map((profile) => `<div class="col-12 col-md-6 col-xl-4"><div class="section-surface h-100"><div class="d-flex justify-content-between mb-2"><div><div class="fw-semibold">${escapeHtml(profile.display_name || profile.username || ('User #' + profile.user_id))}</div><div class="text-muted small">${escapeHtml(profile.strategy_key)} · ${escapeHtml(profile.market_category)}</div></div><span class="badge bg-info">${escapeHtml(profile.scope_type)}</span></div><div class="small text-muted mb-2">Trades: ${formatNumber(profile.trade_count)} (${formatNumber(profile.wins)}W / ${formatNumber(profile.losses)}L)</div><div class="progress mb-2" style="height:8px"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(profile.confidence_score || 0)))}%"></div></div><div class="small text-muted">Confidence ${formatPercent(profile.confidence_score || 0, 1)}</div></div></div>`).join('') || '<div class="text-muted small">No user learning data available.</div>'}</div>`;
+      } catch (error) {
+        renderError(host, error.message || 'Unable to load user learning data.');
+      }
     }
 
-    function loadRecent(stats) {
+    async function loadRecent() {
       const host = document.getElementById('adaptive-recent');
-      host.innerHTML = `<div class="mini-list">${(stats.by_strategy || []).map((item, index) => `<div class="section-surface"><div class="d-flex justify-content-between gap-3"><div><div class="fw-semibold">${escapeHtml(item.strategy)} adaptation #${index + 1}</div><div class="text-muted small">Confidence nudged to ${formatPercent((item.avg_confidence || 0) * 100, 1)} after fresh trade outcomes.</div></div><span class="badge bg-${index % 2 === 0 ? 'success' : 'warning'}">${index % 2 === 0 ? 'Applied' : 'Queued'}</span></div></div>`).join('')}</div>`;
+      renderSkeleton(host, 4, 2);
+      try {
+        const payload = await api('/admin/adaptive_intelligence?action=all_profiles&page=1&per_page=10');
+        const rows = payload.profiles || [];
+        host.innerHTML = `<div class="mini-list">${rows.map((profile) => `<div class="section-surface"><div class="d-flex justify-content-between gap-3"><div><div class="fw-semibold">${escapeHtml(profile.display_name || profile.username || ('User #' + profile.user_id))} · ${escapeHtml(profile.strategy_key)}</div><div class="text-muted small">Confidence ${formatPercent(profile.confidence_score || 0, 1)} from ${formatNumber(profile.trade_count)} trades.</div></div><span class="text-muted small">${escapeHtml(formatRelativeOrDate(profile.updated_at))}</span></div></div>`).join('') || '<div class="text-muted small">No recent adaptations recorded.</div>'}</div>`;
+      } catch (error) {
+        renderError(host, error.message || 'Unable to load recent adaptations.');
+      }
     }
 
-    function loadPerformance(stats) {
+    async function loadPerformance() {
       const host = document.getElementById('adaptive-performance');
-      host.innerHTML = '<div class="chart-panel p-3"><h3 class="h6 mb-3">Adaptive Performance Trend</h3><div class="chart-canvas"><canvas id="adaptivePerformanceChart"></canvas></div></div>';
-      const palette = chartPalette();
-      createChart(document.getElementById('adaptivePerformanceChart'), { type: 'line', data: { labels: ['-6d','-5d','-4d','-3d','-2d','Yesterday','Today'], datasets: [{ label: 'Qualified Profiles', data: deriveSeries(stats.active_profiles || 0, 7, 5), borderColor: palette.success, tension: .35 }, { label: 'Rule Activations', data: deriveSeries(stats.total_rules || 0, 7, 10), borderColor: palette.primary, tension: .35 }, { label: 'Users Learning', data: deriveSeries(stats.users_with_adaptive || 0, 7, 3), borderColor: palette.warning, tension: .35 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } } }, { get instance() { return chartRefs.performance; }, set instance(v) { chartRefs.performance = v; } });
+      host.innerHTML = '<div class="chart-panel p-3"><h3 class="h6 mb-3">Adaptive Activity Trend (7 Days)</h3><div class="chart-canvas"><canvas id="adaptivePerformanceChart"></canvas></div></div>';
+      try {
+        const trend = await api('/admin/adaptive_intelligence?action=trend');
+        const palette = chartPalette();
+        createChart(document.getElementById('adaptivePerformanceChart'), { type: 'line', data: { labels: trend.labels || [], datasets: [
+          { label: 'Trade History Records', data: trend.trades || [], borderColor: palette.primary, tension: .35 },
+          { label: 'Trade Wins', data: trend.wins || [], borderColor: palette.success, tension: .35 },
+          { label: 'Rules Updated', data: trend.rule_updates || [], borderColor: palette.warning, tension: .35 },
+          { label: 'Users With Updated Profiles', data: trend.users_active || [], borderColor: palette.info, tension: .35 }
+        ] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } } }, { get instance() { return chartRefs.performance; }, set instance(v) { chartRefs.performance = v; } });
+      } catch (error) {
+        renderError(host, error.message || 'Adaptive activity trend unavailable.');
+      }
     }
 
     async function loadAll() {
@@ -545,9 +578,9 @@
         loadOverview(stats);
         loadRules();
         loadWeights(stats);
-        loadUsers(stats);
-        loadRecent(stats);
-        loadPerformance(stats);
+        loadUsers();
+        loadRecent();
+        loadPerformance();
       } catch (error) {
         showPageAlert(error.message || 'Adaptive intelligence data unavailable.', 'error');
       }
@@ -602,22 +635,28 @@
     }
 
     async function loadSection(user, section) {
-      if (section === 'Learning Profile' || section === 'Adaptive Rules') {
+      if (section === 'Learning Profile') {
         const payload = await api(`/admin/adaptive_intelligence?user_id=${user.id}&page=1&per_page=20`);
+        return `<div class="row g-3">${(payload.profiles || []).map((profile) => `<div class="col-12 col-md-6"><div class="section-surface h-100"><div class="fw-semibold mb-1">${escapeHtml(profile.strategy_key)}</div><div class="small text-muted mb-2">${escapeHtml(profile.scope_type)} · ${escapeHtml(profile.market_category)}</div><div class="small">Trades analyzed: ${formatNumber(profile.trade_count)}<br>Wins: ${formatNumber(profile.wins)} · Losses: ${formatNumber(profile.losses)}<br>Confidence: ${formatPercent(profile.confidence_score || 0, 1)}</div></div></div>`).join('') || '<div class="text-muted small">No learning profiles found.</div>'}</div>`;
+      }
+      if (section === 'Adaptive Rules') {
         const rules = await api(`/admin/adaptive_intelligence?action=rules&user_id=${user.id}&page=1&per_page=20`).catch(() => ({ rules: [] }));
-        if (section === 'Learning Profile') {
-          return `<div class="row g-3">${(payload.profiles || []).map((profile) => `<div class="col-12 col-md-6"><div class="section-surface h-100"><div class="fw-semibold mb-1">${escapeHtml(profile.strategy_type)}</div><div class="small text-muted mb-2">Stage ${escapeHtml(profile.learning_stage)}</div><div class="small">Trades analyzed: ${formatNumber(profile.trades_analyzed)}<br>Wins captured: ${formatNumber(profile.wins_captured)}<br>Confidence: ${formatPercent((profile.overall_confidence || 0) * 100, 1)}</div></div></div>`).join('') || '<div class="text-muted small">No learning profiles found.</div>'}</div>`;
-        }
-        return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Rule</th><th>Strategy</th><th>Threshold</th><th>Applications</th></tr></thead><tbody>${(rules.rules || []).map((rule) => `<tr><td>${escapeHtml(rule.rule_name)}</td><td>${escapeHtml(rule.strategy_type)}</td><td>${escapeHtml(rule.confidence_threshold)}</td><td>${formatNumber(rule.total_applications)}</td></tr>`).join('') || '<tr><td colspan="4" class="text-muted text-center py-4">No rules available.</td></tr>'}</tbody></table></div>`;
+        return `<div class="table-responsive"><table class="table align-middle"><thead><tr><th>Category</th><th>Strategy</th><th>Reject Below</th><th>Watchlist Below</th><th>High Confidence Min</th><th>Min Samples</th></tr></thead><tbody>${(rules.rules || []).map((rule) => `<tr><td>${escapeHtml(rule.market_category)}</td><td>${escapeHtml(rule.strategy_key)}</td><td>${escapeHtml(rule.reject_below)}</td><td>${escapeHtml(rule.watchlist_below)}</td><td>${escapeHtml(rule.high_confidence_min)}</td><td>${formatNumber(rule.min_sample_size)}</td></tr>`).join('') || '<tr><td colspan="6" class="text-muted text-center py-4">No rules available.</td></tr>'}</tbody></table></div>`;
       }
       if (section === 'Confluence Weights') {
-        return `<div class="row g-3">${['Trend','Momentum','Volume','Volatility','Session','Risk'].map((label, index) => `<div class="col-12 col-md-6"><div class="section-surface"><div class="d-flex justify-content-between"><span>${label}</span><strong>${formatPercent(52 + index * 6, 0)}</strong></div><div class="progress mt-2" style="height:8px"><div class="progress-bar" style="width:${52 + index * 6}%"></div></div></div></div>`).join('')}</div>`;
+        const detail = await api(`/admin/adaptive?action=detail&user_id=${user.id}`).catch(() => ({ factor_stats: [] }));
+        const factors = (detail.factor_stats || []).slice(0, 12);
+        return `<div class="row g-3">${factors.map((factor) => `<div class="col-12 col-md-6"><div class="section-surface"><div class="d-flex justify-content-between"><span>${escapeHtml(factor.factor_key)}</span><strong>${formatNumber(factor.current_weight)}</strong></div><div class="progress mt-2" style="height:8px"><div class="progress-bar" style="width:${Math.max(0, Math.min(100, Number(factor.current_weight || 0) * 10))}%"></div></div><div class="small text-muted mt-1">Sample size: ${formatNumber(factor.sample_size)}</div></div></div>`).join('') || '<div class="text-muted small">No confluence factor statistics recorded for this user.</div>'}</div>`;
       }
       if (section === 'Trade History') {
-        const logs = await api(`/admin/logs?source=strategy&search=${encodeURIComponent(user.title || user.subtitle || '')}&limit=15`).catch(() => ({ logs: [] }));
-        return `<div class="mini-list">${(logs.logs || []).map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.message)}</div><div class="text-muted small">${escapeHtml(formatRelativeOrDate(item.created_at))}</div></div><span class="badge bg-secondary">${escapeHtml(item.level)}</span></div>`).join('') || '<div class="text-muted small">No matching trade history logs found.</div>'}</div>`;
+        const detail = await api(`/admin/adaptive?action=detail&user_id=${user.id}`).catch(() => ({ trades: [] }));
+        const trades = detail.trades || [];
+        return `<div class="mini-list">${trades.map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.symbol)} · ${escapeHtml(item.strategy_key)}</div><div class="text-muted small">${escapeHtml(formatRelativeOrDate(item.created_at))}</div></div><span class="badge bg-${item.result === 'WIN' ? 'success' : item.result === 'LOSS' ? 'danger' : 'secondary'}">${escapeHtml(item.result)}</span></div>`).join('') || '<div class="text-muted small">No adaptive trade history found for this user.</div>'}</div>`;
       }
-      return `<div class="row g-3"><div class="col-12 col-lg-8"><div class="chart-panel p-3"><h3 class="h6 mb-3">Performance Analytics</h3><div class="chart-canvas"><canvas id="userPerfChart"></canvas></div></div></div><div class="col-12 col-lg-4"><div class="section-surface h-100"><h3 class="h6 mb-3">Highlights</h3><div class="mini-list"><div class="mini-item"><div>Learning momentum</div><strong>${formatPercent(74,0)}</strong></div><div class="mini-item"><div>Risk alignment</div><strong>${formatPercent(68,0)}</strong></div><div class="mini-item"><div>Signal acceptance</div><strong>${formatPercent(81,0)}</strong></div></div></div></div></div>`;
+      const detail = await api(`/admin/adaptive?action=detail&user_id=${user.id}`).catch(() => ({ pipeline_diagnostics: {}, ingestion_diagnostics: {} }));
+      const pipeline = detail.pipeline_diagnostics || {};
+      const ingestion = detail.ingestion_diagnostics || {};
+      return `<div class="row g-3"><div class="col-12 col-lg-8"><div class="section-surface h-100"><h3 class="h6 mb-3">Pipeline Diagnostics</h3><table class="table mb-0"><tbody><tr><th>Generated Signals</th><td>${formatNumber(pipeline.generated_signals)}</td></tr><tr><th>Opened Trades</th><td>${formatNumber(pipeline.opened_trades)}</td></tr><tr><th>Closed Trades</th><td>${formatNumber(pipeline.closed_trades)}</td></tr><tr><th>Recorded Wins</th><td>${formatNumber(pipeline.recorded_wins)}</td></tr><tr><th>Recorded Losses</th><td>${formatNumber(pipeline.recorded_losses)}</td></tr></tbody></table></div></div><div class="col-12 col-lg-4"><div class="section-surface h-100"><h3 class="h6 mb-3">Ingestion Trust</h3><div class="mini-list"><div class="mini-item"><div>Trusted rate</div><strong>${formatPercent(ingestion.trusted_rate_pct || 0, 1)}</strong></div><div class="mini-item"><div>Untrusted rate</div><strong>${formatPercent(ingestion.untrusted_rate_pct || 0, 1)}</strong></div><div class="mini-item"><div>Trusted (24h)</div><strong>${formatNumber(ingestion.trusted_24h)}</strong></div></div></div></div></div>`;
     }
 
     async function searchUsers(query) {
@@ -746,11 +785,11 @@
           const gauges = document.getElementById('performanceGauges');
           gauges.innerHTML = '';
           [
-            ['CPU (derived)', Math.min(100, Math.round((summary.processing?.active_requests || 0) * 12 + 18)), 'microchip', 'primary'],
-            ['Memory', Math.round(summary.memory?.percentage_used || 0), 'memory', 'warning'],
-            ['Database', Math.min(100, Math.round((summary.database?.active_connections || 0) * 6 + 24)), 'database', 'info'],
-            ['Queue Health', queue.health_indicators?.queue_healthy ? 92 : 54, 'paper-plane', queue.health_indicators?.queue_healthy ? 'success' : 'danger']
-          ].forEach((item) => gauges.insertAdjacentHTML('beforeend', `<div class="col-12 col-sm-6 col-xl-3"><div class="card kpi-card border-${item[3]}"><div class="card-body"><div class="d-flex justify-content-between align-items-center mb-3"><div><div class="text-muted small">${item[0]}</div><div class="h3 mb-0">${item[1]}%</div></div><div class="kpi-icon text-${item[3]}"><i class="fas fa-${item[2]}"></i></div></div><div class="progress" style="height:10px"><div class="progress-bar bg-${item[3]}" style="width:${item[1]}%"></div></div></div></div></div>`));
+            ['Memory Used', Math.round(summary.memory?.percentage_used || 0), 'memory', 'warning', '%'],
+            ['Active Requests', formatNumber(summary.processing?.active_requests), 'microchip', 'primary', ''],
+            ['DB Connections', formatNumber(summary.database?.active_connections), 'database', 'info', ''],
+            ['Queue Health', queue.health_indicators?.queue_healthy ? 'Healthy' : 'Degraded', 'paper-plane', queue.health_indicators?.queue_healthy ? 'success' : 'danger', '']
+          ].forEach((item) => gauges.insertAdjacentHTML('beforeend', `<div class="col-12 col-sm-6 col-xl-3"><div class="card kpi-card border-${item[3]}"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><div><div class="text-muted small">${item[0]}</div><div class="h3 mb-0">${item[1]}${item[4]}</div></div><div class="kpi-icon text-${item[3]}"><i class="fas fa-${item[2]}"></i></div></div></div></div></div>`));
           document.getElementById('liveCounters').innerHTML = `
             <div class="mini-item"><div>Telegram queue</div><strong>${formatNumber(summary.processing?.telegram_queue)}</strong></div>
             <div class="mini-item"><div>Active requests</div><strong>${formatNumber(summary.processing?.active_requests)}</strong></div>
@@ -758,7 +797,7 @@
             <div class="mini-item"><div>Avg delivery</div><strong>${queue.today_stats?.avg_delivery_time_sec || '—'}s</strong></div>`;
           document.getElementById('cronJobsTable').innerHTML = `<tr><td>Scheduled Tasks</td><td>${formatNumber(summary.processing?.scheduled_jobs_total)}</td><td>${formatNumber(summary.processing?.scheduled_jobs_running)}</td><td><span class="badge bg-${summary.processing?.scheduled_jobs_running ? 'success' : 'secondary'}">${summary.processing?.scheduled_jobs_running ? 'Active' : 'Idle'}</span></td></tr>`;
           const palette = chartPalette();
-          createChart(document.getElementById('processingChart'), { type: 'line', data: { labels: ['-30m','-25m','-20m','-15m','-10m','-5m','Now'], datasets: [{ label: 'Signals/min', data: deriveSeries(summary.database?.signal_queue || 0, 7, 8).map((v, i) => Math.max(1, Math.round((summary.processing?.active_requests || 1) * (i + 3)))), borderColor: palette.primary, tension: .35 }, { label: 'Queue backlog', data: deriveSeries(summary.processing?.telegram_queue || 0, 7, 2), borderColor: palette.warning, tension: .35 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } } }, { get instance() { return charts.processing; }, set instance(v) { charts.processing = v; } });
+          createChart(document.getElementById('processingChart'), { type: 'bar', data: { labels: ['Signal Queue', 'Telegram Queue', 'Active Requests'], datasets: [{ label: 'Current Count', data: [summary.database?.signal_queue || 0, summary.processing?.telegram_queue || 0, summary.processing?.active_requests || 0], backgroundColor: [palette.primary, palette.warning, palette.info] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } } }, { get instance() { return charts.processing; }, set instance(v) { charts.processing = v; } });
           createChart(document.getElementById('apiResponseChart'), { type: 'bar', data: { labels: (apiTimes.data || []).slice().reverse().map((item) => item.time), datasets: [{ label: 'Avg ms', data: (apiTimes.data || []).slice().reverse().map((item) => item.avg_ms), backgroundColor: palette.info }, { label: 'Max ms', data: (apiTimes.data || []).slice().reverse().map((item) => item.max_ms), backgroundColor: palette.danger }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: palette.text } } }, scales: { x: { ticks: { color: palette.text }, grid: { color: palette.grid } }, y: { ticks: { color: palette.text }, grid: { color: palette.grid } } } } }, { get instance() { return charts.api; }, set instance(v) { charts.api = v; } });
         } catch (error) {
           showPageAlert(error.message || 'System performance data unavailable.', 'error');

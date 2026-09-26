@@ -71,15 +71,21 @@ try {
             case 'telegram':
                 return [
                     'telegram_linked'    => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM users WHERE telegram_user_id IS NOT NULL AND telegram_linked_at IS NOT NULL")['cnt'],
-                    'telegram_messages_24h' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE DATE(created_at) = CURDATE()")['cnt'],
-                    'telegram_failures'  => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE status = 'failed' AND created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)")['cnt'],
+                    'telegram_messages_24h' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE DATE(sent_at) = CURDATE()")['cnt'],
+                    'telegram_failures'  => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM telegram_delivery_log WHERE status = 'failed' AND sent_at > DATE_SUB(NOW(), INTERVAL 7 DAY)")['cnt'],
                 ];
             
             case 'system':
                 return [
-                    'total_signals'      => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM grid_scalper_ma_signals")['cnt'],
-                    'total_trades'       => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM trade_outcomes")['cnt'],
-                    'adaptive_profiles'  => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_learning_profiles")['cnt'],
+                    'total_signals'                => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM grid_scalper_ma_signals")['cnt'],
+                    'total_trades'                 => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM trade_outcomes")['cnt'],
+                    // Raw per-scope adaptive profiles (adaptive_profiles table)
+                    'adaptive_profiles'            => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_profiles")['cnt'],
+                    // Cached aggregate learning profiles (adaptive_learning_profiles table) - distinct from the above
+                    'adaptive_learning_profiles'   => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_learning_profiles")['cnt'],
+                    'adaptive_factor_stats'        => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_factor_stats")['cnt'],
+                    'adaptive_qualification_rules' => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_qualification_rules")['cnt'],
+                    'adaptive_trade_history'       => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_trade_history")['cnt'],
                 ];
             
             default:

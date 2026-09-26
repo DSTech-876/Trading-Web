@@ -251,7 +251,11 @@
             <div class="row g-3">
               <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Total Signals</div><div class="metric-value">${escapeHtml(system.total_signals || 0)}</div><div class="text-muted">Lifetime generated signals</div></div></div>
               <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Total Trades</div><div class="metric-value">${escapeHtml(system.total_trades || 0)}</div><div class="text-muted">Resolved historical trades</div></div></div>
-              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Profiles</div><div class="metric-value">${escapeHtml(system.adaptive_profiles || 0)}</div><div class="text-muted">Adaptive learning profiles stored</div></div></div>
+              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Profiles</div><div class="metric-value">${escapeHtml(system.adaptive_profiles || 0)}</div><div class="text-muted">Rows in adaptive_profiles</div></div></div>
+              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Learning Profiles</div><div class="metric-value">${escapeHtml(system.adaptive_learning_profiles || 0)}</div><div class="text-muted">Rows in adaptive_learning_profiles</div></div></div>
+              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Factor Stats</div><div class="metric-value">${escapeHtml(system.adaptive_factor_stats || 0)}</div><div class="text-muted">Rows in adaptive_factor_stats</div></div></div>
+              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Rules</div><div class="metric-value">${escapeHtml(system.adaptive_qualification_rules || 0)}</div><div class="text-muted">Rows in adaptive_qualification_rules</div></div></div>
+              <div class="col-12 col-md-4"><div class="section-surface h-100"><div class="metric-label">Adaptive Trade Records</div><div class="metric-value">${escapeHtml(system.adaptive_trade_history || 0)}</div><div class="text-muted">Rows in adaptive_trade_history</div></div></div>
             </div>`,
           'user-management': `
             <div class="table-responsive">

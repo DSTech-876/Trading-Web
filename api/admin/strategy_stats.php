@@ -253,6 +253,45 @@ try {
             'strategies' => $results
         ]);
     }
+    elseif ($action === 'trend') {
+        // Real daily performance trend for a strategy over the last 30 days, grouped by week
+        // (no synthetic/derived data - direct aggregation from trade_outcomes)
+        $strategy = $_GET['strategy'] ?? 'grid_scalper_ma';
+        $rows = $db->fetchAll("
+            SELECT
+                YEARWEEK(created_at, 3) as yw,
+                MIN(DATE(created_at)) as week_start,
+                COUNT(*) as total,
+                SUM(CASE WHEN outcome = 'WIN' THEN 1 ELSE 0 END) as wins,
+                AVG(profit_loss_percent) as avg_return
+            FROM trade_outcomes
+            WHERE strategy_type = :strategy AND created_at >= DATE_SUB(CURDATE(), INTERVAL 28 DAY)
+            GROUP BY yw
+            ORDER BY yw ASC
+        ", [':strategy' => $strategy]);
+
+        $labels = [];
+        $winRates = [];
+        $avgReturns = [];
+        $totals = [];
+        foreach ($rows as $row) {
+            $total = (int) $row['total'];
+            $wins = (int) $row['wins'];
+            $labels[] = $row['week_start'];
+            $winRates[] = $total > 0 ? round(($wins / $total) * 100, 2) : 0;
+            $avgReturns[] = round($row['avg_return'] ?? 0, 2);
+            $totals[] = $total;
+        }
+
+        echo json_encode([
+            'success' => true,
+            'strategy' => $strategy,
+            'labels' => $labels,
+            'win_rate' => $winRates,
+            'avg_return' => $avgReturns,
+            'total_trades' => $totals
+        ]);
+    }
     else {
         http_response_code(400);
         echo json_encode(['error' => 'Unknown action: ' . htmlspecialchars($action)]);
