@@ -8029,6 +8029,8 @@ function processGridScalperMA() {
   if (gridScalperMAPendingSetup) {
     const waitCandles = idx - gridScalperMAPendingSetup.triggerIdx;
     if (waitCandles > GRID_SCALPER_MA_CONFIRM_MAX_WAIT) {
+      const sym = gridScalperMAPendingSetup.dir || getActiveSymbol() || "--";
+      addLog(`[BLOCKED] Grid Scalper MA REJECTED — Delayed-Entry Timeout | Symbol: ${sym} | Waited ${waitCandles} candles (max: ${GRID_SCALPER_MA_CONFIRM_MAX_WAIT}) | Mode: ${gridScalperMAEntryDelayMode}`);
       addLog(`⚠ Grid Scalper MA REJECTED — delayed-entry timeout (${GRID_SCALPER_MA_CONFIRM_MAX_WAIT} candles)`);
       gridScalperMAPendingSetup = null;
     } else {
