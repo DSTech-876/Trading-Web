@@ -8029,6 +8029,8 @@ function processGridScalperMA() {
   if (gridScalperMAPendingSetup) {
     const waitCandles = idx - gridScalperMAPendingSetup.triggerIdx;
     if (waitCandles > GRID_SCALPER_MA_CONFIRM_MAX_WAIT) {
+      const sym = gridScalperMAPendingSetup.dir || getActiveSymbol() || "--";
+      addLog(`[BLOCKED] Grid Scalper MA REJECTED — Delayed-Entry Timeout | Symbol: ${sym} | Waited ${waitCandles} candles (max: ${GRID_SCALPER_MA_CONFIRM_MAX_WAIT}) | Mode: ${gridScalperMAEntryDelayMode}`);
       addLog(`⚠ Grid Scalper MA REJECTED — delayed-entry timeout (${GRID_SCALPER_MA_CONFIRM_MAX_WAIT} candles)`);
       gridScalperMAPendingSetup = null;
     } else {
@@ -8085,6 +8087,8 @@ function processGridScalperMA() {
     ? Math.abs(signal.entry - emaFast[signal.candleIdx]) / signal.atrAtSignal
     : null;
   if (!entryQuality.pass) {
+    const sym = signal.symbol || getActiveSymbol() || "--";
+    addLog(`[BLOCKED] Grid Scalper MA REJECTED — Entry Quality Score ${entryQuality.score}/${gridScalperMAEntryQualityMinScore} | Symbol: ${sym} | Failed Filters: ${(entryQuality.failedFilters || []).join(", ") || "unknown"}`);
     addLog(`⚠ Grid Scalper MA REJECTED — ${entryQuality.reason} | score ${entryQuality.score}/${gridScalperMAEntryQualityMinScore} | breakdown: ${JSON.stringify(entryQuality.details)} | confirm:${signal.entryDelayMode || gridScalperMAEntryDelayMode}`);
     logGridScalperMARejection(signal, entryQuality, "entry_quality");
     return;
@@ -8096,6 +8100,8 @@ function processGridScalperMA() {
     timeframeSec: getCurrentGranularitySec()
   });
   if (recentLossPause.block) {
+    const sym = signal.symbol || getActiveSymbol() || "--";
+    addLog(`[BLOCKED] Grid Scalper MA REJECTED — Recent Losses Pause | Symbol: ${sym} | Direction: ${signal.dir} | Reason: ${recentLossPause.reason}`);
     addLog(`⚠ Grid Scalper MA REJECTED — ${recentLossPause.reason}`);
     return;
   }
@@ -8103,7 +8109,17 @@ function processGridScalperMA() {
   if (minConfluenceEnabled) {
     const confGate = checkConfluenceGate(signal.dir, signal.entry, signal.candleIdx);
     if (!confGate.pass) {
+      const confluenceScore = computeConfluenceScore(signal.dir, signal.entry, signal.candleIdx);
+      const confFactors = getActiveConfluenceFactors(signal.dir, signal.entry, signal.candleIdx);
+      addLog(`[BLOCKED] Grid Scalper MA REJECTED — Confluence ${confluenceScore}/${minConfluenceValue} below minimum | Symbol: ${signal.symbol || getActiveSymbol()} | Factors: ${confFactors.join(", ")}`);
       addLog(`⚠ Grid Scalper MA REJECTED — ${confGate.reason}`);
+      logGridScalperMARejection(signal, {
+        score: confluenceScore,
+        minScore: minConfluenceValue,
+        reason: confGate.reason,
+        failedFilters: [],
+        details: { confluenceFactors: confFactors }
+      }, "confluence_gate");
       /* Log skipped signal if opposite mode logging is available */
       if (typeof logTradeDecision === "function" && typeof GRID_SCALPER_CONFIG !== "undefined" && GRID_SCALPER_CONFIG.IncludeSkippedSignalsInLog) {
         logTradeDecision({
@@ -8116,8 +8132,8 @@ function processGridScalperMA() {
           oppositeModeEnabled: typeof gridScalperMAOppositeEnabled !== "undefined" ? gridScalperMAOppositeEnabled : false,
           executedDirection: null,
           executedSignal: null,
-          confluenceScore: computeConfluenceScore(signal.dir, signal.entry, signal.candleIdx),
-          confluenceFactors: [],
+          confluenceScore: confluenceScore,
+          confluenceFactors: confFactors,
           spread: typeof currentSpread !== "undefined" ? currentSpread : null
         }, "SKIPPED", `Rejected — ${confGate.reason}`);
       }
@@ -8141,6 +8157,8 @@ function processGridScalperMA() {
     signal.adaptiveQuality = quality;
     if (!quality.pass) {
       if (gridScalperAdaptiveModeValue === "Active") {
+        const sym = signal.symbol || getActiveSymbol() || "--";
+        addLog(`[BLOCKED] Grid Scalper MA REJECTED — Adaptive Confluence Quality | Symbol: ${sym} | Reason: ${quality.reason}`);
         addLog(`⚠ Grid Scalper MA REJECTED — adaptive confluence: ${quality.reason}`);
         if (typeof logTradeDecision === "function" && typeof GRID_SCALPER_CONFIG !== "undefined" && GRID_SCALPER_CONFIG.IncludeSkippedSignalsInLog) {
           logTradeDecision({
@@ -11692,6 +11710,9 @@ function buildStrategyTelegramCaption(signal) {
   } else if (signal.type === "orb") {
     stratEmoji = "📊";
     stratLabel = "Opening Range Breakout";
+  } else if (signal.type === "breakout_retest") {
+    stratEmoji = "💥";
+    stratLabel = "Breakout Retest";
   }
 
   const triggerFactors = ensureSignalTriggerFactors(signal);
@@ -15644,6 +15665,26 @@ function recordSignal(confirmPattern) {
   });
   persistSignalHistory();
   updateStatsUI();
+
+  /* ── Send Telegram notification for Breakout trade ── */
+  addLog(`[BREAKOUT GENERATED] Signal ID: ${signal.signalId} | ${signal.dir} @ ${fmt(signal.entry, 4)} | SL: ${fmt(signal.sl, 4)} | TP: ${fmt(signal.tp, 4)}`);
+  
+  if (telegramStrategyAutoSend) {
+    addLog(`[BREAKOUT QUEUED] Telegram alert queued for delivery`);
+    setTimeout(() => {
+      sendTelegramStrategyAlert(signal).then(() => {
+        addLog(`[BREAKOUT SENT] Telegram notification delivered successfully`);
+      }).catch((err) => {
+        addLog(`[BREAKOUT FAILED] Telegram notification delivery failed: ${err.message}`);
+      });
+    }, CHART_RENDER_DELAY_MS);
+  }
+
+  if (notificationsEnabled && "Notification" in window && Notification.permission === "granted") {
+    addLog(`[BREAKOUT SENT] Desktop notification delivered`);
+    const body = `🔲 ${signal.dir} Breakout Retest — ${signal.symbol} @ ${fmt(signal.entry, 4)}\nSL: ${fmt(signal.sl, 4)} | TP: ${fmt(signal.tp, 4)}`;
+    throttledNotification("IT Guru: Breakout Retest!", body);
+  }
 
   /* Auto-trade: place a Deriv contract when the toggle is enabled */
   if (autoTradeEnabled && !_historicalProcessing) {
