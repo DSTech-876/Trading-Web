@@ -7452,15 +7452,136 @@ function evaluateGridScalperMAEntryDelay(setup, idx) {
   return { pass: true };
 }
 
+const GRID_SCALPER_MA_SR_BUFFER_ATR = 0.35; /* reject entries this close (in ATR) to opposing S/R */
+
 function evaluateGridScalperMAStructure(dir, idx) {
   if (!gridScalperMAStructureFilterEnabled || idx < 2) return { pass: true, structureOk: null };
   const c1 = candles[idx - 1];
   const c2 = candles[idx - 2];
   if (!c1 || !c2) return { pass: true, structureOk: null };
-  const bullish = c1.high > c2.high && c1.low > c2.low;
-  const bearish = c1.high < c2.high && c1.low < c2.low;
-  const pass = dir === "BULL" ? bullish : bearish;
-  return { pass, structureOk: pass, reason: pass ? null : `market structure failed (${dir === "BULL" ? "HH/HL" : "LH/LL"} not present)` };
+  /* BUY requires a higher-low before entry; SELL requires a lower-high before entry */
+  const higherLow  = c1.low  > c2.low;
+  const lowerHigh   = c1.high < c2.high;
+  const bullish = c1.high > c2.high && higherLow;
+  const bearish = c1.high < c2.high && c1.low < c2.low && lowerHigh;
+  let pass = dir === "BULL" ? bullish : bearish;
+  let reason = pass ? null : `market structure failed (${dir === "BULL" ? "higher-low" : "lower-high"} not present)`;
+
+  /* Reject trades entering directly into nearby support/resistance */
+  if (pass) {
+    const atrRef = atrValue > 0 ? atrValue : getAtrReference();
+    const buffer = atrRef > 0 ? atrRef * GRID_SCALPER_MA_SR_BUFFER_ATR : 0;
+    const lookback = Math.max(0, idx - GRID_SCALPER_MA_BOS_LOOKBACK);
+    const price = candles[idx].close;
+    if (buffer > 0) {
+      if (dir === "BULL") {
+        for (let i = idx - SWING_NEIGHBOR_BARS - 1; i >= lookback + SWING_NEIGHBOR_BARS; i--) {
+          if (isTrueSwingHigh(i) && candles[i].high > price && (candles[i].high - price) <= buffer) {
+            pass = false;
+            reason = "entry blocked — price directly beneath nearby resistance";
+            break;
+          }
+        }
+      } else {
+        for (let i = idx - SWING_NEIGHBOR_BARS - 1; i >= lookback + SWING_NEIGHBOR_BARS; i--) {
+          if (isTrueSwingLow(i) && candles[i].low < price && (price - candles[i].low) <= buffer) {
+            pass = false;
+            reason = "entry blocked — price directly above nearby support";
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return { pass, structureOk: pass, higherLow, lowerHigh, reason };
+}
+
+/**
+ * Momentum validation:
+ *   BUY  → MA slope > threshold, current candle body > previous candle body, RSI rising.
+ *   SELL → MA slope < -threshold, current candle body > previous candle body, RSI falling.
+ */
+function evaluateGridScalperMAMomentum(dir, idx) {
+  const out = { pass: true, slopeAtr: null, rsi: null, rsiPrev: null, bodyGrowing: null, details: {} };
+  if (idx < 2) return out;
+  const c = candles[idx];
+  const prev = candles[idx - 1];
+  if (!c || !prev) return out;
+
+  const atrRef = atrValue > 0 ? atrValue : getAtrReference();
+  const fastNow = emaFast[idx];
+  const fastPrev = emaFast[idx - 1];
+  let slopeAtr = null;
+  if (Number.isFinite(fastNow) && Number.isFinite(fastPrev) && atrRef > 0) {
+    slopeAtr = (fastNow - fastPrev) / atrRef;
+  }
+  out.slopeAtr = slopeAtr;
+  const slopePass = slopeAtr == null ? true
+    : dir === "BULL"
+      ? slopeAtr > GRID_SCALPER_MA_TREND_SLOPE_MIN_ATR
+      : slopeAtr < -GRID_SCALPER_MA_TREND_SLOPE_MIN_ATR;
+
+  const bodyNow  = Math.abs(c.close - c.open);
+  const bodyPrev = Math.abs(prev.close - prev.open);
+  const bodyGrowing = bodyNow > bodyPrev;
+  out.bodyGrowing = bodyGrowing;
+
+  const rsiNow  = rsiValues[idx];
+  const rsiPrev = rsiValues[idx - 1];
+  out.rsi = Number.isFinite(rsiNow) ? rsiNow : null;
+  out.rsiPrev = Number.isFinite(rsiPrev) ? rsiPrev : null;
+  const rsiPass = (Number.isFinite(rsiNow) && Number.isFinite(rsiPrev))
+    ? (dir === "BULL" ? rsiNow > rsiPrev : rsiNow < rsiPrev)
+    : true;
+
+  out.details = { slopePass, bodyGrowing, rsiPass };
+  out.pass = slopePass && bodyGrowing && rsiPass;
+  if (!out.pass) {
+    const failed = [];
+    if (!slopePass) failed.push("MA slope");
+    if (!bodyGrowing) failed.push("candle body growth");
+    if (!rsiPass) failed.push(`RSI ${dir === "BULL" ? "rising" : "falling"}`);
+    out.reason = `momentum validation failed (${failed.join(", ")})`;
+  }
+  return out;
+}
+
+/**
+ * Candle quality filter — rejects dojis, long-wick candles, small bodies and
+ * exhaustion candles; only strong momentum candles are allowed through.
+ */
+function evaluateGridScalperMACandleQuality(dir, idx) {
+  const out = { pass: true, classification: null };
+  const c = candles[idx];
+  if (!c) return out;
+  const info = classifyCandle(c);
+  out.classification = info;
+  if (!info) return out;
+
+  if (info.conviction === "INDECISION" || info.bodyRatio < DOJI_BODY_RATIO) {
+    out.pass = false;
+    out.reason = "candle quality rejected (doji / indecision candle)";
+    return out;
+  }
+  if (info.bodyRatio < SPINNING_TOP_BODY_RATIO) {
+    out.pass = false;
+    out.reason = "candle quality rejected (small body candle)";
+    return out;
+  }
+  const wickRatio = dir === "BULL" ? info.upperWickRatio : info.lowerWickRatio;
+  if (wickRatio >= 0.45) {
+    out.pass = false;
+    out.reason = "candle quality rejected (long-wick / exhaustion candle)";
+    return out;
+  }
+  const expectedControl = dir === "BULL" ? "BULL" : "BEAR";
+  if (info.control !== expectedControl || info.conviction === "WEAK") {
+    out.pass = false;
+    out.reason = "candle quality rejected (weak/against-trend control)";
+    return out;
+  }
+  return out;
 }
 
 function evaluateGridScalperMATrendStrength(dir, idx) {
@@ -7534,6 +7655,14 @@ function evaluateGridScalperMAPullback(dir, idx) {
   return out;
 }
 
+/**
+ * Entry scoring system (100 pts total). Score factors:
+ *   MA alignment (15) + Trend strength/ADX (20) + RSI momentum (15) +
+ *   Volume (10) + Structure/HL-LH+S-R (15) + Candle quality (15) +
+ *   Retest/pullback confirmation (10).
+ * A minimum score (configurable via gridScalperMAEntryQualityMinScore) is
+ * required before a trade opens.
+ */
 function evaluateGridScalperMAEntryQuality(signal) {
   const idx = signal && Number.isFinite(signal.candleIdx) ? signal.candleIdx : candles.length - 1;
   const timing = evaluateEntryTimingQuality(signal.dir, candles[idx], signal.breakLevel ?? signal.entry, getAtrReference(), {
@@ -7545,29 +7674,236 @@ function evaluateGridScalperMAEntryQuality(signal) {
   const vol = evaluateGridScalperMAVolatility(idx);
   const structure = evaluateGridScalperMAStructure(signal.dir, idx);
   const pullback = evaluateGridScalperMAPullback(signal.dir, idx);
+  const momentum = evaluateGridScalperMAMomentum(signal.dir, idx);
+  const candleQuality = evaluateGridScalperMACandleQuality(signal.dir, idx);
+  const volumeScore = getCandleInterpVolumeScore(idx); /* 0..2 proxy (no tick volume on synthetics) */
+  const volumePass = volumeScore >= 1;
+
+  const maAligned = Number.isFinite(emaFast[idx]) && Number.isFinite(emaSlow[idx])
+    ? (signal.dir === "BULL" ? emaFast[idx] > emaSlow[idx] : emaFast[idx] < emaSlow[idx])
+    : true;
+
   let score = 0;
-  if (trend.pass) score += 35;
-  if (timing.pass) score += 25;
-  if (vol.pass) score += 15;
+  if (maAligned) score += 15;
+  if (trend.pass) score += 20;
+  if (momentum.pass) score += 15;
+  if (volumePass) score += 10;
   if (structure.pass) score += 15;
-  if (pullback.pass) score += 10;
+  if (candleQuality.pass) score += 15;
+  if (pullback.pass || timing.pass) score += 10; /* retest / follow-through confirmation */
+
+  const failedFilters = [];
+  if (!maAligned) failedFilters.push("ma_alignment");
+  if (!trend.pass) failedFilters.push("trend_strength");
+  if (!momentum.pass) failedFilters.push("rsi_momentum");
+  if (!volumePass) failedFilters.push("volume");
+  if (!structure.pass) failedFilters.push("structure");
+  if (!candleQuality.pass) failedFilters.push("candle_quality");
+  if (!pullback.pass && !timing.pass) failedFilters.push("retest_confirmation");
+
+  /* Hard gates — independent of composite score: quiet/spiking ATR and
+     non-trending ADX must reject the trade outright per requirements #4/#5.
+     Adaptive improvement may raise the effective ADX threshold per symbol
+     when >60% of that symbol's SL trades later reach TP. */
+  const adaptSymbol = signal.symbol || getActiveSymbol() || "default";
+  const adaptState = gridScalperMAAdaptiveState[adaptSymbol];
+  const effectiveAdxThreshold = ADX_TRENDING_THRESHOLD + (adaptState ? (adaptState.adxBump || 0) : 0);
+  const hardGateFailures = [];
+  if (gridScalperMAVolatilityFilterEnabled && !vol.pass) hardGateFailures.push(vol.reason || "volatility gate failed");
+  if (gridScalperMATrendStrengthFilterEnabled && !(adxValue >= effectiveAdxThreshold)) {
+    hardGateFailures.push(`ADX ${fmt(adxValue, 1)} below trending threshold ${effectiveAdxThreshold}`);
+  }
+
+  const passThreshold = score >= gridScalperMAEntryQualityMinScore;
+  const pass = !gridScalperMAEntryQualityFilterEnabled || (passThreshold && hardGateFailures.length === 0);
   return {
-    pass: !gridScalperMAEntryQualityFilterEnabled || score >= gridScalperMAEntryQualityMinScore,
+    pass,
     score,
+    failedFilters,
+    hardGateFailures,
     details: {
+      maAlignment: maAligned,
       timing: timing.pass,
       trend: trend.pass,
+      momentum: momentum.pass,
+      volume: volumePass,
       volatility: vol.pass,
       structure: structure.pass,
+      candleQuality: candleQuality.pass,
       pullback: pullback.pass
     },
     timing,
     trend,
+    momentum,
+    volumeScore,
     volatility: vol,
     structure,
+    candleQuality,
     pullback,
-    reason: score >= gridScalperMAEntryQualityMinScore ? null : `entry quality ${score}/${gridScalperMAEntryQualityMinScore} below threshold`
+    reason: pass ? null : (hardGateFailures.length > 0
+      ? hardGateFailures.join("; ")
+      : `entry quality ${score}/${gridScalperMAEntryQualityMinScore} below threshold (failed: ${failedFilters.join(", ") || "none"})`)
   };
+}
+
+/* ── Grid Scalper MA: debug logging, post-trade loss analysis & adaptive
+   improvement (per-symbol, persisted to localStorage) ── */
+const GRID_SCALPER_MA_LOSS_ANALYSIS_MAX     = 100; /* keep last N losses per symbol */
+const GRID_SCALPER_MA_ADAPT_MIN_SAMPLE      = 10;  /* min resolved losses before adapting */
+const GRID_SCALPER_MA_ADAPT_SL_TP_THRESHOLD = 0.60; /* >60% SL trades later hitting TP triggers tightening */
+let gridScalperMALossAnalysis   = {}; /* { [symbol]: [ {..entry snapshot, slThenTp} ] } */
+let gridScalperMAAdaptiveState  = {}; /* { [symbol]: { minScoreBump, adxBump, confirmEscalated, lastAdjustedAt } } */
+
+/**
+ * Log rejected-signal debug information: failed filters, score breakdown,
+ * confirmation status, trend strength, and the reason the trade was skipped.
+ */
+function logGridScalperMARejection(signal, entryQuality, stage) {
+  try {
+    const detail = {
+      stage: stage || "unknown",
+      symbol: signal.symbol || getActiveSymbol() || "--",
+      dir: signal.dir,
+      confirmationMode: signal.entryDelayMode || gridScalperMAEntryDelayMode,
+      trendStrength: entryQuality.trend ? entryQuality.trend.score : null,
+      score: entryQuality.score,
+      minScoreRequired: gridScalperMAEntryQualityMinScore,
+      failedFilters: entryQuality.failedFilters || [],
+      hardGateFailures: entryQuality.hardGateFailures || [],
+      breakdown: entryQuality.details || {},
+      reason: entryQuality.reason
+    };
+    addLog(`🔍 [DEBUG] Grid Scalper MA rejection detail: ${JSON.stringify(detail)}`);
+  } catch (e) { /* logging must never throw */ }
+}
+
+/** localStorage key helper, scoped per symbol. */
+function _gsLossAnalysisKey(symbol) {
+  return LS_PREFIX + "gsLossAnalysis_" + (symbol || "default");
+}
+
+/** Persist a single symbol's loss-analysis array to localStorage. */
+function _saveGSLossAnalysis(symbol) {
+  try {
+    const arr = gridScalperMALossAnalysis[symbol] || [];
+    localStorage.setItem(_gsLossAnalysisKey(symbol), JSON.stringify(arr));
+  } catch (e) { /* storage not available */ }
+}
+
+/** Restore a single symbol's loss-analysis array from localStorage (lazy, cached in memory). */
+function _loadGSLossAnalysis(symbol) {
+  if (gridScalperMALossAnalysis[symbol]) return gridScalperMALossAnalysis[symbol];
+  let arr = [];
+  try {
+    const raw = localStorage.getItem(_gsLossAnalysisKey(symbol));
+    if (raw) arr = JSON.parse(raw) || [];
+  } catch (e) { /* ignore */ }
+  gridScalperMALossAnalysis[symbol] = Array.isArray(arr) ? arr : [];
+  return gridScalperMALossAnalysis[symbol];
+}
+
+/** Persist adaptive-improvement state (per symbol). */
+function _saveGSAdaptiveState() {
+  try {
+    localStorage.setItem(LS_PREFIX + "gsAdaptiveState", JSON.stringify(gridScalperMAAdaptiveState));
+  } catch (e) { /* ignore */ }
+}
+
+/** Restore adaptive-improvement state (per symbol). */
+function _loadGSAdaptiveState() {
+  try {
+    const raw = localStorage.getItem(LS_PREFIX + "gsAdaptiveState");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") gridScalperMAAdaptiveState = parsed;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/**
+ * Store post-trade analysis for a losing Grid Scalper MA trade: entry
+ * timestamp, direction, ATR, ADX, RSI, MA slope, distance from MA, confluence
+ * score, and whether the trade later reached TP after SL (sl_then_tp_flag).
+ * Data is stored per symbol and reused on future trades to drive adaptive
+ * improvement.
+ */
+function recordGridScalperMALossAnalysis(trade) {
+  if (!trade || trade.result !== "LOSS") return;
+  const symbol = trade.symbol || getActiveSymbol() || "default";
+  const arr = _loadGSLossAnalysis(symbol);
+  arr.unshift({
+    entryTimestamp: Number.isFinite(trade.epoch) ? trade.epoch : Math.floor(Date.now() / 1000),
+    dir: trade.dir,
+    atr: Number.isFinite(trade.atrAtSignal) ? trade.atrAtSignal : null,
+    adx: Number.isFinite(trade.adxAtSignal) ? trade.adxAtSignal : null,
+    rsi: Number.isFinite(trade.rsiAtSignal) ? trade.rsiAtSignal : null,
+    maSlope: Number.isFinite(trade.maSlopeAtSignal) ? trade.maSlopeAtSignal : null,
+    distanceFromMa: Number.isFinite(trade.distanceFromMaAtSignal) ? trade.distanceFromMaAtSignal : null,
+    confluenceScore: Number.isFinite(trade.confluenceScore) ? trade.confluenceScore : null,
+    entryQualityScore: Number.isFinite(trade.entryQualityScore) ? trade.entryQualityScore : null,
+    slThenTp: trade._slThenTpFlag ? 1 : 0
+  });
+  if (arr.length > GRID_SCALPER_MA_LOSS_ANALYSIS_MAX) arr.length = GRID_SCALPER_MA_LOSS_ANALYSIS_MAX;
+  gridScalperMALossAnalysis[symbol] = arr;
+  _saveGSLossAnalysis(symbol);
+  runGridScalperMAAdaptiveImprovement(symbol);
+}
+
+/**
+ * Called when the SL→TP reversal watch resolves (i.e. after the fact we learn
+ * a previously-recorded loss eventually reached TP). Updates the stored
+ * analysis entry and re-runs the adaptive-improvement check.
+ */
+function updateGridScalperMALossAnalysisSlThenTp(trade) {
+  if (!trade) return;
+  const symbol = trade.symbol || getActiveSymbol() || "default";
+  const arr = _loadGSLossAnalysis(symbol);
+  const match = arr.find(e => e.entryTimestamp === trade.epoch && e.dir === trade.dir);
+  if (match) {
+    match.slThenTp = 1;
+    _saveGSLossAnalysis(symbol);
+  }
+  runGridScalperMAAdaptiveImprovement(symbol);
+}
+
+/**
+ * Analyze recent losses for a symbol and, if more than
+ * GRID_SCALPER_MA_ADAPT_SL_TP_THRESHOLD (60%) of SL trades later hit TP,
+ * incrementally tighten entry requirements: raise the minimum entry-quality
+ * score, tighten the effective trend-strength requirement, and escalate the
+ * confirmation mode. All adjustments are logged.
+ */
+function runGridScalperMAAdaptiveImprovement(symbol) {
+  const arr = _loadGSLossAnalysis(symbol);
+  if (arr.length < GRID_SCALPER_MA_ADAPT_MIN_SAMPLE) return;
+  const sample = arr.slice(0, Math.min(arr.length, GRID_SCALPER_MA_ADAPT_MIN_SAMPLE * 3));
+  const slThenTpCount = sample.reduce((n, e) => n + (e.slThenTp ? 1 : 0), 0);
+  const ratio = slThenTpCount / sample.length;
+
+  if (!gridScalperMAAdaptiveState[symbol]) {
+    gridScalperMAAdaptiveState[symbol] = { minScoreBump: 0, adxBump: 0, confirmEscalated: false, lastAdjustedAt: null, lastRatio: null };
+  }
+  const state = gridScalperMAAdaptiveState[symbol];
+  state.lastRatio = ratio;
+
+  if (ratio > GRID_SCALPER_MA_ADAPT_SL_TP_THRESHOLD) {
+    const prevScore = gridScalperMAEntryQualityMinScore;
+    const scoreBumpStep = 5;
+    const maxBump = 20;
+    if (state.minScoreBump < maxBump) {
+      state.minScoreBump += scoreBumpStep;
+      gridScalperMAEntryQualityMinScore = Math.min(95, prevScore + scoreBumpStep);
+    }
+    state.adxBump = Math.min(10, state.adxBump + 2);
+    if (!state.confirmEscalated && gridScalperMAEntryDelayMode !== "break_retest") {
+      gridScalperMAEntryDelayMode = "break_retest"; /* strictest confirmation mode */
+      state.confirmEscalated = true;
+    }
+    state.lastAdjustedAt = Date.now();
+    _saveGSAdaptiveState();
+    addLog(`🧠 [ADAPTIVE] Grid Scalper MA (${symbol}) — ${Math.round(ratio * 100)}% of SL trades later hit TP (${slThenTpCount}/${sample.length}). `
+      + `Tightened: minScore ${prevScore}→${gridScalperMAEntryQualityMinScore}, ADX bump +${state.adxBump}, confirm mode → ${gridScalperMAEntryDelayMode}.`);
+  }
 }
 
 /**
@@ -7736,12 +8072,21 @@ function processGridScalperMA() {
   const entryQuality = evaluateGridScalperMAEntryQuality(signal);
   signal.entryQualityScore = entryQuality.score;
   signal.entryQualityBreakdown = entryQuality.details;
+  signal.entryQualityFailedFilters = entryQuality.failedFilters;
   signal.trendStrengthScore = entryQuality.trend.score;
   signal.atrRatio = entryQuality.volatility.atrRatio;
   signal.structureOk = entryQuality.structure.structureOk;
   signal.pullbackOk = entryQuality.pullback.pullbackOk;
+  signal.rsiAtSignal = entryQuality.momentum.rsi;
+  signal.maSlopeAtSignal = entryQuality.momentum.slopeAtr;
+  signal.adxAtSignal = Number.isFinite(adxValue) ? adxValue : null;
+  signal.atrAtSignal = atrValue > 0 ? atrValue : getAtrReference();
+  signal.distanceFromMaAtSignal = (Number.isFinite(emaFast[signal.candleIdx]) && signal.atrAtSignal > 0)
+    ? Math.abs(signal.entry - emaFast[signal.candleIdx]) / signal.atrAtSignal
+    : null;
   if (!entryQuality.pass) {
-    addLog(`⚠ Grid Scalper MA REJECTED — ${entryQuality.reason}`);
+    addLog(`⚠ Grid Scalper MA REJECTED — ${entryQuality.reason} | score ${entryQuality.score}/${gridScalperMAEntryQualityMinScore} | breakdown: ${JSON.stringify(entryQuality.details)} | confirm:${signal.entryDelayMode || gridScalperMAEntryDelayMode}`);
+    logGridScalperMARejection(signal, entryQuality, "entry_quality");
     return;
   }
   const recentLossPause = shouldPauseAfterRecentLosses(gridScalperMAHistory, {
@@ -7984,6 +8329,7 @@ function monitorGridScalperMAOutcomes(candle) {
             if (tradeOutcomeService && typeof tradeOutcomeService.syncTradeAnalytics === "function") {
               tradeOutcomeService.syncTradeAnalytics(target);
             }
+            updateGridScalperMALossAnalysisSlThenTp(target);
           }
           continue;
         }
@@ -8002,6 +8348,7 @@ function monitorGridScalperMAOutcomes(candle) {
             if (tradeOutcomeService && typeof tradeOutcomeService.syncTradeAnalytics === "function") {
               tradeOutcomeService.syncTradeAnalytics(target);
             }
+            updateGridScalperMALossAnalysisSlThenTp(target);
           }
           continue;
         }
@@ -8093,6 +8440,7 @@ function monitorGridScalperMAOutcomes(candle) {
         s.result = resolved;
         s.terminal_reason = resolved === "WIN" ? 'TP_FINAL' : 'STOP_LOSS_BOTH_HIT';
       }
+      if (resolved === "LOSS") recordGridScalperMALossAnalysis(s);
       addLog(`🔲 [${resolved}] Grid Scalper MA — both levels hit, ${resolved === "WIN" ? "TP" : "SL"} closer`);
       changed = true;
     }
@@ -8109,6 +8457,7 @@ function monitorGridScalperMAOutcomes(candle) {
         s.result = "LOSS";
         s.terminal_reason = 'STOP_LOSS';
       }
+      recordGridScalperMALossAnalysis(s);
       if (s.tradeId || s.signalId) {
         gridScalperMALossReversalWatch.push({
           tradeId: s.tradeId || s.signalId,
@@ -8347,6 +8696,7 @@ function _saveGSOppSettings() {
 function initGridScalperMAOpposite() {
   /* Restore persisted state */
   _loadGSFlipStats();
+  _loadGSAdaptiveState();
   try {
     const raw = localStorage.getItem(LS_PREFIX + "gsOppSettings");
     if (raw) {
