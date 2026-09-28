@@ -816,7 +816,7 @@
   function logsPage() {
     document.body.innerHTML = createPageShell({
       title: 'Logs Viewer',
-      subtitle: 'Browse high-volume system logs with filters, virtualized rendering, infinite scrolling, and CSV export.',
+      subtitle: 'Browse admin audit-trail actions with filters, virtualized rendering, infinite scrolling, and CSV export.',
       breadcrumbs: 'Admin / Logs',
       activeNav: 'logs',
       controls: '<button id="exportLogsBtn" class="btn btn-outline-secondary btn-sm">Export CSV</button>'
@@ -824,7 +824,7 @@
     document.getElementById('pageContent').innerHTML = `
       <section class="hero-card mb-4">
         <div class="row g-3">
-          <div class="col-12 col-md-3"><label class="form-label">Level</label><select id="logsLevel" class="form-select"><option value="">All</option><option value="debug">Debug</option><option value="info">Info</option><option value="warning">Warning</option><option value="error">Error</option><option value="fatal">Fatal</option></select></div>
+          <div class="col-12 col-md-3"><label class="form-label">Level</label><select id="logsLevel" class="form-select"><option value="">All</option><option value="info">Info</option><option value="error">Error</option></select></div>
           <div class="col-12 col-md-3"><label class="form-label">Source</label><select id="logsSource" class="form-select"><option value="">All</option><option value="strategy">Strategy</option><option value="telegram">Telegram</option><option value="api">API</option><option value="database">Database</option></select></div>
           <div class="col-12 col-md-2"><label class="form-label">From</label><input id="logsFrom" type="date" class="form-control"></div>
           <div class="col-12 col-md-2"><label class="form-label">To</label><input id="logsTo" type="date" class="form-control"></div>

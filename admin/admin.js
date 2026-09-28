@@ -1454,25 +1454,59 @@ const NOTIF_PREF_COLUMNS = [
   ["telegram_high_confidence_only", "High-Conf Only"],
 ];
 let notifPrefUsersCache = [];
+let notifPrefPage = 1;
+const NOTIF_PREF_PAGE_SIZE = 50;
+let notifPrefSearchDebounce = null;
 
-async function loadNotificationPreferences() {
+async function loadNotificationPreferences(page = 1) {
   const tbody = el("notifPrefsTableBody");
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="12" class="table-empty">Loading…</td></tr>`;
+  notifPrefPage = Math.max(1, page);
+  const params = new URLSearchParams();
+  const search = (el("notifPrefSearch")?.value || "").trim();
+  if (search) params.set("search", search);
+  params.set("page", String(notifPrefPage));
+  params.set("per_page", String(NOTIF_PREF_PAGE_SIZE));
   try {
-    const resp = await apiRequest("/admin/notification_preferences");
+    const resp = await apiRequest(`/admin/notification_preferences?${params.toString()}`);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       tbody.innerHTML = `<tr><td colspan="12" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load preferences")}</td></tr>`;
+      renderNotifPrefsPagination(0, 0);
       return;
     }
     const data = await resp.json();
     notifPrefUsersCache = data.users || [];
+    const total = data.total ?? notifPrefUsersCache.length;
+    const lastPage = data.last_page || Math.max(1, Math.ceil(total / NOTIF_PREF_PAGE_SIZE));
+    if (data.page && data.page !== notifPrefPage) notifPrefPage = data.page;
     renderNotifPrefStats(data.stats || {}, data.total_users || 0);
     renderNotifPrefsTable(notifPrefUsersCache);
+    renderNotifPrefsPagination(total, notifPrefPage, lastPage);
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="12" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
+    renderNotifPrefsPagination(0, 0);
   }
+}
+
+function renderNotifPrefsPagination(total, page, lastPage) {
+  const container = el("notifPrefsPagination");
+  if (!container) return;
+  container.innerHTML = "";
+  const last = lastPage || Math.max(1, Math.ceil(total / NOTIF_PREF_PAGE_SIZE));
+  if (last <= 1) return;
+
+  const prev = mkBtn("← Prev", page <= 1, () => loadNotificationPreferences(page - 1));
+  container.appendChild(prev);
+
+  const info = document.createElement("span");
+  info.className = "page-info";
+  info.textContent = `Page ${page} / ${last} (${total} users)`;
+  container.appendChild(info);
+
+  const next = mkBtn("Next →", page >= last, () => loadNotificationPreferences(page + 1));
+  container.appendChild(next);
 }
 
 function renderNotifPrefStats(stats, totalUsers) {
@@ -1487,14 +1521,12 @@ function renderNotifPrefStats(stats, totalUsers) {
 function renderNotifPrefsTable(users) {
   const tbody = el("notifPrefsTableBody");
   if (!tbody) return;
-  const q = (el("notifPrefSearch")?.value || "").trim().toLowerCase();
-  const filtered = q ? users.filter(u => u.username.toLowerCase().includes(q)) : users;
-  if (!filtered.length) {
+  if (!users.length) {
     tbody.innerHTML = `<tr><td colspan="12" class="table-empty">No users found.</td></tr>`;
     return;
   }
   tbody.innerHTML = "";
-  for (const u of filtered) {
+  for (const u of users) {
     const tr = document.createElement("tr");
     const checks = NOTIF_PREF_COLUMNS.map(([col]) =>
       `<td><input type="checkbox" data-pref-col="${col}" data-user-id="${u.user_id}" ${u.preferences[col] ? "checked" : ""} /></td>`
@@ -1541,7 +1573,7 @@ function renderNotifPrefsTable(users) {
           alert(err.error || "Failed to reset preferences");
           return;
         }
-        await loadNotificationPreferences();
+        await loadNotificationPreferences(notifPrefPage);
       } catch (ex) {
         alert("Network error — " + ex.message);
       }
@@ -1551,7 +1583,10 @@ function renderNotifPrefsTable(users) {
 
 function bindNotificationPreferences() {
   el("refreshNotifPrefsBtn")?.addEventListener("click", () => loadNotificationPreferences());
-  el("notifPrefSearch")?.addEventListener("input", () => renderNotifPrefsTable(notifPrefUsersCache));
+  el("notifPrefSearch")?.addEventListener("input", () => {
+    clearTimeout(notifPrefSearchDebounce);
+    notifPrefSearchDebounce = setTimeout(() => loadNotificationPreferences(1), 300);
+  });
 
   el("notifPrefApplyDefaultsBtn")?.addEventListener("click", async () => {
     try {
@@ -1559,7 +1594,7 @@ function bindNotificationPreferences() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { alert(data.error || "Failed to apply defaults"); return; }
       alert(`Applied defaults to ${data.applied_count || 0} user(s).`);
-      await loadNotificationPreferences();
+      await loadNotificationPreferences(notifPrefPage);
     } catch (ex) {
       alert("Network error — " + ex.message);
     }
@@ -1586,7 +1621,7 @@ function bindNotificationPreferences() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { alert(data.error || "Bulk update failed"); return; }
       alert(`Updated ${data.updated_count || 0} user(s).`);
-      await loadNotificationPreferences();
+      await loadNotificationPreferences(notifPrefPage);
     } catch (ex) {
       alert("Network error — " + ex.message);
     }
