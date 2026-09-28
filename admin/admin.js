@@ -1602,7 +1602,7 @@ let tgDeliveryLogPage = 1;
 async function loadTelegramDeliveryLog(page = 1) {
   const tbody = el("tgDeliveryLogTableBody");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Loading…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="9" class="table-empty">Loading…</td></tr>`;
 
   tgDeliveryLogPage = Math.max(1, page);
 
@@ -1620,7 +1620,7 @@ async function loadTelegramDeliveryLog(page = 1) {
     const resp = await apiRequest(`/admin/telegram_delivery_log?${params.toString()}`);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      tbody.innerHTML = `<tr><td colspan="8" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load delivery log")}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load delivery log")}</td></tr>`;
       renderTgDeliveryLogPagination(0, 0);
       return;
     }
@@ -1630,11 +1630,11 @@ async function loadTelegramDeliveryLog(page = 1) {
     if (tgDeliveryLogPage > lastPage) {
       return loadTelegramDeliveryLog(lastPage);
     }
-    renderTgDeliveryStats(data.stats || {});
+    renderTgDeliveryStats(data.stats || {}, data.duplicate_event_count || 0, data.duplicate_events || []);
     renderTgDeliveryLogTable(data.entries || []);
     renderTgDeliveryLogPagination(total, tgDeliveryLogPage);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
     renderTgDeliveryLogPagination(0, 0);
   }
 }
@@ -1659,20 +1659,27 @@ function renderTgDeliveryLogPagination(total, page) {
   container.appendChild(next);
 }
 
-function renderTgDeliveryStats(stats) {
+function renderTgDeliveryStats(stats, duplicateEventCount = 0, duplicateEvents = []) {
   const bar = el("tgDeliveryStatsBar");
   if (!bar) return;
+  const dupTitle = duplicateEvents.length
+    ? duplicateEvents.map((d) => `${escHtml(d.trade_id)} (${escHtml(d.notification_type)}) x${d.c}`).join("\n")
+    : "No duplicate events detected";
   bar.innerHTML = `
     <div class="stat-card"><div class="stat-label">✅ Sent</div><div class="stat-value">${stats.sent || 0}</div></div>
     <div class="stat-card"><div class="stat-label">❌ Failed</div><div class="stat-value">${stats.failed || 0}</div></div>
-    <div class="stat-card"><div class="stat-label">⏭️ Skipped</div><div class="stat-value">${stats.skipped || 0}</div></div>`;
+    <div class="stat-card"><div class="stat-label">⏭️ Skipped</div><div class="stat-value">${stats.skipped || 0}</div></div>
+    <div class="stat-card" title="${dupTitle}" style="${duplicateEventCount > 0 ? 'border-color:var(--danger-soft)' : ''}">
+      <div class="stat-label">⚠️ Duplicate Events</div>
+      <div class="stat-value" style="${duplicateEventCount > 0 ? 'color:var(--danger-soft)' : ''}">${duplicateEventCount}</div>
+    </div>`;
 }
 
 function renderTgDeliveryLogTable(entries) {
   const tbody = el("tgDeliveryLogTableBody");
   if (!tbody) return;
   if (!entries.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No delivery log entries yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty">No delivery log entries yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = "";
@@ -1684,6 +1691,7 @@ function renderTgDeliveryLogTable(entries) {
       <td class="ts">${fmtDate(e2.sent_at)}</td>
       <td>${escHtml(e2.username || "(deleted user)")}</td>
       <td class="ts">${escHtml(e2.signal_id || "—")}</td>
+      <td class="ts" title="${escHtml(e2.event_hash || '')}">${escHtml(e2.trade_id || e2.signal_id || "—")}</td>
       <td>${escHtml(e2.notification_type)}</td>
       <td>${escHtml(e2.strategy || "—")}</td>
       <td>${escHtml(e2.symbol || "—")}</td>

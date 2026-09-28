@@ -306,9 +306,29 @@
         localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(ids));
       }
 
+      /* Section counters are read directly from the already-fetched,
+         database-backed dashboard payload — never estimated or computed
+         client-side — so the badge next to each collapsible header always
+         matches the underlying source query. */
+      function buildSectionCounts(payload) {
+        const users = payload.users || {};
+        const subs = payload.subscriptions || {};
+        const strategies = payload.strategies || {};
+        const telegram = payload.telegram || {};
+        const system = payload.system || {};
+        return {
+          'system-overview': system.total_trades ?? system.total_signals ?? 0,
+          'user-management': users.total_users ?? 0,
+          'subscription-plans': subs.active_subscriptions ?? 0,
+          'strategy-statistics': strategies.active_strategies ?? 0,
+          'telegram-activity': telegram.telegram_messages_24h ?? 0
+        };
+      }
+
       function renderSections(payload) {
         const host = document.getElementById('dashboardSections');
         const sections = buildSections(payload);
+        const counts = buildSectionCounts(payload);
         host.innerHTML = '';
         collapses.clear();
 
@@ -322,6 +342,7 @@
             id: section.id,
             title: section.title,
             icon: section.icon,
+            count: counts[section.id],
             content: sections[section.id] || '<p class="empty-state">No data available.</p>'
           });
           wrapper.appendChild(panel);

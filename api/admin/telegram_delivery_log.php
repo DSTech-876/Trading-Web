@@ -54,13 +54,17 @@ try {
         $where[] = 'l.signal_id = ?';
         $params[] = (string) $_GET['signal_id'];
     }
+    if (!empty($_GET['trade_id'])) {
+        $where[] = 'l.trade_id = ?';
+        $params[] = (string) $_GET['trade_id'];
+    }
 
     $limit  = max(1, min(500, (int) ($_GET['limit'] ?? 100)));
     $offset = max(0, (int) ($_GET['offset'] ?? 0));
 
     $whereSql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
 
-    $lastQuery = "SELECT l.id, l.user_id, u.username, l.signal_id, l.notification_type, l.strategy,
+    $lastQuery = "SELECT l.id, l.user_id, u.username, l.signal_id, l.trade_id, l.event_hash, l.notification_type, l.strategy,
                 l.symbol, l.status, l.telegram_response, l.error_detail, l.sent_at
            FROM telegram_delivery_log l
            LEFT JOIN users u ON u.id = l.user_id
@@ -117,12 +121,28 @@ try {
         }
     }
 
+    /* Duplicate-event audit: an event (same trade_id + notification_type)
+       should only ever have ONE 'sent' row. More than one means the
+       duplicate-notification bug is present for that event. */
+    $lastQuery = "SELECT trade_id, notification_type, COUNT(*) AS c
+                    FROM telegram_delivery_log
+                   WHERE status = 'sent' AND trade_id IS NOT NULL
+                GROUP BY trade_id, notification_type
+                  HAVING COUNT(*) > 1
+                   ORDER BY c DESC
+                   LIMIT 50";
+    $dupStmt = $pdo->prepare($lastQuery);
+    $dupStmt->execute();
+    $duplicateEvents = $dupStmt->fetchAll() ?: [];
+
     jsonResponse([
         'entries' => $rows,
         'total'   => $total,
         'limit'   => $limit,
         'offset'  => $offset,
         'stats'   => $statusCounts,
+        'duplicate_events' => $duplicateEvents,
+        'duplicate_event_count' => count($duplicateEvents),
     ]);
 } catch (\Throwable $e) {
     $response = APILogger::logEndpointError('/api/admin/telegram_delivery_log', 'GET', $e, $lastQuery, $lastParams);
