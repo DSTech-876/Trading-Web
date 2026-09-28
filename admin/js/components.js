@@ -108,21 +108,27 @@ const AdminComponents = (() => {
             icon = 'folder',
             content,
             isOpen = true,
-            onToggle = null
+            onToggle = null,
+            count = null // optional item/record counter shown next to the title
         } = options;
 
         const sectionKey = 'collapsed_' + id;
         const isCollapsed = localStorage.getItem(sectionKey) === 'true';
         const displayClass = isCollapsed ? 'collapsed' : '';
         const contentDisplay = isCollapsed ? 'display: none;' : '';
+        const countBadge = count !== null && count !== undefined
+            ? `<span class="badge section-count-badge ms-2" data-section-count>${escapeHtml(count)}</span>`
+            : '';
 
         const html = `
-            <div class="collapsible-section mb-3">
+            <div class="collapsible-section mb-3" data-section-id="${escapeHtml(id)}">
                 <button class="btn btn-outline-secondary w-100 text-start d-flex justify-content-between align-items-center ${displayClass}" 
-                        type="button" data-bs-toggle="collapse" data-bs-target="#${id}">
-                    <div>
+                        type="button" data-bs-toggle="collapse" data-bs-target="#${id}"
+                        aria-expanded="${!isCollapsed}" aria-controls="${id}">
+                    <div class="d-flex align-items-center flex-wrap">
                         <i class="fas fa-${icon} me-2"></i>
                         <span>${escapeHtml(title)}</span>
+                        ${countBadge}
                     </div>
                     <i class="fas fa-chevron-down collapse-icon"></i>
                 </button>
@@ -144,8 +150,22 @@ const AdminComponents = (() => {
         button.addEventListener('click', () => {
             const isNowCollapsed = !element.querySelector('.collapse').classList.contains('show');
             localStorage.setItem(sectionKey, isNowCollapsed);
+            button.setAttribute('aria-expanded', String(!isNowCollapsed));
             if (onToggle) onToggle(isNowCollapsed);
         });
+
+        // Allow callers to update the counter badge later (e.g. after a
+        // lazily-loaded dataset finishes fetching its total record count).
+        element.updateCount = (nextCount) => {
+            let badge = element.querySelector('[data-section-count]');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'badge section-count-badge ms-2';
+                badge.setAttribute('data-section-count', '');
+                button.querySelector('div').appendChild(badge);
+            }
+            badge.textContent = String(nextCount);
+        };
 
         return element;
     };

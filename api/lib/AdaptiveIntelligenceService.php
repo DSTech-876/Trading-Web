@@ -809,7 +809,10 @@ function adaptiveExportUserTrades(PDO $pdo, int $userId, array $filters = []): a
         $params[] = $symbol;
     }
 
-    $where[] = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes_json, '$.trust_source')), '') <> 'UNTRUSTED_CLIENT_REPORTED'";
+    /* This export is the full audit-trail for a user's adaptive trade history, so it must include
+     * every recorded trade — including untrusted client-reported ones that did not contribute to
+     * learning aggregates — each explicitly labeled with a `trusted` flag rather than silently
+     * dropped, so an inspector can always tell which trades counted toward adaptive learning. */
     $stmt = $pdo->prepare('SELECT * FROM adaptive_trade_history WHERE ' . implode(' AND ', $where) . ' ORDER BY created_at DESC, id DESC');
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
@@ -818,6 +821,7 @@ function adaptiveExportUserTrades(PDO $pdo, int $userId, array $filters = []): a
         $row['confluence_factors_present'] = json_decode((string) ($row['confluence_factors_json'] ?? ''), true) ?: [];
         $row['confluence_factors_raw'] = json_decode((string) ($row['confluence_factors_raw_json'] ?? ''), true) ?: [];
         $row['notes'] = json_decode((string) ($row['notes_json'] ?? ''), true) ?: [];
+        $row['trusted'] = ($row['notes']['trust_source'] ?? null) !== 'UNTRUSTED_CLIENT_REPORTED';
         unset($row['id'], $row['user_id'], $row['confluence_factors_json'], $row['confluence_factors_raw_json'], $row['notes_json'], $row['created_at'], $row['updated_at']);
         return $row;
     }, $rows);
@@ -1758,14 +1762,18 @@ function adaptiveBootstrap(PDO $pdo, int $userId, array $filters = []): array
     $factors = $factorStmt->fetchAll();
 
     $tradeStmt = $pdo->prepare(
-        'SELECT id, trade_id, signal_id, symbol, market_category, strategy_key, direction, result, r_multiple, profit_points,
-                telegram_sent, telegram_decision, confidence_score, qualification_band, mtf_status, created_at
+        "SELECT id, trade_id, signal_id, symbol, market_category, strategy_key, direction, result, r_multiple, profit_points,
+                telegram_sent, telegram_decision, confidence_score, qualification_band, mtf_status, created_at,
+                CASE WHEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes_json, '\$.trust_source')), '') = 'UNTRUSTED_CLIENT_REPORTED' THEN 0 ELSE 1 END AS trusted
            FROM adaptive_trade_history
           WHERE user_id = ? AND market_category = ?
-          ORDER BY created_at DESC LIMIT 100'
+          ORDER BY created_at DESC LIMIT 100"
     );
     $tradeStmt->execute([$userId, $category]);
-    $trades = $tradeStmt->fetchAll();
+    $trades = array_map(static function (array $row): array {
+        $row['trusted'] = (bool) $row['trusted'];
+        return $row;
+    }, $tradeStmt->fetchAll());
 
     $decisionStmt = $pdo->prepare(
         'SELECT signal_id, symbol, market_category, strategy_key, telegram_action, qualification_band, signal_score,
@@ -1864,6 +1872,29 @@ function adaptiveUserIntelligenceDetail(PDO $pdo, int $userId, array $filters = 
         $tradeParams[] = $symbolValue;
     }
     $tradeSql = 'WHERE ' . implode(' AND ', $tradeWhere);
+
+    /* Separate, trust-unfiltered where-clause for the raw per-trade "Trade History" list/export
+     * below. Aggregate learning stats above intentionally exclude untrusted client-reported trades
+     * so weight adjustments are not spoofable, but the raw trade list must show every recorded
+     * trade (including untrusted ones) with an explicit trusted flag so it is always possible to
+     * tell, per trade, whether it counted toward adaptive learning. */
+    $tradeHistoryWhere = ['user_id = ?'];
+    $tradeHistoryParams = [$userId];
+    if ($categoryValue !== null) {
+        $tradeHistoryWhere[] = 'market_category = ?';
+        $tradeHistoryParams[] = $categoryValue;
+    }
+    if ($strategyValue !== null) {
+        $tradeHistoryWhere[] = 'strategy_key = ?';
+        $tradeHistoryParams[] = $strategyValue;
+    }
+    if ($symbolValue !== null) {
+        $tradeHistoryWhere[] = 'symbol = ?';
+        $tradeHistoryParams[] = $symbolValue;
+    }
+    $tradeHistorySql = 'WHERE ' . implode(' AND ', $tradeHistoryWhere);
+    $trustedColumnSql = "CASE WHEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT(notes_json, '\$.trust_source')), '') = 'UNTRUSTED_CLIENT_REPORTED' THEN 0 ELSE 1 END";
+
     $decisionWhere = ['user_id = ?'];
     $decisionParams = [$userId];
     if ($categoryValue !== null) {
@@ -1961,23 +1992,30 @@ function adaptiveUserIntelligenceDetail(PDO $pdo, int $userId, array $filters = 
     $adaptiveProfileStmt->execute([$userId]);
     $adaptiveProfiles = $adaptiveProfileStmt->fetchAll();
 
-    $tradesStmt = $pdo->prepare('SELECT id, trade_id, symbol, market_category, strategy_key, result, r_multiple, confidence_score, created_at FROM adaptive_trade_history ' . $tradeSql . ' ORDER BY created_at DESC LIMIT 30');
-    $tradesStmt->execute($tradeParams);
-    $trades = $tradesStmt->fetchAll();
+    $tradesStmt = $pdo->prepare("SELECT id, trade_id, symbol, market_category, strategy_key, result, r_multiple, confidence_score, created_at, $trustedColumnSql AS trusted FROM adaptive_trade_history " . $tradeHistorySql . ' ORDER BY created_at DESC LIMIT 30');
+    $tradesStmt->execute($tradeHistoryParams);
+    $trades = array_map(static function (array $row): array {
+        $row['trusted'] = (bool) $row['trusted'];
+        return $row;
+    }, $tradesStmt->fetchAll());
 
     /* Server-side paginated/sortable/searchable "Recent Trades" view. */
     $tradesPaginated = adaptiveFetchPaginated(
         $pdo,
         'adaptive_trade_history',
-        $tradeWhere,
-        $tradeParams,
+        $tradeHistoryWhere,
+        $tradeHistoryParams,
         $filters,
         'trades',
         'created_at',
         ['created_at', 'symbol', 'market_category', 'strategy_key', 'result', 'r_multiple', 'confidence_score'],
         ['trade_id', 'symbol', 'market_category', 'strategy_key', 'result'],
-        'id, trade_id, symbol, market_category, strategy_key, result, r_multiple, confidence_score, created_at'
+        "id, trade_id, symbol, market_category, strategy_key, result, r_multiple, confidence_score, created_at, $trustedColumnSql AS trusted"
     );
+    $tradesPaginated['rows'] = array_map(static function (array $row): array {
+        $row['trusted'] = (bool) $row['trusted'];
+        return $row;
+    }, $tradesPaginated['rows']);
 
     $decisionStmt = $pdo->prepare('SELECT signal_id, market_category, strategy_key, telegram_action, qualification_band, final_confidence_score, created_at FROM adaptive_signal_decisions ' . $decisionSql . ' ORDER BY created_at DESC LIMIT 30');
     $decisionStmt->execute($decisionParams);

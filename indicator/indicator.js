@@ -1670,6 +1670,18 @@ function syncPersistentAdaptiveTradeHistory() {
           signal._adaptiveTradeSynced = true;
           signal._adaptiveTradeFailures = 0;
           signal._adaptiveTradeNextRetryAt = 0;
+          /* recordResult.learning_applied is only present on a fresh (non-duplicate) trade;
+             a duplicate response means this exact trade was already recorded previously, so
+             its trust status is whatever was determined the first time and is left untouched. */
+          if (!recordResult.duplicate && typeof recordResult.learning_applied === "boolean") {
+            signal._adaptiveTradeTrusted = recordResult.learning_applied;
+            const scopeLabel = `${signal.strategyType || signal.type || "strategy"} ${signal.symbol || getActiveSymbol()}`;
+            console.log(
+              recordResult.learning_applied
+                ? `[Adaptive] Trade trusted: ${scopeLabel} result=${result} — counted toward DB learning aggregates.`
+                : `[Adaptive] Trade NOT trusted: ${scopeLabel} result=${result} — stored as history only, excluded from adaptive learning (no matching qualified signal decision found).`
+            );
+          }
         })
         .catch((err) => {
           console.warn("Adaptive trade sync failed:", err.message);
@@ -3196,13 +3208,16 @@ async function saveNotificationPreferences(partial) {
  * admin "Telegram Delivery Log" page. Never throws — logging failures must
  * not interrupt the notification pipeline itself.
  */
-async function recordTelegramDeliveryLog(kind, payload, status, extra = {}) {
+async function recordTelegramDeliveryLog(kind, payload, status, extra = {}, eventHash = null) {
   if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
   try {
+    const signalId = payload && payload.signalId != null ? String(payload.signalId) : null;
     await profileApiFetch(TELEGRAM_DELIVERY_LOG_API_URL, {
       method: "POST",
       body: JSON.stringify({
-        signal_id: payload && payload.signalId != null ? String(payload.signalId) : null,
+        signal_id: signalId,
+        trade_id: signalId,
+        event_hash: eventHash || (signalId ? hashLifecycleEventKey(`${signalId}|${kind}`) : null),
         notification_type: kind,
         strategy: payload && payload.strategyLabel ? payload.strategyLabel : null,
         symbol: payload && payload.symbol ? payload.symbol : null,
@@ -12042,6 +12057,80 @@ function buildLifecycleTelegramCaption(kind, payload) {
   return lines.join("\n");
 }
 
+/**
+ * Maps a lifecycle "kind" (setup/active/tp/sl/cancelled/expired/...) to the
+ * notification_type enum accepted by the persistent, database-backed
+ * idempotency registry (/api/trades/check_notification). This is what makes
+ * duplicate-prevention survive page reloads / app restarts for EVERY
+ * strategy that routes through sendSignalLifecycleTelegram() — not just
+ * Grid Scalper MA, which previously was the only strategy backed by a
+ * database dedup check (via TradeOutcomeService). Root cause of the
+ * "duplicate SL notification every few minutes" bug: the old code only
+ * guarded against duplicates with an in-memory Set
+ * (sendSignalLifecycleTelegram._sentKeys) that is wiped on every reload/
+ * restart, so a re-evaluated candle history or reconnect replay could
+ * re-fire an already-delivered TP/SL/lifecycle alert.
+ */
+const LIFECYCLE_NOTIFICATION_TYPE_MAP = {
+  setup: "LIFECYCLE_SETUP",
+  approaching: "LIFECYCLE_APPROACHING",
+  active: "LIFECYCLE_ACTIVE",
+  tp: "LIFECYCLE_TP",
+  sl: "LIFECYCLE_SL",
+  cancelled: "LIFECYCLE_CANCELLED",
+  expired: "LIFECYCLE_EXPIRED"
+};
+
+/** Small deterministic string hash — used as the `event_hash` idempotency
+ *  fingerprint stored alongside every Telegram delivery-log row so the
+ *  admin audit trail can detect duplicate events even across the
+ *  trade_id/notification_type composite key (Requirement 1). */
+function hashLifecycleEventKey(key) {
+  let hash = 0;
+  const s = String(key || "");
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+  return "evt_" + Math.abs(hash).toString(36);
+}
+
+/** Persistent (database-backed) duplicate check — survives reloads/restarts. */
+async function isLifecycleNotificationAlreadySent(tradeId, kind) {
+  const notifType = LIFECYCLE_NOTIFICATION_TYPE_MAP[kind];
+  if (!tradeId || !notifType) return false;
+  try {
+    if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return false;
+    const resp = await profileApiFetch(
+      "../api/trades/check_notification?trade_id=" + encodeURIComponent(tradeId) +
+      "&notification_type=" + encodeURIComponent(notifType)
+    );
+    return !!(resp && resp.sent === true);
+  } catch (e) {
+    /* If the check itself fails (offline/500), do not block sending — the
+       in-memory guard + delivery log still provide protection, and we never
+       want a network hiccup to permanently swallow a real TP/SL alert. */
+    return false;
+  }
+}
+
+/** Registers a lifecycle notification as sent in the persistent idempotency
+ *  registry so future reloads/restarts can never re-fire it. Best-effort:
+ *  failures are logged but never block the caller. */
+async function registerLifecycleNotificationSent(tradeId, signalId, kind, status) {
+  const notifType = LIFECYCLE_NOTIFICATION_TYPE_MAP[kind];
+  if (!tradeId || !notifType) return;
+  try {
+    if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
+    await profileApiFetch("../api/trades/check_notification", {
+      method: "POST",
+      body: JSON.stringify({
+        trade_id: tradeId,
+        signal_id: signalId || tradeId,
+        notification_type: notifType,
+        telegram_status: status === "sent" ? "sent" : (status === "failed" ? "failed" : "skipped")
+      })
+    });
+  } catch (e) { /* best-effort only */ }
+}
+
 async function sendSignalLifecycleTelegram(kind, payload, force = false) {
   if (payload && !payload.signalId) {
     const basis = [
@@ -12087,13 +12176,27 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
   const enabled = channel === "strategy" ? telegramStrategyAutoSend : telegramAutoSend;
   if (!enabled && !force) return false;
   let dedupeKey = null;
+  let eventHash = null;
   if (payload && payload.signalId) {
     dedupeKey = `${payload.signalId}|${kind}`;
+    eventHash = hashLifecycleEventKey(dedupeKey);
     if (!force) {
       sendSignalLifecycleTelegram._sentKeys = sendSignalLifecycleTelegram._sentKeys || new Set();
       sendSignalLifecycleTelegram._inFlightKeys = sendSignalLifecycleTelegram._inFlightKeys || new Set();
       if (sendSignalLifecycleTelegram._sentKeys.has(dedupeKey) || sendSignalLifecycleTelegram._inFlightKeys.has(dedupeKey)) {
         logSignalEngineDebug("TELEGRAM_SKIPPED", { reason: "dedupe", kind, signalId: payload.signalId });
+        return false;
+      }
+      /* Persistent, database-backed check: catches duplicates that the
+         in-memory Set cannot, because it survives page reloads, app
+         restarts, and reconnects. This is the fix for repeated SL/TP/
+         lifecycle notifications recurring after the in-memory guard was
+         wiped (e.g. "another SL notification every 5 minutes"). */
+      const alreadySent = await isLifecycleNotificationAlreadySent(payload.signalId, kind);
+      if (alreadySent) {
+        sendSignalLifecycleTelegram._sentKeys.add(dedupeKey);
+        logSignalEngineDebug("TELEGRAM_SKIPPED", { reason: "dedupe_persisted", kind, signalId: payload.signalId });
+        recordTelegramDeliveryLog(kind, payload || {}, "skipped", { error: "Duplicate suppressed by persistent idempotency registry" }, eventHash);
         return false;
       }
     }
@@ -12123,7 +12226,14 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
       signalId: payload && payload.signalId ? payload.signalId : null,
       channel
     });
-    recordTelegramDeliveryLog(kind, payload || {}, "sent", { response: resultData && resultData.ok ? "ok" : JSON.stringify(resultData || {}) });
+    recordTelegramDeliveryLog(kind, payload || {}, "sent", { response: resultData && resultData.ok ? "ok" : JSON.stringify(resultData || {}) }, eventHash);
+    if (!force && payload && payload.signalId) {
+      /* Register in the persistent idempotency registry AFTER a confirmed
+         successful send only — mirrors the atomicity fix already applied to
+         Grid Scalper MA (never mark "sent" before the Telegram call
+         resolves, and never persist a dedup record for a failed send). */
+      registerLifecycleNotificationSent(payload.signalId, payload.signalId, kind, "sent");
+    }
   } catch (err) {
     addLog(`📤 Lifecycle Telegram error: ${err.message}`);
     logSignalEngineDebug("TELEGRAM_FAILED", {
@@ -12131,7 +12241,7 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
       signalId: payload && payload.signalId ? payload.signalId : null,
       error: err.message
     });
-    recordTelegramDeliveryLog(kind, payload || {}, "failed", { error: err.message });
+    recordTelegramDeliveryLog(kind, payload || {}, "failed", { error: err.message }, eventHash);
   } finally {
     if (!force && dedupeKey && sendSignalLifecycleTelegram._inFlightKeys) {
       sendSignalLifecycleTelegram._inFlightKeys.delete(dedupeKey);

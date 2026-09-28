@@ -103,11 +103,20 @@ if ($method === 'GET') {
             ]);
         }
 
+        /* Server-side pagination + search, matching every other admin list
+           endpoint (Requirement 7: server-side pagination only, accurate
+           total counts, search compatible with pagination). Stats/total
+           user count are aggregated across the ENTIRE user base — not just
+           the current page — because they represent system-wide totals. */
+        $page    = max(1, (int) ($_GET['page'] ?? 1));
+        $perPage = min(200, max(10, (int) ($_GET['per_page'] ?? 50)));
+        $search  = trim((string) ($_GET['search'] ?? ''));
+
         /* List all users with their preferences (defaults if not saved) */
         $userStmt = $pdo->prepare('SELECT id, username FROM users ORDER BY username');
         $userStmt->execute();
         $users = $userStmt->fetchAll() ?: [];
-        
+
         $prefStmt = $pdo->prepare('SELECT * FROM user_notification_preferences');
         $prefStmt->execute();
         $prefRows = $prefStmt->fetchAll() ?: [];
@@ -118,7 +127,7 @@ if ($method === 'GET') {
             }
         }
 
-        $list = [];
+        $fullList = [];
         $stats = array_fill_keys(array_keys(ADMIN_NOTIF_PREF_COLUMNS), 0);
         foreach ($users as $u) {
             if (!$u || !isset($u['id'])) {
@@ -129,7 +138,7 @@ if ($method === 'GET') {
             foreach ($prefs as $col => $val) {
                 if ($val) $stats[$col]++;
             }
-            $list[] = [
+            $fullList[] = [
                 'user_id'     => $uid,
                 'username'    => $u['username'] ?? 'unknown',
                 'preferences' => $prefs,
@@ -137,10 +146,30 @@ if ($method === 'GET') {
             ];
         }
 
+        /* Search filter applies to the paginated view only — stats and
+           total_users above always reflect the full, unfiltered user base. */
+        $filteredList = $search === ''
+            ? $fullList
+            : array_values(array_filter($fullList, function ($row) use ($search) {
+                return stripos($row['username'], $search) !== false;
+            }));
+
+        $total = count($filteredList);
+        $lastPage = max(1, (int) ceil($total / $perPage));
+        if ($page > $lastPage) {
+            $page = $lastPage;
+        }
+        $offset = ($page - 1) * $perPage;
+        $pagedList = array_slice($filteredList, $offset, $perPage);
+
         jsonResponse([
-            'users'      => $list,
+            'users'       => $pagedList,
+            'page'        => $page,
+            'per_page'    => $perPage,
+            'total'       => $total,
+            'last_page'   => $lastPage,
             'total_users' => count($users),
-            'stats'      => $stats,
+            'stats'       => $stats,
         ]);
     } catch (\Throwable $e) {
         $response = APILogger::logEndpointError('/api/admin/notification_preferences', 'GET', $e);

@@ -346,6 +346,8 @@ CREATE TABLE IF NOT EXISTS telegram_delivery_log (
     id                BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     user_id           INT UNSIGNED    DEFAULT NULL,
     signal_id         VARCHAR(120)    DEFAULT NULL,
+    trade_id          VARCHAR(120)    DEFAULT NULL,
+    event_hash        VARCHAR(64)     DEFAULT NULL,
     notification_type VARCHAR(40)     NOT NULL,
     strategy          VARCHAR(60)     DEFAULT NULL,
     symbol            VARCHAR(40)     DEFAULT NULL,
@@ -356,12 +358,43 @@ CREATE TABLE IF NOT EXISTS telegram_delivery_log (
 
     INDEX idx_tdl_user       (user_id),
     INDEX idx_tdl_signal     (signal_id),
+    INDEX idx_tdl_trade      (trade_id),
+    INDEX idx_tdl_event_hash (event_hash),
     INDEX idx_tdl_type       (notification_type),
     INDEX idx_tdl_sent_at    (sent_at),
 
     CONSTRAINT fk_tdl_user
         FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ──────────────────────────────────────────────
+-- Migration: Add trade_id / event_hash to telegram_delivery_log for
+-- existing deployments (Telegram delivery-log audit trail requirement).
+-- Safe to re-run: guarded by information_schema checks below.
+-- ──────────────────────────────────────────────
+SET @tdl_has_trade_id := (
+    SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'telegram_delivery_log' AND COLUMN_NAME = 'trade_id'
+);
+SET @tdl_sql := IF(@tdl_has_trade_id = 0,
+    'ALTER TABLE telegram_delivery_log ADD COLUMN trade_id VARCHAR(120) DEFAULT NULL AFTER signal_id, ADD INDEX idx_tdl_trade (trade_id)',
+    'SELECT 1'
+);
+PREPARE tdl_stmt FROM @tdl_sql;
+EXECUTE tdl_stmt;
+DEALLOCATE PREPARE tdl_stmt;
+
+SET @tdl_has_event_hash := (
+    SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'telegram_delivery_log' AND COLUMN_NAME = 'event_hash'
+);
+SET @tdl_hash_sql := IF(@tdl_has_event_hash = 0,
+    'ALTER TABLE telegram_delivery_log ADD COLUMN event_hash VARCHAR(64) DEFAULT NULL AFTER trade_id, ADD INDEX idx_tdl_event_hash (event_hash)',
+    'SELECT 1'
+);
+PREPARE tdl_hash_stmt FROM @tdl_hash_sql;
+EXECUTE tdl_hash_stmt;
+DEALLOCATE PREPARE tdl_hash_stmt;
 
 -- ──────────────────────────────────────────────
 -- Adaptive optimization profiles (per user/symbol/timeframe/strategy/regime)

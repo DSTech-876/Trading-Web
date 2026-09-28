@@ -8,6 +8,8 @@
  * POST — record one delivery attempt:
  *   {
  *     "signal_id": "mtf-abc123",
+ *     "trade_id": "mtf-abc123",
+ *     "event_hash": "sha256-or-numeric-hash-of-event-identity",
  *     "notification_type": "tp" | "sl" | "setup" | "active" | "cancelled" | "expired" | ...,
  *     "strategy": "MTF Top-Down",
  *     "symbol": "R_100",
@@ -17,7 +19,10 @@
  *   }
  *
  * This feeds the admin "Telegram Delivery Log" page used to diagnose
- * missing notifications.
+ * missing notifications. `trade_id` + `event_hash` allow the audit trail to
+ * detect duplicate delivery attempts for the exact same trade/event without
+ * blocking legitimate retries (failed → sent) which are expected to share
+ * the same trade_id/event_hash but differ in status/timestamp.
  */
 
 declare(strict_types=1);
@@ -50,11 +55,13 @@ try {
     $pdo = getDB();
     $pdo->prepare(
         'INSERT INTO telegram_delivery_log
-            (user_id, signal_id, notification_type, strategy, symbol, status, telegram_response, error_detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            (user_id, signal_id, trade_id, event_hash, notification_type, strategy, symbol, status, telegram_response, error_detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     )->execute([
         $userId,
         isset($body['signal_id']) ? substr((string) $body['signal_id'], 0, 120) : null,
+        isset($body['trade_id']) ? substr((string) $body['trade_id'], 0, 120) : null,
+        isset($body['event_hash']) ? substr((string) $body['event_hash'], 0, 64) : null,
         substr($notificationType, 0, 40),
         isset($body['strategy']) ? substr((string) $body['strategy'], 0, 60) : null,
         isset($body['symbol']) ? substr((string) $body['symbol'], 0, 40) : null,

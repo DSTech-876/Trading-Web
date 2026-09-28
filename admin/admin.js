@@ -1454,25 +1454,59 @@ const NOTIF_PREF_COLUMNS = [
   ["telegram_high_confidence_only", "High-Conf Only"],
 ];
 let notifPrefUsersCache = [];
+let notifPrefPage = 1;
+const NOTIF_PREF_PAGE_SIZE = 50;
+let notifPrefSearchDebounce = null;
 
-async function loadNotificationPreferences() {
+async function loadNotificationPreferences(page = 1) {
   const tbody = el("notifPrefsTableBody");
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="12" class="table-empty">Loading…</td></tr>`;
+  notifPrefPage = Math.max(1, page);
+  const params = new URLSearchParams();
+  const search = (el("notifPrefSearch")?.value || "").trim();
+  if (search) params.set("search", search);
+  params.set("page", String(notifPrefPage));
+  params.set("per_page", String(NOTIF_PREF_PAGE_SIZE));
   try {
-    const resp = await apiRequest("/admin/notification_preferences");
+    const resp = await apiRequest(`/admin/notification_preferences?${params.toString()}`);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       tbody.innerHTML = `<tr><td colspan="12" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load preferences")}</td></tr>`;
+      renderNotifPrefsPagination(0, 0);
       return;
     }
     const data = await resp.json();
     notifPrefUsersCache = data.users || [];
+    const total = data.total ?? notifPrefUsersCache.length;
+    const lastPage = data.last_page || Math.max(1, Math.ceil(total / NOTIF_PREF_PAGE_SIZE));
+    if (data.page && data.page !== notifPrefPage) notifPrefPage = data.page;
     renderNotifPrefStats(data.stats || {}, data.total_users || 0);
     renderNotifPrefsTable(notifPrefUsersCache);
+    renderNotifPrefsPagination(total, notifPrefPage, lastPage);
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="12" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
+    renderNotifPrefsPagination(0, 0);
   }
+}
+
+function renderNotifPrefsPagination(total, page, lastPage) {
+  const container = el("notifPrefsPagination");
+  if (!container) return;
+  container.innerHTML = "";
+  const last = lastPage || Math.max(1, Math.ceil(total / NOTIF_PREF_PAGE_SIZE));
+  if (last <= 1) return;
+
+  const prev = mkBtn("← Prev", page <= 1, () => loadNotificationPreferences(page - 1));
+  container.appendChild(prev);
+
+  const info = document.createElement("span");
+  info.className = "page-info";
+  info.textContent = `Page ${page} / ${last} (${total} users)`;
+  container.appendChild(info);
+
+  const next = mkBtn("Next →", page >= last, () => loadNotificationPreferences(page + 1));
+  container.appendChild(next);
 }
 
 function renderNotifPrefStats(stats, totalUsers) {
@@ -1487,14 +1521,12 @@ function renderNotifPrefStats(stats, totalUsers) {
 function renderNotifPrefsTable(users) {
   const tbody = el("notifPrefsTableBody");
   if (!tbody) return;
-  const q = (el("notifPrefSearch")?.value || "").trim().toLowerCase();
-  const filtered = q ? users.filter(u => u.username.toLowerCase().includes(q)) : users;
-  if (!filtered.length) {
+  if (!users.length) {
     tbody.innerHTML = `<tr><td colspan="12" class="table-empty">No users found.</td></tr>`;
     return;
   }
   tbody.innerHTML = "";
-  for (const u of filtered) {
+  for (const u of users) {
     const tr = document.createElement("tr");
     const checks = NOTIF_PREF_COLUMNS.map(([col]) =>
       `<td><input type="checkbox" data-pref-col="${col}" data-user-id="${u.user_id}" ${u.preferences[col] ? "checked" : ""} /></td>`
@@ -1541,7 +1573,7 @@ function renderNotifPrefsTable(users) {
           alert(err.error || "Failed to reset preferences");
           return;
         }
-        await loadNotificationPreferences();
+        await loadNotificationPreferences(notifPrefPage);
       } catch (ex) {
         alert("Network error — " + ex.message);
       }
@@ -1551,7 +1583,10 @@ function renderNotifPrefsTable(users) {
 
 function bindNotificationPreferences() {
   el("refreshNotifPrefsBtn")?.addEventListener("click", () => loadNotificationPreferences());
-  el("notifPrefSearch")?.addEventListener("input", () => renderNotifPrefsTable(notifPrefUsersCache));
+  el("notifPrefSearch")?.addEventListener("input", () => {
+    clearTimeout(notifPrefSearchDebounce);
+    notifPrefSearchDebounce = setTimeout(() => loadNotificationPreferences(1), 300);
+  });
 
   el("notifPrefApplyDefaultsBtn")?.addEventListener("click", async () => {
     try {
@@ -1559,7 +1594,7 @@ function bindNotificationPreferences() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { alert(data.error || "Failed to apply defaults"); return; }
       alert(`Applied defaults to ${data.applied_count || 0} user(s).`);
-      await loadNotificationPreferences();
+      await loadNotificationPreferences(notifPrefPage);
     } catch (ex) {
       alert("Network error — " + ex.message);
     }
@@ -1586,7 +1621,7 @@ function bindNotificationPreferences() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { alert(data.error || "Bulk update failed"); return; }
       alert(`Updated ${data.updated_count || 0} user(s).`);
-      await loadNotificationPreferences();
+      await loadNotificationPreferences(notifPrefPage);
     } catch (ex) {
       alert("Network error — " + ex.message);
     }
@@ -1602,7 +1637,7 @@ let tgDeliveryLogPage = 1;
 async function loadTelegramDeliveryLog(page = 1) {
   const tbody = el("tgDeliveryLogTableBody");
   if (!tbody) return;
-  tbody.innerHTML = `<tr><td colspan="8" class="table-empty">Loading…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="9" class="table-empty">Loading…</td></tr>`;
 
   tgDeliveryLogPage = Math.max(1, page);
 
@@ -1620,7 +1655,7 @@ async function loadTelegramDeliveryLog(page = 1) {
     const resp = await apiRequest(`/admin/telegram_delivery_log?${params.toString()}`);
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      tbody.innerHTML = `<tr><td colspan="8" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load delivery log")}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="table-empty" style="color:var(--danger-soft)">Error: ${escHtml(err.error || "Failed to load delivery log")}</td></tr>`;
       renderTgDeliveryLogPagination(0, 0);
       return;
     }
@@ -1630,11 +1665,11 @@ async function loadTelegramDeliveryLog(page = 1) {
     if (tgDeliveryLogPage > lastPage) {
       return loadTelegramDeliveryLog(lastPage);
     }
-    renderTgDeliveryStats(data.stats || {});
+    renderTgDeliveryStats(data.stats || {}, data.duplicate_event_count || 0, data.duplicate_events || []);
     renderTgDeliveryLogTable(data.entries || []);
     renderTgDeliveryLogPagination(total, tgDeliveryLogPage);
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty" style="color:var(--danger-soft)">Network error — ${escHtml(e.message)}</td></tr>`;
     renderTgDeliveryLogPagination(0, 0);
   }
 }
@@ -1659,20 +1694,27 @@ function renderTgDeliveryLogPagination(total, page) {
   container.appendChild(next);
 }
 
-function renderTgDeliveryStats(stats) {
+function renderTgDeliveryStats(stats, duplicateEventCount = 0, duplicateEvents = []) {
   const bar = el("tgDeliveryStatsBar");
   if (!bar) return;
+  const dupTitle = duplicateEvents.length
+    ? duplicateEvents.map((d) => `${escHtml(d.trade_id)} (${escHtml(d.notification_type)}) x${d.c}`).join("\n")
+    : "No duplicate events detected";
   bar.innerHTML = `
     <div class="stat-card"><div class="stat-label">✅ Sent</div><div class="stat-value">${stats.sent || 0}</div></div>
     <div class="stat-card"><div class="stat-label">❌ Failed</div><div class="stat-value">${stats.failed || 0}</div></div>
-    <div class="stat-card"><div class="stat-label">⏭️ Skipped</div><div class="stat-value">${stats.skipped || 0}</div></div>`;
+    <div class="stat-card"><div class="stat-label">⏭️ Skipped</div><div class="stat-value">${stats.skipped || 0}</div></div>
+    <div class="stat-card" title="${dupTitle}" style="${duplicateEventCount > 0 ? 'border-color:var(--danger-soft)' : ''}">
+      <div class="stat-label">⚠️ Duplicate Events</div>
+      <div class="stat-value" style="${duplicateEventCount > 0 ? 'color:var(--danger-soft)' : ''}">${duplicateEventCount}</div>
+    </div>`;
 }
 
 function renderTgDeliveryLogTable(entries) {
   const tbody = el("tgDeliveryLogTableBody");
   if (!tbody) return;
   if (!entries.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No delivery log entries yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty">No delivery log entries yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = "";
@@ -1684,6 +1726,7 @@ function renderTgDeliveryLogTable(entries) {
       <td class="ts">${fmtDate(e2.sent_at)}</td>
       <td>${escHtml(e2.username || "(deleted user)")}</td>
       <td class="ts">${escHtml(e2.signal_id || "—")}</td>
+      <td class="ts" title="${escHtml(e2.event_hash || '')}">${escHtml(e2.trade_id || e2.signal_id || "—")}</td>
       <td>${escHtml(e2.notification_type)}</td>
       <td>${escHtml(e2.strategy || "—")}</td>
       <td>${escHtml(e2.symbol || "—")}</td>
@@ -2397,7 +2440,7 @@ function renderAdaptiveTrades(pageData) {
   if (!tbody) return;
   const rows = pageData.rows || [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">No adaptive trade history found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="table-empty">No adaptive trade history found.</td></tr>';
     renderAdaptiveTablePagination('trades', pageData);
     return;
   }
@@ -2410,6 +2453,7 @@ function renderAdaptiveTrades(pageData) {
       <td>${escHtml(row.result)}</td>
       <td>${adaptiveNumber(row.r_multiple, 2)}</td>
       <td>${adaptivePct(row.confidence_score, 1)}</td>
+      <td><span class="badge bg-${row.trusted ? 'info' : 'secondary'}" title="${row.trusted ? 'Counted toward adaptive learning aggregates' : 'Excluded from adaptive learning aggregates'}">${row.trusted ? 'Trusted' : 'Untrusted'}</span></td>
     </tr>`).join('');
   renderAdaptiveTablePagination('trades', pageData);
 }

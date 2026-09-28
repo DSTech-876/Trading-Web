@@ -89,7 +89,14 @@ try {
             'PARTIAL_TP_1', 'PARTIAL_TP_2', 'PARTIAL_TP_3',
             'TRADE_WIN', 'TRADE_LOSS', 'TRADE_BREAKEVEN',
             'TRADE_EXPIRED', 'TRADE_CANCELLED',
-            'ENTRY_ALERT', 'OUTCOME_ALERT'
+            'ENTRY_ALERT', 'OUTCOME_ALERT',
+            /* Generic signal-lifecycle notification kinds shared by every
+               strategy (MTF Top-Down, Breakout, Adaptive Intelligence, etc.)
+               via sendSignalLifecycleTelegram(). These map 1:1 to the "kind"
+               argument of that function so any strategy can be protected by
+               the same DB-backed idempotency registry as Grid Scalper MA. */
+            'LIFECYCLE_SETUP', 'LIFECYCLE_APPROACHING', 'LIFECYCLE_ACTIVE',
+            'LIFECYCLE_TP', 'LIFECYCLE_SL', 'LIFECYCLE_CANCELLED', 'LIFECYCLE_EXPIRED'
         ];
         if (!in_array($notifType, $validTypes, true)) {
             jsonResponse(['error' => 'Invalid notification_type: ' . $notifType], 400);

@@ -652,7 +652,7 @@
       if (section === 'Trade History') {
         const detail = await api(`/admin/adaptive?action=detail&user_id=${user.id}`).catch(() => ({ trades: [] }));
         const trades = detail.trades || [];
-        return `<div class="mini-list">${trades.map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.symbol)} · ${escapeHtml(item.strategy_key)}</div><div class="text-muted small">${escapeHtml(formatRelativeOrDate(item.created_at))}</div></div><span class="badge bg-${item.result === 'WIN' ? 'success' : item.result === 'LOSS' ? 'danger' : 'secondary'}">${escapeHtml(item.result)}</span></div>`).join('') || '<div class="text-muted small">No adaptive trade history found for this user.</div>'}</div>`;
+        return `<div class="mini-list">${trades.map((item) => `<div class="mini-item"><div><div class="fw-semibold">${escapeHtml(item.symbol)} · ${escapeHtml(item.strategy_key)}</div><div class="text-muted small">${escapeHtml(formatRelativeOrDate(item.created_at))}</div></div><div class="d-flex gap-2"><span class="badge bg-${item.trusted ? 'info' : 'secondary'}" title="${item.trusted ? 'Counted toward adaptive learning aggregates' : 'Excluded from adaptive learning aggregates (no matching qualified signal decision)'}">${item.trusted ? 'Trusted' : 'Untrusted'}</span><span class="badge bg-${item.result === 'WIN' ? 'success' : item.result === 'LOSS' ? 'danger' : 'secondary'}">${escapeHtml(item.result)}</span></div></div>`).join('') || '<div class="text-muted small">No adaptive trade history found for this user.</div>'}</div>`;
       }
       const detail = await api(`/admin/adaptive?action=detail&user_id=${user.id}`).catch(() => ({ pipeline_diagnostics: {}, ingestion_diagnostics: {} }));
       const pipeline = detail.pipeline_diagnostics || {};
@@ -816,7 +816,7 @@
   function logsPage() {
     document.body.innerHTML = createPageShell({
       title: 'Logs Viewer',
-      subtitle: 'Browse high-volume system logs with filters, virtualized rendering, infinite scrolling, and CSV export.',
+      subtitle: 'Browse admin audit-trail actions with filters, virtualized rendering, infinite scrolling, and CSV export.',
       breadcrumbs: 'Admin / Logs',
       activeNav: 'logs',
       controls: '<button id="exportLogsBtn" class="btn btn-outline-secondary btn-sm">Export CSV</button>'
@@ -824,7 +824,7 @@
     document.getElementById('pageContent').innerHTML = `
       <section class="hero-card mb-4">
         <div class="row g-3">
-          <div class="col-12 col-md-3"><label class="form-label">Level</label><select id="logsLevel" class="form-select"><option value="">All</option><option value="debug">Debug</option><option value="info">Info</option><option value="warning">Warning</option><option value="error">Error</option><option value="fatal">Fatal</option></select></div>
+          <div class="col-12 col-md-3"><label class="form-label">Level</label><select id="logsLevel" class="form-select"><option value="">All</option><option value="info">Info</option><option value="error">Error</option></select></div>
           <div class="col-12 col-md-3"><label class="form-label">Source</label><select id="logsSource" class="form-select"><option value="">All</option><option value="strategy">Strategy</option><option value="telegram">Telegram</option><option value="api">API</option><option value="database">Database</option></select></div>
           <div class="col-12 col-md-2"><label class="form-label">From</label><input id="logsFrom" type="date" class="form-control"></div>
           <div class="col-12 col-md-2"><label class="form-label">To</label><input id="logsTo" type="date" class="form-control"></div>
