@@ -112,55 +112,97 @@ if ($method === 'GET') {
         $perPage = min(200, max(10, (int) ($_GET['per_page'] ?? 50)));
         $search  = trim((string) ($_GET['search'] ?? ''));
 
-        /* List all users with their preferences (defaults if not saved) */
-        $userStmt = $pdo->prepare('SELECT id, username FROM users ORDER BY username');
-        $userStmt->execute();
-        $users = $userStmt->fetchAll() ?: [];
+        /* Count total users matching search, and paginate in SQL */
+        $searchWhere = $search === '' ? '1=1' : 'username LIKE ?';
+        $searchParam = $search === '' ? [] : ['%' . $search . '%'];
 
-        $prefStmt = $pdo->prepare('SELECT * FROM user_notification_preferences');
-        $prefStmt->execute();
-        $prefRows = $prefStmt->fetchAll() ?: [];
-        $byUser = [];
-        foreach ($prefRows as $r) {
-            if ($r && isset($r['user_id'])) {
-                $byUser[(int) $r['user_id']] = adminNotifPrefRowToBool($r);
-            }
-        }
+        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM users WHERE $searchWhere");
+        $countStmt->execute($searchParam);
+        $total = (int) ($countStmt->fetchColumn() ?: 0);
 
-        $fullList = [];
-        $stats = array_fill_keys(array_keys(ADMIN_NOTIF_PREF_COLUMNS), 0);
-        foreach ($users as $u) {
-            if (!$u || !isset($u['id'])) {
-                continue;
-            }
-            $uid = (int) $u['id'];
-            $prefs = $byUser[$uid] ?? adminNotifPrefDefaults();
-            foreach ($prefs as $col => $val) {
-                if ($val) $stats[$col]++;
-            }
-            $fullList[] = [
-                'user_id'     => $uid,
-                'username'    => $u['username'] ?? 'unknown',
-                'preferences' => $prefs,
-                'is_default'  => !isset($byUser[$uid]),
-            ];
-        }
+        /* Count all users in database (for stats context) */
+        $allUserCountStmt = $pdo->prepare("SELECT COUNT(*) FROM users");
+        $allUserCountStmt->execute();
+        $totalUsersInDatabase = (int) ($allUserCountStmt->fetchColumn() ?: 0);
 
-        /* Search filter applies to the paginated view only — stats and
-           total_users above always reflect the full, unfiltered user base. */
-        $filteredList = $search === ''
-            ? $fullList
-            : array_values(array_filter($fullList, function ($row) use ($search) {
-                return stripos($row['username'], $search) !== false;
-            }));
-
-        $total = count($filteredList);
         $lastPage = max(1, (int) ceil($total / $perPage));
         if ($page > $lastPage) {
             $page = $lastPage;
         }
         $offset = ($page - 1) * $perPage;
-        $pagedList = array_slice($filteredList, $offset, $perPage);
+
+        /* List users with their preferences (with pagination in SQL) */
+        $userSql = "SELECT id, username FROM users WHERE $searchWhere ORDER BY username LIMIT ? OFFSET ?";
+        $userStmt = $pdo->prepare($userSql);
+        $paramIdx = 1;
+        foreach ($searchParam as $param) {
+            $userStmt->bindValue($paramIdx++, $param, \PDO::PARAM_STR);
+        }
+        $userStmt->bindValue($paramIdx++, $perPage, \PDO::PARAM_INT);
+        $userStmt->bindValue($paramIdx++, $offset, \PDO::PARAM_INT);
+        $userStmt->execute();
+        $users = $userStmt->fetchAll() ?: [];
+
+        $userIds = array_map(fn($u) => (int) ($u['id'] ?? 0), $users);
+        $userIds = array_filter($userIds);
+
+        /* Load preferences only for users on this page */
+        $pagedList = [];
+        if ($userIds) {
+            $placeholders = implode(',', array_fill(0, count($userIds), '?'));
+            $prefSql = "SELECT * FROM user_notification_preferences WHERE user_id IN ($placeholders)";
+            $prefStmt = $pdo->prepare($prefSql);
+            $prefStmt->execute($userIds);
+            $prefRows = $prefStmt->fetchAll() ?: [];
+            $byUser = [];
+            foreach ($prefRows as $r) {
+                if ($r && isset($r['user_id'])) {
+                    $byUser[(int) $r['user_id']] = adminNotifPrefRowToBool($r);
+                }
+            }
+
+            foreach ($users as $u) {
+                if (!$u || !isset($u['id'])) {
+                    continue;
+                }
+                $uid = (int) $u['id'];
+                $pagedList[] = [
+                    'user_id'     => $uid,
+                    'username'    => $u['username'] ?? 'unknown',
+                    'preferences' => $byUser[$uid] ?? adminNotifPrefDefaults(),
+                    'is_default'  => !isset($byUser[$uid]),
+                ];
+            }
+        }
+
+        /* Compute stats across ALL users (not filtered by search) */
+        $allPrefStmt = $pdo->prepare('SELECT * FROM user_notification_preferences');
+        $allPrefStmt->execute();
+        $allPrefRows = $allPrefStmt->fetchAll() ?: [];
+        $stats = array_fill_keys(array_keys(ADMIN_NOTIF_PREF_COLUMNS), 0);
+
+        /* Count preferences across all users */
+        $allUserStmt = $pdo->prepare('SELECT id FROM users');
+        $allUserStmt->execute();
+        $allUsers = $allUserStmt->fetchAll() ?: [];
+        foreach ($allUsers as $u) {
+            $uid = (int) ($u['id'] ?? 0);
+            if (!$uid) continue;
+
+            /* Find prefs for this user */
+            $userPrefs = null;
+            foreach ($allPrefRows as $r) {
+                if ((int) ($r['user_id'] ?? 0) === $uid) {
+                    $userPrefs = adminNotifPrefRowToBool($r);
+                    break;
+                }
+            }
+            $prefs = $userPrefs ?? adminNotifPrefDefaults();
+
+            foreach ($prefs as $col => $val) {
+                if ($val) $stats[$col]++;
+            }
+        }
 
         jsonResponse([
             'users'       => $pagedList,
@@ -168,7 +210,7 @@ if ($method === 'GET') {
             'per_page'    => $perPage,
             'total'       => $total,
             'last_page'   => $lastPage,
-            'total_users' => count($users),
+            'total_users' => $totalUsersInDatabase,
             'stats'       => $stats,
         ]);
     } catch (\Throwable $e) {
