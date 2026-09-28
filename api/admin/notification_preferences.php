@@ -120,6 +120,11 @@ if ($method === 'GET') {
         $countStmt->execute($searchParam);
         $total = (int) ($countStmt->fetchColumn() ?: 0);
 
+        /* Count all users in database (for stats context) */
+        $allUserCountStmt = $pdo->prepare("SELECT COUNT(*) FROM users");
+        $allUserCountStmt->execute();
+        $totalUsersInDatabase = (int) ($allUserCountStmt->fetchColumn() ?: 0);
+
         $lastPage = max(1, (int) ceil($total / $perPage));
         if ($page > $lastPage) {
             $page = $lastPage;
@@ -205,7 +210,7 @@ if ($method === 'GET') {
             'per_page'    => $perPage,
             'total'       => $total,
             'last_page'   => $lastPage,
-            'total_users' => count($users),
+            'total_users' => $totalUsersInDatabase,
             'stats'       => $stats,
         ]);
     } catch (\Throwable $e) {
