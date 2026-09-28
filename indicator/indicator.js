@@ -12187,6 +12187,11 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
         logSignalEngineDebug("TELEGRAM_SKIPPED", { reason: "dedupe", kind, signalId: payload.signalId });
         return false;
       }
+      /* Claim the dedup key atomically BEFORE checking persistent registry
+         to prevent race condition where two concurrent calls both observe
+         the registry as empty, both send the message, then both register.
+         Must add to _inFlightKeys before any async operations. */
+      sendSignalLifecycleTelegram._inFlightKeys.add(dedupeKey);
       /* Persistent, database-backed check: catches duplicates that the
          in-memory Set cannot, because it survives page reloads, app
          restarts, and reconnects. This is the fix for repeated SL/TP/
@@ -12195,6 +12200,7 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
       const alreadySent = await isLifecycleNotificationAlreadySent(payload.signalId, kind);
       if (alreadySent) {
         sendSignalLifecycleTelegram._sentKeys.add(dedupeKey);
+        sendSignalLifecycleTelegram._inFlightKeys.delete(dedupeKey);
         logSignalEngineDebug("TELEGRAM_SKIPPED", { reason: "dedupe_persisted", kind, signalId: payload.signalId });
         recordTelegramDeliveryLog(kind, payload || {}, "skipped", { error: "Duplicate suppressed by persistent idempotency registry" }, eventHash);
         return false;
@@ -12207,10 +12213,6 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
   } catch (err) {
     addLog(`📤 Lifecycle Telegram skipped: ${err.message}`);
     return false;
-  }
-  if (!force && dedupeKey) {
-    sendSignalLifecycleTelegram._inFlightKeys = sendSignalLifecycleTelegram._inFlightKeys || new Set();
-    sendSignalLifecycleTelegram._inFlightKeys.add(dedupeKey);
   }
   let sent = false;
   try {
@@ -12231,8 +12233,10 @@ async function sendSignalLifecycleTelegram(kind, payload, force = false) {
       /* Register in the persistent idempotency registry AFTER a confirmed
          successful send only — mirrors the atomicity fix already applied to
          Grid Scalper MA (never mark "sent" before the Telegram call
-         resolves, and never persist a dedup record for a failed send). */
-      registerLifecycleNotificationSent(payload.signalId, payload.signalId, kind, "sent");
+         resolves, and never persist a dedup record for a failed send).
+         Await this write to make it part of the delivery transaction and
+         ensure the registration completes before the function resolves. */
+      await registerLifecycleNotificationSent(payload.signalId, payload.signalId, kind, "sent");
     }
   } catch (err) {
     addLog(`📤 Lifecycle Telegram error: ${err.message}`);

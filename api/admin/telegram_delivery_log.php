@@ -122,12 +122,15 @@ try {
     }
 
     /* Duplicate-event audit: an event (same trade_id + notification_type)
-       should only ever have ONE 'sent' row. More than one means the
-       duplicate-notification bug is present for that event. */
-    $lastQuery = "SELECT trade_id, notification_type, COUNT(*) AS c
+       should only ever have ONE 'sent' row per user and event identity. More
+       than one means the duplicate-notification bug is present for that event.
+       Must include user_id and event_hash in grouping because duplicate
+       registry is scoped per user and client-generated signal IDs can collide
+       between users. */
+    $lastQuery = "SELECT user_id, trade_id, event_hash, notification_type, COUNT(*) AS c
                     FROM telegram_delivery_log
                    WHERE status = 'sent' AND trade_id IS NOT NULL
-                GROUP BY trade_id, notification_type
+                GROUP BY user_id, trade_id, event_hash, notification_type
                   HAVING COUNT(*) > 1
                    ORDER BY c DESC
                    LIMIT 50";
