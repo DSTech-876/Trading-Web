@@ -2440,7 +2440,7 @@ function renderAdaptiveTrades(pageData) {
   if (!tbody) return;
   const rows = pageData.rows || [];
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">No adaptive trade history found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="table-empty">No adaptive trade history found.</td></tr>';
     renderAdaptiveTablePagination('trades', pageData);
     return;
   }
@@ -2453,6 +2453,7 @@ function renderAdaptiveTrades(pageData) {
       <td>${escHtml(row.result)}</td>
       <td>${adaptiveNumber(row.r_multiple, 2)}</td>
       <td>${adaptivePct(row.confidence_score, 1)}</td>
+      <td><span class="badge bg-${row.trusted ? 'info' : 'secondary'}" title="${row.trusted ? 'Counted toward adaptive learning aggregates' : 'Excluded from adaptive learning aggregates'}">${row.trusted ? 'Trusted' : 'Untrusted'}</span></td>
     </tr>`).join('');
   renderAdaptiveTablePagination('trades', pageData);
 }

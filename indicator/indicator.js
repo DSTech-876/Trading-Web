@@ -1670,6 +1670,18 @@ function syncPersistentAdaptiveTradeHistory() {
           signal._adaptiveTradeSynced = true;
           signal._adaptiveTradeFailures = 0;
           signal._adaptiveTradeNextRetryAt = 0;
+          /* recordResult.learning_applied is only present on a fresh (non-duplicate) trade;
+             a duplicate response means this exact trade was already recorded previously, so
+             its trust status is whatever was determined the first time and is left untouched. */
+          if (!recordResult.duplicate && typeof recordResult.learning_applied === "boolean") {
+            signal._adaptiveTradeTrusted = recordResult.learning_applied;
+            const scopeLabel = `${signal.strategyType || signal.type || "strategy"} ${signal.symbol || getActiveSymbol()}`;
+            console.log(
+              recordResult.learning_applied
+                ? `[Adaptive] Trade trusted: ${scopeLabel} result=${result} — counted toward DB learning aggregates.`
+                : `[Adaptive] Trade NOT trusted: ${scopeLabel} result=${result} — stored as history only, excluded from adaptive learning (no matching qualified signal decision found).`
+            );
+          }
         })
         .catch((err) => {
           console.warn("Adaptive trade sync failed:", err.message);
