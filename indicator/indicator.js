@@ -15035,6 +15035,13 @@ function processCandle(idx) {
             addLog(`${fastPattern} at #${idx} — TRADE ENTRY (lower-TF)`);
             addLog(`Confluence score: ${confluenceScore}`);
             recordSignal(fastPattern);
+          } else {
+            /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
+               min R:R, recent-loss pause, strength requirement, etc.) — clear both
+               confirmInfo and indecisionInfo so the pipeline keeps hunting for a
+               fresh setup instead of permanently freezing in the CONFIRM phase. */
+            confirmInfo = null;
+            indecisionInfo = null;
           }
         } else {
           /* Fast-track blocked by a filter — clear indecision so normal path resumes */
@@ -15279,6 +15286,12 @@ function processCandle(idx) {
         /* Confluence score was already computed for the min gate check above */
         addLog(`Confluence score: ${confluenceScore}`);
         recordSignal(confirmPattern);
+      } else {
+        /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
+           min R:R, recent-loss pause, strength requirement, symbol eligibility, etc.)
+           — clear confirmInfo so the pipeline keeps watching subsequent candles for
+           a fresh valid confirmation instead of permanently freezing in CONFIRM. */
+        confirmInfo = null;
       }
     }
     return;
