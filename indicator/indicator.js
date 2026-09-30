@@ -1523,6 +1523,24 @@ function stopLifecycleHealthMonitor() {
   lifecycleHealthTimer = null;
 }
 
+const PIPELINE_DELAY_WARN_MS = 5000; /* flag any pipeline stage delay exceeding 5 seconds */
+
+/**
+ * Audit helper for the breakout → signal-created → signal-stored → Telegram-sent
+ * pipeline. Computes elapsed time since a prior timestamp and always records it via
+ * logSignalEngineDebug; additionally raises a visible addLog() warning once the
+ * delay exceeds PIPELINE_DELAY_WARN_MS so late signals are easy to spot in the log.
+ */
+function logPipelineDelay(stage, sinceMs, extra = {}) {
+  if (!Number.isFinite(sinceMs) || sinceMs <= 0) return null;
+  const delayMs = Date.now() - sinceMs;
+  logSignalEngineDebug("PIPELINE_DELAY", Object.assign({ stage, delayMs }, extra));
+  if (delayMs > PIPELINE_DELAY_WARN_MS) {
+    addLog(`⏱️ PIPELINE DELAY — ${stage} took ${(delayMs / 1000).toFixed(1)}s (exceeds ${(PIPELINE_DELAY_WARN_MS / 1000).toFixed(0)}s threshold)`);
+  }
+  return delayMs;
+}
+
 function logSignalLifecycleEvent(symbol, stage, details = null) {
   const sym = symbol || getActiveSymbol() || "UNKNOWN";
   const stageName = String(stage || "").trim();
@@ -14604,6 +14622,24 @@ function runIntrabarTimingOptimizations(currentCandle) {
   if (!currentCandle || candles.length < 2) return;
 
   const idx = candles.length - 1;
+
+  /* Detect the breakout itself intrabar instead of waiting for the level-breaking
+     candle to close. Waiting for candle close was the single biggest source of
+     delayed entries — by the time the candle finished forming, most of the
+     initial breakout move (and its best entry price) was already gone. All
+     existing breakout filters (EMA/HTF/MTF alignment, HH/HL, session, volume
+     spike) and the downstream false-breakout / follow-through invalidation
+     checks still apply, so signal quality is preserved while latency drops. */
+  if (!monitoringTrade && !trade && !breakout && phase === "BREAKOUT") {
+    const prevMode = _entryModeContext;
+    _entryModeContext = "aggressive_intrabar";
+    try {
+      processLatestCandle();
+    } finally {
+      _entryModeContext = prevMode;
+    }
+  }
+
   if (!monitoringTrade && !trade && breakout && retestInfo && indecisionInfo && !confirmInfo && phase === "CONFIRM" && idx > indecisionInfo.candleIdx) {
     const prevMode = _entryModeContext;
     _entryModeContext = "aggressive_intrabar";
@@ -14848,7 +14884,7 @@ function processCandle(idx) {
         addLog(`Bullish breakout at #${idx} BLOCKED by volume spike filter (candle range too small)`);
         return;
       }
-      breakout = { dir: "BULL", candleIdx: idx, level: openingRange.high, strong: conviction, volumeSpike, signalId: generateSignalId("breakout") };
+      breakout = { dir: "BULL", candleIdx: idx, level: openingRange.high, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now() };
       retestCount = 0;  /* reset retest counter for double-retest filter */
       setPhase("RETEST");
       addLog(`BULLISH breakout at candle #${idx}, level ${fmt(openingRange.high, 4)}${conviction ? " (STRONG)" : " (WEAK)"}${volumeSpike ? " 📈 Vol Spike" : ""}`);
@@ -14892,7 +14928,7 @@ function processCandle(idx) {
         addLog(`Bearish breakout at #${idx} BLOCKED by volume spike filter (candle range too small)`);
         return;
       }
-      breakout = { dir: "BEAR", candleIdx: idx, level: openingRange.low, strong: conviction, volumeSpike, signalId: generateSignalId("breakout") };
+      breakout = { dir: "BEAR", candleIdx: idx, level: openingRange.low, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now() };
       retestCount = 0;  /* reset retest counter for double-retest filter */
       setPhase("RETEST");
       addLog(`BEARISH breakout at candle #${idx}, level ${fmt(openingRange.low, 4)}${conviction ? " (STRONG)" : " (WEAK)"}${volumeSpike ? " 📈 Vol Spike" : ""}`);
@@ -15693,7 +15729,8 @@ function recordConfirmedSignal(confirmPattern) {
     entryMode: getCurrentEntryMode(),
     lotSize: null,
     pipsAtRisk: null,
-    stake: null
+    stake: null,
+    breakoutDetectedAtMs: breakout ? breakout.detectedAtMs : null
   };
   stampSignalLifecycle(signal);
   signalHistory.push(signal);
@@ -15701,6 +15738,12 @@ function recordConfirmedSignal(confirmPattern) {
   persistSignalHistory();
   updateStatsUI();
   updateSignalBanners();
+  /* Pipeline audit: breakout detected → signal created (this CONFIRMED entry) */
+  if (breakout && Number.isFinite(breakout.detectedAtMs)) {
+    logPipelineDelay("Breakout detected → Signal created", breakout.detectedAtMs, {
+      signalId: signal.signalId || null, symbol: sym
+    });
+  }
 }
 
 function recordSignal(confirmPattern) {
@@ -15758,8 +15801,10 @@ function recordSignal(confirmPattern) {
   signal.entryProgressAtr = trade.entryProgressAtr;
   signal.entryBodyAtr = trade.entryBodyAtr;
   signal.entryCloseLocation = trade.entryCloseLocation;
+  if (signal.breakoutDetectedAtMs == null && breakout) signal.breakoutDetectedAtMs = breakout.detectedAtMs;
   stampSignalLifecycle(signal, { atrAtSignal: trade.atrAtEntry });
   trade.signalId = signal.signalId;
+  trade.breakoutDetectedAtMs = signal.breakoutDetectedAtMs;
 
   /* Populate lot-size fields from account sizing */
   if (accountSize > 0 && riskPercent > 0) {
@@ -15773,6 +15818,12 @@ function recordSignal(confirmPattern) {
   if (!lastConfirmed) {
     signalHistory.push(signal);
     if (signalHistory.length > SIGNAL_HISTORY_MAX) signalHistory.shift();
+  }
+  /* Pipeline audit: breakout detected → signal stored as PENDING trade */
+  if (Number.isFinite(signal.breakoutDetectedAtMs)) {
+    logPipelineDelay("Breakout detected → Signal stored", signal.breakoutDetectedAtMs, {
+      signalId: signal.signalId || null, symbol: signal.symbol
+    });
   }
   /* Capture chart screenshot as data URL for PDF export */
   try {
@@ -15801,6 +15852,11 @@ function recordSignal(confirmPattern) {
     setTimeout(() => {
       sendTelegramStrategyAlert(signal).then(() => {
         addLog(`[BREAKOUT SENT] Telegram notification delivered successfully`);
+        if (Number.isFinite(signal.breakoutDetectedAtMs)) {
+          logPipelineDelay("Breakout detected → Telegram sent (auto)", signal.breakoutDetectedAtMs, {
+            signalId: signal.signalId || null, symbol: signal.symbol
+          });
+        }
       }).catch((err) => {
         addLog(`[BREAKOUT FAILED] Telegram notification delivery failed: ${err.message}`);
       });
@@ -19747,6 +19803,12 @@ async function sendTelegramAlert() {
         signalId: pending.signalId || null,
         channel: "telegram"
       });
+      /* Pipeline audit: breakout detected → Telegram notification sent */
+      if (Number.isFinite(pending.breakoutDetectedAtMs)) {
+        logPipelineDelay("Breakout detected → Telegram sent", pending.breakoutDetectedAtMs, {
+          signalId: pending.signalId || null, symbol: pending.symbol
+        });
+      }
     }
     addLog("📤 Telegram alert sent successfully");
     if (UI.telegramStatus) {
@@ -19814,6 +19876,12 @@ async function sendPanelTelegramAlert(symbol) {
         signalId: pending.signalId || null,
         channel: "telegram"
       });
+      /* Pipeline audit: breakout detected → Telegram notification sent */
+      if (Number.isFinite(pending.breakoutDetectedAtMs)) {
+        logPipelineDelay("Breakout detected → Telegram sent", pending.breakoutDetectedAtMs, {
+          signalId: pending.signalId || null, symbol: pending.symbol || symbol
+        });
+      }
     }
     addLog(`📤 [${symbol}] Telegram alert sent — TRADE setup`);
     if (UI.telegramStatus) {
