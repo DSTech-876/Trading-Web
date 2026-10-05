@@ -244,7 +244,12 @@ let dynamicConfRangingDelta       = DYNAMIC_CONF_RANGING_DELTA_DEFAULT;
 
 /* Auto-trade risk/execution controls */
 const AUTO_TRADE_RISK_PER_TRADE_PCT    = 0.01;
-const AUTO_TRADE_DAILY_LOSS_CAP_PCT    = 4;
+const AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT = 4;
+/* Admin-editable daily loss cap % — overridden by fetchRiskConfig() below from
+ * /api/mt5/risk_config.php (backed by the admin-managed risk_settings table).
+ * Falls back to AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT if the fetch fails or
+ * the endpoint is unreachable (e.g. logged out, offline). */
+let AUTO_TRADE_DAILY_LOSS_CAP_PCT = AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT;
 const AUTO_TRADE_COOLDOWN_AFTER_LOSS_MS = 90 * 1000;
 const AUTO_TRADE_SYMBOL_FREQ_WINDOW_MS  = 15 * 60 * 1000;
 const AUTO_TRADE_MAX_TRADES_PER_SYMBOL_WINDOW = 4;
@@ -16401,6 +16406,23 @@ function mt5BridgeHeaders(extra = {}) {
   return h;
 }
 
+/** Fetch the admin-configured daily loss limit % from the server, overriding
+ *  AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT. Silently keeps the default on any
+ *  failure (not logged in, offline, server error) so this never blocks or
+ *  breaks auto-trading — it only ever narrows/widens the existing safety cap. */
+async function fetchRiskConfig() {
+  try {
+    if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
+    const resp = await fetch("/api/mt5/risk_config.php", { headers: mt5BridgeHeaders() });
+    const data = await safeJson(resp);
+    const pct = Number(data?.dailyLossLimitPct);
+    if (resp.ok && data?.ok && Number.isFinite(pct) && pct > 0) {
+      AUTO_TRADE_DAILY_LOSS_CAP_PCT = pct;
+      addLog(`⚙ Daily loss cap set from admin config: ${fmt(pct, 1)}%`);
+    }
+  } catch { /* keep default — non-critical background fetch */ }
+}
+
 function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake) {
   const currentPrice = candles.length > 0 ? Number(candles[candles.length - 1]?.close || candles[candles.length - 1]?.c || 0) : null;
   const side = effectiveDir === "BULL" ? "BUY" : "SELL";
@@ -30597,6 +30619,10 @@ document.addEventListener("DOMContentLoaded", () => {
     restoreSignalLifecycleState();
     initTheme();
   });
+
+  /* Fetch admin-configured risk settings (daily loss cap %) in the background;
+     non-blocking, falls back to AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT on failure. */
+  safeRun("risk config fetch", () => { fetchRiskConfig(); });
 
   /* Initialize Grid Scalper MA Opposite Mode & Adaptive System */
   if (typeof initGridScalperMAOpposite === "function") {

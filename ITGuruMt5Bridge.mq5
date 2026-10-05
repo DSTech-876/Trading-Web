@@ -82,6 +82,12 @@ string   g_serverHaltReason    = "";
 datetime g_dayStart             = 0;
 double   g_dayStartEquity       = 0.0;
 
+// Admin-editable daily loss limit %, relayed from the server via pull.php's
+// "dailyLossLimitPct" field so an operator can change it without recompiling
+// the EA. -1 means "not yet received from server" — falls back to the
+// compiled-in InpDailyLossLimitPct input until the first successful poll.
+double   g_serverDailyLossLimitPct = -1.0;
+
 // Processed-signal de-duplication (persisted across restarts)
 string   g_processedIds[];
 long     g_processedAt[];
@@ -650,9 +656,21 @@ void ResetDailyTrackingIfNeeded()
 
 datetime g_lastDailyLossLogAt = 0;
 
+// Effective daily loss limit %: prefers the admin-configured value relayed by
+// the server (risk_settings, via pull.php's "dailyLossLimitPct" field) so an
+// operator can retune this without recompiling/redeploying the EA. Falls back
+// to the compiled-in InpDailyLossLimitPct input if the server hasn't supplied
+// a value yet (e.g. before the first successful poll) or sends an invalid one.
+double EffectiveDailyLossLimitPct()
+{
+   if(g_serverDailyLossLimitPct > 0) return g_serverDailyLossLimitPct;
+   return InpDailyLossLimitPct;
+}
+
 void CheckDailyLossHalt()
 {
-   if(InpDailyLossLimitPct<=0 || g_dayStartEquity<=0) return;
+   double limitPct = EffectiveDailyLossLimitPct();
+   if(limitPct<=0 || g_dayStartEquity<=0) return;
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    // A transient ACCOUNT_EQUITY==0 (or disconnected terminal) reading is a
    // broker-sync glitch, not a real loss — skip the loss calculation to avoid
@@ -673,16 +691,17 @@ void CheckDailyLossHalt()
                "dayStartEquity="+DoubleToString(g_dayStartEquity,2)+
                " equity="+DoubleToString(equity,2)+
                " loss%="+DoubleToString(lossPct,2)+
-               " limit%="+DoubleToString(InpDailyLossLimitPct,2)+
+               " limit%="+DoubleToString(limitPct,2)+
+               " limitSource="+(g_serverDailyLossLimitPct>0?"server(admin)":"local(input)")+
                " halted="+(string)g_dailyLossHalted);
    }
 
-   if(lossPct >= InpDailyLossLimitPct && !g_dailyLossHalted)
+   if(lossPct >= limitPct && !g_dailyLossHalted)
    {
       g_dailyLossHalted = true;
       RecomputeHaltState();
       SaveDailyState();
-      LogEvent("ERROR","DAILY_LOSS_HALT","","loss%="+DoubleToString(lossPct,2)+" limit%="+(string)InpDailyLossLimitPct);
+      LogEvent("ERROR","DAILY_LOSS_HALT","","loss%="+DoubleToString(lossPct,2)+" limit%="+DoubleToString(limitPct,2));
       Alert("ITGuruMt5Bridge: Daily loss limit reached ("+DoubleToString(lossPct,2)+"%). New trades halted.");
       SendNotification("ITGuruMt5Bridge: Daily loss limit reached. Trading halted.");
    }
@@ -1063,6 +1082,15 @@ void PollAndExecute()
       Print(msg);
       SendNotification(msg);
       LogEvent("INFO","RECONNECTED","",msg);
+   }
+
+   double newServerDailyLossLimitPct = JsonGetNumber(resp,"dailyLossLimitPct",-1.0);
+   if(newServerDailyLossLimitPct > 0 && MathAbs(newServerDailyLossLimitPct - g_serverDailyLossLimitPct) > 0.0001)
+   {
+      LogEvent("INFO","DAILY_LOSS_LIMIT_UPDATED","",
+               "server-configured daily loss limit changed: "+DoubleToString(g_serverDailyLossLimitPct,2)+
+               "% -> "+DoubleToString(newServerDailyLossLimitPct,2)+"%");
+      g_serverDailyLossLimitPct = newServerDailyLossLimitPct;
    }
 
    bool serverHalted = JsonGetBool(resp,"halted",false);

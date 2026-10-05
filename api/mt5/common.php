@@ -111,6 +111,37 @@ function mt5HaltReason(): string
 }
 
 /**
+ * Admin-editable daily loss limit %, stored in risk_settings (single row,
+ * id=1). Surfaced to the EA via pull.php so ITGuruMt5Bridge.mq5 can honor
+ * admin changes without recompiling, and to the web client via
+ * risk_config.php instead of a hardcoded constant. Falls back to 5.0 on any
+ * DB error so a misconfigured/unreachable DB never breaks signal dispatch.
+ */
+function mt5GetDailyLossLimitPct(): float
+{
+    static $cached = null;
+    if ($cached !== null) return $cached;
+
+    try {
+        $pdo = getDB();
+        $stmt = $pdo->query('SELECT daily_loss_limit_pct FROM risk_settings WHERE id = 1');
+        $row = $stmt ? $stmt->fetch(PDO::FETCH_ASSOC) : false;
+        if (is_array($row) && isset($row['daily_loss_limit_pct'])) {
+            $pct = (float) $row['daily_loss_limit_pct'];
+            if ($pct > 0) {
+                $cached = $pct;
+                return $cached;
+            }
+        }
+    } catch (\Throwable $e) {
+        error_log('mt5GetDailyLossLimitPct DB error: ' . $e->getMessage());
+    }
+
+    $cached = 5.0;
+    return $cached;
+}
+
+/**
  * @param array<string,mixed> $body
  */
 function mt5RequireBridgeKey(array $body = []): void

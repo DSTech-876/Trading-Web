@@ -1342,3 +1342,24 @@ COLLATE=utf8mb4_unicode_ci;
 -- ALTER TABLE telegram_delivery_log ADD INDEX idx_tdl_user_created (user_id, created_at);
 -- ALTER TABLE adaptive_learning_profiles ADD INDEX idx_alp_user_strategy (user_id, strategy_type);
 -- ALTER TABLE adaptive_metric_snapshots ADD INDEX idx_ams_user_timestamp (user_id, capture_timestamp);
+
+-- ──────────────────────────────────────────────
+-- Risk settings
+-- Single-row, admin-editable platform risk controls (e.g. daily loss limit %
+-- applied by the web auto-trade engine and relayed to the MT5 bridge EA via
+-- api/mt5/pull.php). Row id is always 1 — there is only ever one active config.
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS risk_settings (
+    id                      TINYINT UNSIGNED NOT NULL PRIMARY KEY DEFAULT 1,
+    daily_loss_limit_pct    DECIMAL(5,2) NOT NULL DEFAULT 5.00,
+    updated_by              INT UNSIGNED DEFAULT NULL,
+    updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    CONSTRAINT chk_rs_single_row CHECK (id = 1),
+    CONSTRAINT chk_rs_daily_loss_limit_pct CHECK (daily_loss_limit_pct > 0 AND daily_loss_limit_pct <= 100),
+
+    CONSTRAINT fk_rs_updated_by
+        FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT IGNORE INTO risk_settings (id, daily_loss_limit_pct) VALUES (1, 5.00);
