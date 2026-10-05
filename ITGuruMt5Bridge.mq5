@@ -648,6 +648,8 @@ void ResetDailyTrackingIfNeeded()
    }
 }
 
+datetime g_lastDailyLossLogAt = 0;
+
 void CheckDailyLossHalt()
 {
    if(InpDailyLossLimitPct<=0 || g_dayStartEquity<=0) return;
@@ -658,6 +660,23 @@ void CheckDailyLossHalt()
    // cycles that can momentarily zero out account data).
    if(equity<=0 || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
    double lossPct = (g_dayStartEquity - equity) / g_dayStartEquity * 100.0;
+
+   // Throttled visibility log (every 60s) so the daily-loss baseline/inputs can
+   // be audited even when the limit is never breached. Uses real account
+   // equity only — never derived from signal counts or rejected/unfilled
+   // orders, so a string of EA-side rejections cannot move this number.
+   datetime nowT = TimeCurrent();
+   if(nowT - g_lastDailyLossLogAt >= 60)
+   {
+      g_lastDailyLossLogAt = nowT;
+      LogEvent("INFO","DAILY_LOSS_CHECK","",
+               "dayStartEquity="+DoubleToString(g_dayStartEquity,2)+
+               " equity="+DoubleToString(equity,2)+
+               " loss%="+DoubleToString(lossPct,2)+
+               " limit%="+DoubleToString(InpDailyLossLimitPct,2)+
+               " halted="+(string)g_dailyLossHalted);
+   }
+
    if(lossPct >= InpDailyLossLimitPct && !g_dailyLossHalted)
    {
       g_dailyLossHalted = true;
@@ -925,17 +944,24 @@ bool SendTrade(const BridgeOrder &o)
       req.type_filling = ORDER_FILLING_RETURN;
    }
 
+   LogEvent("INFO","ORDER_SEND_REQUEST",o.orderId,
+            "action="+(string)req.action+" type="+(string)req.type+" symbol="+req.symbol+
+            " volume="+DoubleToString(req.volume,2)+" price="+DoubleToString(req.price,_Digits)+
+            " sl="+DoubleToString(req.sl,_Digits)+" tp="+DoubleToString(req.tp,_Digits)+
+            " deviation="+(string)req.deviation+" magic="+(string)req.magic);
+
    bool ok=false;
    int attempt=0;
    for(attempt=0; attempt<=InpMaxOrderRetries; attempt++)
    {
       ZeroMemory(res);
       ok = OrderSend(req,res);
+      LogEvent("INFO","BROKER_RESPONSE",o.orderId,
+               "attempt="+(string)(attempt+1)+" ok="+(string)ok+" retcode="+(string)res.retcode+
+               " deal="+(string)res.deal+" order="+(string)res.order+" price="+DoubleToString(res.price,_Digits)+
+               " comment="+res.comment);
       if(ok && (res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_DONE_PARTIAL || res.retcode==TRADE_RETCODE_PLACED))
          break;
-
-      LogEvent("WARN","ORDER_ATTEMPT_FAIL",o.orderId,
-               "attempt="+(string)(attempt+1)+" ok="+(string)ok+" retcode="+(string)res.retcode+" comment="+res.comment);
 
       if(!IsRetriableRetcode(res.retcode) || attempt==InpMaxOrderRetries)
          break;

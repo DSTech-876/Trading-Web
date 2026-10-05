@@ -16452,8 +16452,22 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
 }
 
 function resolveMt5HistoryResult(status) {
-  if (status === "FILLED") return "WIN";
-  if (status === "REJECTED" || status === "CANCELLED" || status === "EXPIRED") return "LOSS";
+  /* IMPORTANT: a bridge/EA status is NOT a trade outcome.
+   * - FILLED only means a position was opened at the broker — real profit/loss
+   *   is unknown until the position actually closes (TP/SL/manual), which this
+   *   bridge has no callback for. Scoring it "WIN" was fabricating profit.
+   * - REJECTED/CANCELLED/EXPIRED mean the order NEVER reached (or was never
+   *   accepted by) the broker — zero account impact. Scoring these "LOSS" was
+   *   counting EA-side validation/risk rejections (duplicate guard, max
+   *   trades/exposure, spread, stale signal, hedging block, daily-loss halt,
+   *   broker reject, etc.) as real trading losses, which incorrectly drove
+   *   autoTradeLossCount past AUTO_TRADE_MAX_LOSSES and halted all future
+   *   auto-trading (and locked the symbol cooldown) even though no MT5 trade
+   *   was ever executed. See ITGuruMt5Bridge.mq5 SIGNAL_REJECTED/
+   *   VALIDATION_FAIL/RISK_REJECT/ORDER_REJECTED log events for the real
+   *   per-signal rejection reason. */
+  if (status === "FILLED") return "OPEN";
+  if (status === "REJECTED" || status === "CANCELLED" || status === "EXPIRED") return "CANCELLED";
   return "PENDING";
 }
 
@@ -16537,12 +16551,23 @@ async function pollMt5BridgeStatus() {
         removeActiveTrade(symbol, tradeId);
         const result = resolveMt5HistoryResult(status);
         resolveAutoTradeHistoryEntry(0, result, symbol, tradeId);
+        logSignalEngineDebug("MT5_STATUS_RESOLVED", {
+          signalId: tradeId, symbol, brokerStatus: status, scoredResult: result,
+          brokerTicket: o.brokerTicket || null, message: o.message || null
+        });
       }
       if (status === "REJECTED" || status === "CANCELLED") {
         const msg = o.message ? ` — ${o.message}` : "";
-        addLog(`⚠ MT5 ${status} ${tradeId}${msg}`);
+        /* status/order_status.php surfaces the exact EA-side rejection reason
+         * (validation failure, risk-check reject, broker retcode, etc. — see
+         * ITGuruMt5Bridge.mq5 VALIDATION_FAIL/RISK_REJECT/ORDER_REJECTED log
+         * events). No order reached/was accepted by the broker, so this is
+         * NOT scored as a trading loss (see resolveMt5HistoryResult). */
+        addLog(`⚠ MT5 ${status} ${tradeId}${msg} (no broker execution — not counted as a loss)`);
       } else if (status === "FILLED") {
-        addLog(`✅ MT5 filled ${tradeId}${o.brokerTicket ? ` (ticket ${o.brokerTicket})` : ""}`);
+        addLog(`✅ MT5 filled ${tradeId}${o.brokerTicket ? ` (ticket ${o.brokerTicket})` : ""} — position open, outcome pending until close`);
+      } else if (status === "EXPIRED") {
+        addLog(`⏱ MT5 ${status} ${tradeId}${o.message ? ` — ${o.message}` : ""} (no broker execution — not counted as a loss)`);
       }
     }
   } catch { /* silent background poll */ }
@@ -17223,7 +17248,7 @@ function resolveAutoTradeHistoryEntry(profit, result, symbol, tradeId) {
       addLog(`🛑 Auto-trade paused — ${AUTO_TRADE_MAX_LOSSES} consecutive losses reached. Reset session to resume.`);
     }
   }
-  if (pending.symbol && (result === "WIN" || result === "CANCELLED")) {
+  if (pending.symbol && (result === "WIN" || result === "CANCELLED" || result === "OPEN")) {
     logSignalEngineDebug("SYMBOL_UNLOCKED", { symbol: pending.symbol, reason: result.toLowerCase(), outcome: result });
   }
   updateAutoTradeCurrentStakeUI();

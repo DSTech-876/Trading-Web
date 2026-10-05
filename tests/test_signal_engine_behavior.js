@@ -269,7 +269,7 @@ test('MTF diagnostics timeframe map follows setup/bias synthesis ratios', () => 
 
 test('symbol cooldown unlock cleanup and terminal unlock branch stay reachable', () => {
   assert.match(source, /logSignalEngineDebug\("SYMBOL_UNLOCKED", \{ symbol, reason: "cooldown_expired", cooldownUntil \}\);\s*symbolCooldownUntil\.delete\(symbol\);/);
-  assert.match(source, /\n  }\n  if \(pending\.symbol && \(result === "WIN" \|\| result === "CANCELLED"\)\) \{\n    logSignalEngineDebug\("SYMBOL_UNLOCKED", \{ symbol: pending\.symbol, reason: result\.toLowerCase\(\), outcome: result \}\);\n  \}/);
+  assert.match(source, /\n  }\n  if \(pending\.symbol && \(result === "WIN" \|\| result === "CANCELLED" \|\| result === "OPEN"\)\) \{\n    logSignalEngineDebug\("SYMBOL_UNLOCKED", \{ symbol: pending\.symbol, reason: result\.toLowerCase\(\), outcome: result \}\);\n  \}/);
 });
 
 test('MTF rejection breakdown tracks percentages by reason', () => {
