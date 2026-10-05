@@ -626,7 +626,8 @@ void ResetDailyTrackingIfNeeded()
       // AccountInfoDouble(ACCOUNT_EQUITY) can transiently report 0 while the
       // terminal is still reconnecting/resyncing with the trade server. Don't
       // baseline the day on a bad reading — retry on the next tick instead,
-      // otherwise every later equity (correctly > 0) looks like a ~100% loss.
+      // otherwise CheckDailyLossHalt() would return early (line 647) and
+      // daily-loss protection would remain disabled for that day.
       double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
       if(!TerminalInfoInteger(TERMINAL_CONNECTED) || equityNow<=0) return;
 
@@ -647,8 +648,8 @@ void CheckDailyLossHalt()
    if(InpDailyLossLimitPct<=0 || g_dayStartEquity<=0) return;
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    // A transient ACCOUNT_EQUITY==0 (or disconnected terminal) reading is a
-   // broker-sync glitch, not a real 100% loss — ignore it rather than
-   // latching a permanent false daily-loss halt (see POLL_FAIL/reconnect
+   // broker-sync glitch, not a real loss — skip the loss calculation to avoid
+   // a false daily-loss halt on this transient bad reading (see POLL_FAIL/reconnect
    // cycles that can momentarily zero out account data).
    if(equity<=0 || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
    double lossPct = (g_dayStartEquity - equity) / g_dayStartEquity * 100.0;
