@@ -84,6 +84,7 @@ jsonResponse([
     'serverTime' => $now,
     'halted' => $halted,
     'haltReason' => $halted ? mt5HaltReason() : null,
+    'dailyLossLimitPct' => mt5GetDailyLossLimitPct(),
     'count' => count($public),
     'orders' => $public,
 ]);

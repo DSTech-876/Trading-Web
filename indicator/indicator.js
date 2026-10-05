@@ -244,7 +244,12 @@ let dynamicConfRangingDelta       = DYNAMIC_CONF_RANGING_DELTA_DEFAULT;
 
 /* Auto-trade risk/execution controls */
 const AUTO_TRADE_RISK_PER_TRADE_PCT    = 0.01;
-const AUTO_TRADE_DAILY_LOSS_CAP_PCT    = 4;
+const AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT = 4;
+/* Admin-editable daily loss cap % — overridden by fetchRiskConfig() below from
+ * /api/mt5/risk_config.php (backed by the admin-managed risk_settings table).
+ * Falls back to AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT if the fetch fails or
+ * the endpoint is unreachable (e.g. logged out, offline). */
+let AUTO_TRADE_DAILY_LOSS_CAP_PCT = AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT;
 const AUTO_TRADE_COOLDOWN_AFTER_LOSS_MS = 90 * 1000;
 const AUTO_TRADE_SYMBOL_FREQ_WINDOW_MS  = 15 * 60 * 1000;
 const AUTO_TRADE_MAX_TRADES_PER_SYMBOL_WINDOW = 4;
@@ -16401,6 +16406,23 @@ function mt5BridgeHeaders(extra = {}) {
   return h;
 }
 
+/** Fetch the admin-configured daily loss limit % from the server, overriding
+ *  AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT. Silently keeps the default on any
+ *  failure (not logged in, offline, server error) so this never blocks or
+ *  breaks auto-trading — it only ever narrows/widens the existing safety cap. */
+async function fetchRiskConfig() {
+  try {
+    if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
+    const resp = await fetch("/api/mt5/risk_config.php", { headers: mt5BridgeHeaders() });
+    const data = await safeJson(resp);
+    const pct = Number(data?.dailyLossLimitPct);
+    if (resp.ok && data?.ok && Number.isFinite(pct) && pct > 0) {
+      AUTO_TRADE_DAILY_LOSS_CAP_PCT = pct;
+      addLog(`⚙ Daily loss cap set from admin config: ${fmt(pct, 1)}%`);
+    }
+  } catch { /* keep default — non-critical background fetch */ }
+}
+
 function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake) {
   const currentPrice = candles.length > 0 ? Number(candles[candles.length - 1]?.close || candles[candles.length - 1]?.c || 0) : null;
   const side = effectiveDir === "BULL" ? "BUY" : "SELL";
@@ -16452,8 +16474,22 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
 }
 
 function resolveMt5HistoryResult(status) {
-  if (status === "FILLED") return "WIN";
-  if (status === "REJECTED" || status === "CANCELLED" || status === "EXPIRED") return "LOSS";
+  /* IMPORTANT: a bridge/EA status is NOT a trade outcome.
+   * - FILLED only means a position was opened at the broker — real profit/loss
+   *   is unknown until the position actually closes (TP/SL/manual), which this
+   *   bridge has no callback for. Scoring it "WIN" was fabricating profit.
+   * - REJECTED/CANCELLED/EXPIRED mean the order NEVER reached (or was never
+   *   accepted by) the broker — zero account impact. Scoring these "LOSS" was
+   *   counting EA-side validation/risk rejections (duplicate guard, max
+   *   trades/exposure, spread, stale signal, hedging block, daily-loss halt,
+   *   broker reject, etc.) as real trading losses, which incorrectly drove
+   *   autoTradeLossCount past AUTO_TRADE_MAX_LOSSES and halted all future
+   *   auto-trading (and locked the symbol cooldown) even though no MT5 trade
+   *   was ever executed. See ITGuruMt5Bridge.mq5 SIGNAL_REJECTED/
+   *   VALIDATION_FAIL/RISK_REJECT/ORDER_REJECTED log events for the real
+   *   per-signal rejection reason. */
+  if (status === "FILLED") return "OPEN";
+  if (status === "REJECTED" || status === "CANCELLED" || status === "EXPIRED") return "CANCELLED";
   return "PENDING";
 }
 
@@ -16537,12 +16573,23 @@ async function pollMt5BridgeStatus() {
         removeActiveTrade(symbol, tradeId);
         const result = resolveMt5HistoryResult(status);
         resolveAutoTradeHistoryEntry(0, result, symbol, tradeId);
+        logSignalEngineDebug("MT5_STATUS_RESOLVED", {
+          signalId: tradeId, symbol, brokerStatus: status, scoredResult: result,
+          brokerTicket: o.brokerTicket || null, message: o.message || null
+        });
       }
       if (status === "REJECTED" || status === "CANCELLED") {
         const msg = o.message ? ` — ${o.message}` : "";
-        addLog(`⚠ MT5 ${status} ${tradeId}${msg}`);
+        /* status/order_status.php surfaces the exact EA-side rejection reason
+         * (validation failure, risk-check reject, broker retcode, etc. — see
+         * ITGuruMt5Bridge.mq5 VALIDATION_FAIL/RISK_REJECT/ORDER_REJECTED log
+         * events). No order reached/was accepted by the broker, so this is
+         * NOT scored as a trading loss (see resolveMt5HistoryResult). */
+        addLog(`⚠ MT5 ${status} ${tradeId}${msg} (no broker execution — not counted as a loss)`);
       } else if (status === "FILLED") {
-        addLog(`✅ MT5 filled ${tradeId}${o.brokerTicket ? ` (ticket ${o.brokerTicket})` : ""}`);
+        addLog(`✅ MT5 filled ${tradeId}${o.brokerTicket ? ` (ticket ${o.brokerTicket})` : ""} — position open, outcome pending until close`);
+      } else if (status === "EXPIRED") {
+        addLog(`⏱ MT5 ${status} ${tradeId}${o.message ? ` — ${o.message}` : ""} (no broker execution — not counted as a loss)`);
       }
     }
   } catch { /* silent background poll */ }
@@ -17223,7 +17270,7 @@ function resolveAutoTradeHistoryEntry(profit, result, symbol, tradeId) {
       addLog(`🛑 Auto-trade paused — ${AUTO_TRADE_MAX_LOSSES} consecutive losses reached. Reset session to resume.`);
     }
   }
-  if (pending.symbol && (result === "WIN" || result === "CANCELLED")) {
+  if (pending.symbol && (result === "WIN" || result === "CANCELLED" || result === "OPEN")) {
     logSignalEngineDebug("SYMBOL_UNLOCKED", { symbol: pending.symbol, reason: result.toLowerCase(), outcome: result });
   }
   updateAutoTradeCurrentStakeUI();
@@ -30572,6 +30619,10 @@ document.addEventListener("DOMContentLoaded", () => {
     restoreSignalLifecycleState();
     initTheme();
   });
+
+  /* Fetch admin-configured risk settings (daily loss cap %) in the background;
+     non-blocking, falls back to AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT on failure. */
+  safeRun("risk config fetch", () => { fetchRiskConfig(); });
 
   /* Initialize Grid Scalper MA Opposite Mode & Adaptive System */
   if (typeof initGridScalperMAOpposite === "function") {
