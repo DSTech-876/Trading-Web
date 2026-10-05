@@ -26,8 +26,11 @@ $limit = max(1, min(100, $limit));
 $terminal = trim((string) ($_GET['terminal'] ?? $body['terminal'] ?? ''));
 $retryAfterSecs = 20;
 $now = time();
+$halted = mt5IsHalted();
 
-$orders = mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now): array {
+// While halted, do not dispatch any new/retry orders to the EA. Existing
+// in-flight orders are left untouched so status callbacks still work.
+$orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now): array {
     $out = [];
     foreach ($state['orders'] as &$order) {
         if (count($out) >= $limit) break;
@@ -79,6 +82,8 @@ $public = array_map(static fn(array $o): array => [
 jsonResponse([
     'ok' => true,
     'serverTime' => $now,
+    'halted' => $halted,
+    'haltReason' => $halted ? mt5HaltReason() : null,
     'count' => count($public),
     'orders' => $public,
 ]);
