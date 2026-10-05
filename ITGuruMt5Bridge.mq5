@@ -211,7 +211,12 @@ bool HttpRequest(string method, string url, string headers, string body, string 
 {
    char data[];
    if(method=="POST")
-      StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   {
+      int len = StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+      // Drop the trailing NUL terminator; it makes the JSON body invalid server-side.
+      if(len>0 && data[len-1]==0)
+         ArrayResize(data, len-1);
+   }
    else
       ArrayResize(data, 0);
 
