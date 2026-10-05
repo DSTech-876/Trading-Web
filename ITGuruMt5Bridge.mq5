@@ -17,7 +17,7 @@
 
 //================================= Inputs ===================================
 
-input string InpBaseUrl         = "https://your-domain.example/indicator"; // no trailing slash
+input string InpBaseUrl         = "https://trading.dsitservicesja.com"; // no trailing slash
 input string InpBridgeKey       = "";    // REQUIRED: set a strong secret, matches server MT5_BRIDGE_KEY. Never commit real keys.
 input string InpTerminalId      = "MT5-TERM-01";
 input int    InpPollSeconds     = 2;      // base polling interval
