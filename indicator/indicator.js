@@ -231,10 +231,16 @@ const BACKTEST_LATENCY_CANDLES = 1; /* latency stress: 1-candle delayed reactivi
 const WALK_FORWARD_WINDOW_TRADES = 30;
 const WALK_FORWARD_MIN_SAMPLES   = 12;
 
-/* Dynamic quality gates */
-const DYNAMIC_CONF_TRENDING_DELTA      = -1;
-const DYNAMIC_CONF_TRANSITIONING_DELTA = 0;
-const DYNAMIC_CONF_RANGING_DELTA       = +2;
+/* Dynamic quality gates — regime-based adjustments applied on top of
+ * minConfluenceValue when gating auto-trades/signals (see getDynamicMinConfluence).
+ * User-adjustable via the Min Confluence Gate settings UI; defaults keep the
+ * original behavior (stricter in RANGING, looser in TRENDING). */
+const DYNAMIC_CONF_TRENDING_DELTA_DEFAULT      = -1;
+const DYNAMIC_CONF_TRANSITIONING_DELTA_DEFAULT = 0;
+const DYNAMIC_CONF_RANGING_DELTA_DEFAULT       = +2;
+let dynamicConfTrendingDelta      = DYNAMIC_CONF_TRENDING_DELTA_DEFAULT;
+let dynamicConfTransitioningDelta = DYNAMIC_CONF_TRANSITIONING_DELTA_DEFAULT;
+let dynamicConfRangingDelta       = DYNAMIC_CONF_RANGING_DELTA_DEFAULT;
 
 /* Auto-trade risk/execution controls */
 const AUTO_TRADE_RISK_PER_TRADE_PCT    = 0.01;
@@ -24415,9 +24421,9 @@ function getDynamicMinConfluence(symbol, granSec, regime) {
   const r = regime || getCurrentRegimeTag();
   const profile = getOptimizationProfile(symbol, granSec, r);
   let threshold = minConfluenceValue;
-  if (r === "TRENDING") threshold += DYNAMIC_CONF_TRENDING_DELTA;
-  else if (r === "RANGING") threshold += DYNAMIC_CONF_RANGING_DELTA;
-  else threshold += DYNAMIC_CONF_TRANSITIONING_DELTA;
+  if (r === "TRENDING") threshold += dynamicConfTrendingDelta;
+  else if (r === "RANGING") threshold += dynamicConfRangingDelta;
+  else threshold += dynamicConfTransitioningDelta;
   if (profile && Number.isFinite(profile.requiredConfluence)) {
     threshold = Math.max(threshold, profile.requiredConfluence);
   }
