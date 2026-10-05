@@ -93,6 +93,24 @@ function mt5AuthUserId(): int
 }
 
 /**
+ * Global kill-switch so an operator can halt all new MT5 dispatch instantly
+ * (e.g. during an incident) without redeploying the EA. Checked by pull.php
+ * and surfaced to the EA so it can stop sending new trades while still
+ * reporting status for in-flight orders.
+ */
+function mt5IsHalted(): bool
+{
+    $raw = strtolower(trim(env('MT5_TRADING_HALTED', 'false')));
+    return in_array($raw, ['1', 'true', 'yes', 'on'], true);
+}
+
+function mt5HaltReason(): string
+{
+    $reason = trim(env('MT5_TRADING_HALT_REASON', ''));
+    return $reason !== '' ? $reason : 'Trading halted by operator (MT5_TRADING_HALTED)';
+}
+
+/**
  * @param array<string,mixed> $body
  */
 function mt5RequireBridgeKey(array $body = []): void

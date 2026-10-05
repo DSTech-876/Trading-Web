@@ -83,6 +83,8 @@ GET /api/mt5/pull.php?bridge_key=<MT5_BRIDGE_KEY>&limit=20&terminal=MT5-TERM-01
 {
   "ok": true,
   "serverTime": 1710000000,
+  "halted": false,
+  "haltReason": null,
   "count": 1,
   "orders": [
     {
@@ -105,6 +107,11 @@ GET /api/mt5/pull.php?bridge_key=<MT5_BRIDGE_KEY>&limit=20&terminal=MT5-TERM-01
   ]
 }
 ```
+
+`createdAt` is a unix timestamp (seconds) the EA uses for staleness checks (`InpMaxSignalAgeSecs`).
+
+When the operator sets `MT5_TRADING_HALTED=true` in `.env` (emergency kill-switch), `pull.php` returns
+`"halted": true` with no orders, and the EA stops dispatching new trades until the flag is cleared.
 
 ---
 
@@ -202,3 +209,31 @@ GET /api/mt5/order_status.php?since=0&limit=50
   ]
 }
 ```
+
+---
+
+## 5) EA-side (`ITGuruMt5Bridge.mq5`) safeguards
+
+The reference EA in the repo root implements, in addition to the server-side controls above:
+
+- **Duplicate protection** — every `orderId` is recorded in a persisted local file; already-processed
+  signals are ignored even across EA restarts, and a `comment`-tag match against existing
+  positions/pending orders prevents a resend if a prior HTTP confirmation was lost.
+- **Risk limits** — `InpMaxLotSize`, `InpMaxTradesPerSymbol`, `InpMaxTotalExposureLots`,
+  `InpAllowHedging`, `InpMaxSpreadPoints`, `InpDailyLossLimitPct` (auto-halts new trades for the
+  remainder of the trading day), and an optional `InpUseSessionFilter` trading-hours window.
+- **Connection resilience** — exponential backoff on repeated poll failures (capped at
+  `InpMaxBackoffSeconds`) and a terminal `Alert()`/push notification after
+  `InpAlertAfterFailures` consecutive failures, with a "reconnected" notice when polling recovers.
+- **Order rejection handling** — bounded retries (`InpMaxOrderRetries`) only for retriable broker
+  retcodes (requote/busy/timeout/price-changed), with every attempt logged.
+- **Execution safety** — broker minimum stop/freeze level checks, free-margin checks via
+  `OrderCalcMargin`, stale-signal rejection (`InpMaxSignalAgeSecs`, uses `createdAt`), and
+  post-send confirmation against live positions/history before reporting `FILLED`.
+- **Logging & monitoring** — every signal, validation outcome, order attempt, and status callback
+  is written to `InpLogFileName` (CSV, in the terminal's `MQL5/Files` sandbox) with timestamps and
+  broker return codes; a live `Comment()` dashboard shows connection state, halt state, and
+  signal/poll counters.
+
+`InpBridgeKey` has **no default value** — it must be set explicitly to match `MT5_BRIDGE_KEY` on the
+server. Never commit a real bridge key into source control.
