@@ -406,3 +406,30 @@ test('monitorTradeOutcome keeps the released signal id when the pending record i
   assert.equal(context.partialTpHit, false);
   assert.deepEqual(phaseChanges, ['BREAKOUT']);
 });
+
+test('dynamic min confluence applies regime deltas and clamps to 6-16', () => {
+  const fnSource = extractFunction('getDynamicMinConfluence');
+  const harness = `${fnSource}\nmodule.exports = { getDynamicMinConfluence };`;
+  const run = (min, regime, deltas = {}) => {
+    const context = {
+      module: { exports: {} },
+      minConfluenceValue: min,
+      dynamicConfTrendingDelta: deltas.trending ?? -1,
+      dynamicConfTransitioningDelta: deltas.transitioning ?? 0,
+      dynamicConfRangingDelta: deltas.ranging ?? 2,
+      getCurrentRegimeTag: () => regime,
+      getOptimizationProfile: () => null
+    };
+    vm.createContext(context);
+    vm.runInContext(harness, context);
+    return context.module.exports.getDynamicMinConfluence('R_100', 60, regime);
+  };
+  assert.equal(run(10, 'TRENDING'), 9);
+  assert.equal(run(10, 'TRANSITIONING'), 10);
+  assert.equal(run(10, 'RANGING'), 12);
+  assert.equal(run(6, 'TRENDING'), 6);
+  assert.equal(run(6, 'TRENDING', { trending: -8 }), 6);
+  assert.equal(run(15, 'RANGING'), 16);
+  assert.equal(run(16, 'RANGING', { ranging: 8 }), 16);
+  assert.equal(run(8, 'TRANSITIONING', { transitioning: 3 }), 11);
+});
