@@ -890,6 +890,22 @@
                 <input type="number" id="minConfluenceInput" min="0" max="16" step="1" value="6" style="width:60px;" />
               </div>
               <p class="hint">Reject trades below this confluence score threshold. Higher = stricter quality gate.</p>
+              <label class="hint" style="display:block;margin-top:6px;font-weight:600;">Regime Adjustment (added to Min Score for auto-trading)</label>
+              <div class="rr-inputs" style="margin-top:4px;margin-bottom:4px;flex-wrap:wrap;gap:4px 12px;">
+                <span>
+                  <label class="hint" for="dynamicConfTrendingInput" style="margin-right:6px;">Trending (±)</label>
+                  <input type="number" id="dynamicConfTrendingInput" min="-8" max="8" step="1" value="-1" style="width:55px;" />
+                </span>
+                <span>
+                  <label class="hint" for="dynamicConfTransitioningInput" style="margin-right:6px;">Transitioning (±)</label>
+                  <input type="number" id="dynamicConfTransitioningInput" min="-8" max="8" step="1" value="0" style="width:55px;" />
+                </span>
+                <span>
+                  <label class="hint" for="dynamicConfRangingInput" style="margin-right:6px;">Ranging (±)</label>
+                  <input type="number" id="dynamicConfRangingInput" min="-8" max="8" step="1" value="2" style="width:55px;" />
+                </span>
+              </div>
+              <p class="hint">Fine-tune how strict the Min Score gate is per market regime for auto-trading (e.g. "dynamic confluence X/Y" skip messages). Positive = stricter, negative = looser. Effective threshold is clamped to 6–16.</p>
               <label class="hint" style="display:block;margin-top:6px;font-weight:600;">Required Confluences (overrides Min Score)</label>
               <div id="requiredConfluenceList" style="display:flex;flex-wrap:wrap;gap:2px 10px;margin:4px 0;"></div>
               <p class="hint">Select specific confluences — when any are selected, the numeric Min Score is ignored and signals require ALL selected confluences to be active.</p>

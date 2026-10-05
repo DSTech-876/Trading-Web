@@ -20265,6 +20265,9 @@ function saveSettings() {
       minConfluenceEnabled,
       minConfluenceValue,
       requiredConfluences,
+      dynamicConfTrendingDelta,
+      dynamicConfTransitioningDelta,
+      dynamicConfRangingDelta,
       doubleRetestEnabled,
       confirmBarEnabled,
       divergenceFilterEnabled,
@@ -20522,6 +20525,9 @@ function restoreSettings() {
     if (s.minConfluenceEnabled != null) minConfluenceEnabled = s.minConfluenceEnabled;
     if (s.minConfluenceValue != null) minConfluenceValue = s.minConfluenceValue;
     if (Array.isArray(s.requiredConfluences)) requiredConfluences = s.requiredConfluences.filter(f => typeof f === "string");
+    if (s.dynamicConfTrendingDelta != null) dynamicConfTrendingDelta = s.dynamicConfTrendingDelta;
+    if (s.dynamicConfTransitioningDelta != null) dynamicConfTransitioningDelta = s.dynamicConfTransitioningDelta;
+    if (s.dynamicConfRangingDelta != null) dynamicConfRangingDelta = s.dynamicConfRangingDelta;
     if (s.doubleRetestEnabled != null) doubleRetestEnabled = s.doubleRetestEnabled;
     if (s.confirmBarEnabled != null) confirmBarEnabled = s.confirmBarEnabled;
     if (s.divergenceFilterEnabled != null) divergenceFilterEnabled = s.divergenceFilterEnabled;
@@ -20548,6 +20554,9 @@ function restoreSettings() {
     if (s.recentLossPauseCount != null) recentLossPauseCount = Math.max(1, parseInt(s.recentLossPauseCount, 10) || RECENT_LOSS_PAUSE_COUNT_DEFAULT);
     if (UI.minConfluenceToggle)    UI.minConfluenceToggle.checked    = minConfluenceEnabled;
     if (UI.minConfluenceInput)     UI.minConfluenceInput.value       = minConfluenceValue;
+    if (UI.dynamicConfTrendingInput)      UI.dynamicConfTrendingInput.value      = dynamicConfTrendingDelta;
+    if (UI.dynamicConfTransitioningInput) UI.dynamicConfTransitioningInput.value = dynamicConfTransitioningDelta;
+    if (UI.dynamicConfRangingInput)       UI.dynamicConfRangingInput.value       = dynamicConfRangingDelta;
     renderRequiredConfluenceList();
     if (UI.doubleRetestToggle)     UI.doubleRetestToggle.checked     = doubleRetestEnabled;
     if (UI.confirmBarToggle)       UI.confirmBarToggle.checked       = confirmBarEnabled;
@@ -24749,6 +24758,9 @@ function revertAllSettings() {
   minConfluenceEnabled    = false;
   minConfluenceValue      = 6;
   requiredConfluences     = [];
+  dynamicConfTrendingDelta      = DYNAMIC_CONF_TRENDING_DELTA_DEFAULT;
+  dynamicConfTransitioningDelta = DYNAMIC_CONF_TRANSITIONING_DELTA_DEFAULT;
+  dynamicConfRangingDelta       = DYNAMIC_CONF_RANGING_DELTA_DEFAULT;
   doubleRetestEnabled     = false;
   confirmBarEnabled       = false;
   divergenceFilterEnabled = false;
@@ -24859,6 +24871,9 @@ function revertAllSettings() {
   if (UI.candleInterpToggle)     UI.candleInterpToggle.checked     = candleInterpEnabled;
   if (UI.minConfluenceToggle)    UI.minConfluenceToggle.checked    = minConfluenceEnabled;
   if (UI.minConfluenceInput)     UI.minConfluenceInput.value       = minConfluenceValue;
+  if (UI.dynamicConfTrendingInput)      UI.dynamicConfTrendingInput.value      = dynamicConfTrendingDelta;
+  if (UI.dynamicConfTransitioningInput) UI.dynamicConfTransitioningInput.value = dynamicConfTransitioningDelta;
+  if (UI.dynamicConfRangingInput)       UI.dynamicConfRangingInput.value       = dynamicConfRangingDelta;
   renderRequiredConfluenceList();
   if (UI.doubleRetestToggle)     UI.doubleRetestToggle.checked     = doubleRetestEnabled;
   if (UI.confirmBarToggle)       UI.confirmBarToggle.checked       = confirmBarEnabled;
@@ -29569,6 +29584,9 @@ function syncFilterUIFromGlobals() {
   /* Profit-Direction Constraints */
   if (UI.minConfluenceToggle)    UI.minConfluenceToggle.checked    = minConfluenceEnabled;
   if (UI.minConfluenceInput)     UI.minConfluenceInput.value       = minConfluenceValue;
+  if (UI.dynamicConfTrendingInput)      UI.dynamicConfTrendingInput.value      = dynamicConfTrendingDelta;
+  if (UI.dynamicConfTransitioningInput) UI.dynamicConfTransitioningInput.value = dynamicConfTransitioningDelta;
+  if (UI.dynamicConfRangingInput)       UI.dynamicConfRangingInput.value       = dynamicConfRangingDelta;
   renderRequiredConfluenceList();
   if (UI.doubleRetestToggle)     UI.doubleRetestToggle.checked     = doubleRetestEnabled;
   if (UI.confirmBarToggle)       UI.confirmBarToggle.checked       = confirmBarEnabled;
@@ -30970,6 +30988,18 @@ document.addEventListener("DOMContentLoaded", () => {
       syncProfitDirToAllPanels(); saveSettings();
     });
   }
+  function _wireDynamicConfDeltaInput(el, getCurrent, assign) {
+    if (!el) return;
+    el.addEventListener("change", () => {
+      const v = parseInt(el.value, 10);
+      if (!isNaN(v) && v >= -8 && v <= 8) assign(v);
+      el.value = getCurrent();
+      saveSettings();
+    });
+  }
+  _wireDynamicConfDeltaInput(UI.dynamicConfTrendingInput, () => dynamicConfTrendingDelta, (v) => { dynamicConfTrendingDelta = v; });
+  _wireDynamicConfDeltaInput(UI.dynamicConfTransitioningInput, () => dynamicConfTransitioningDelta, (v) => { dynamicConfTransitioningDelta = v; });
+  _wireDynamicConfDeltaInput(UI.dynamicConfRangingInput, () => dynamicConfRangingDelta, (v) => { dynamicConfRangingDelta = v; });
   renderRequiredConfluenceList();
   if (UI.doubleRetestToggle) {
     UI.doubleRetestToggle.addEventListener("change", () => { doubleRetestEnabled = UI.doubleRetestToggle.checked; syncProfitDirToAllPanels(); saveSettings(); updateStateUI(); });
