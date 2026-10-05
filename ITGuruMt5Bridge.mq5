@@ -371,8 +371,9 @@ int ParseOrders(string json, BridgeOrder &out[])
 
 //=========================== Status callback =================================
 
-void PostStatus(string orderId, string status, string brokerTicket, string message, double filledPrice=0.0)
+void PostStatus(string orderId, string status, string brokerTicket, string message, double filledPrice=0.0, int digits=-1)
 {
+   int fmtDigits = (digits>=0) ? digits : _Digits;
    string base = TrimSlash(InpBaseUrl);
    string url  = base + "/api/mt5/status.php";
    string headers =
@@ -385,7 +386,7 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
       "\"status\":\""+JsonEscape(status)+"\","
       "\"brokerTicket\":\""+JsonEscape(brokerTicket)+"\","
       "\"message\":\""+JsonEscape(message)+"\","
-      "\"filledPrice\":"+DoubleToString(filledPrice,_Digits)+"}";
+      "\"filledPrice\":"+DoubleToString(filledPrice,fmtDigits)+"}";
 
    string resp, respHeaders;
    int code=-1;
@@ -469,13 +470,14 @@ bool ValidateNotStale(const BridgeOrder &o, string &reason)
 // Counts current positions/pending orders for symbol (and total exposure/comment match).
 void ScanOpenState(string symbol, string orderId,
                     int &countSameSymbol, double &totalExposureLots,
-                    bool &hasBuy, bool &hasSell, bool &alreadyPlaced)
+                    bool &hasBuy, bool &hasSell, bool &alreadyPlaced, bool &alreadyPlacedPending)
 {
    countSameSymbol = 0;
    totalExposureLots = 0.0;
    hasBuy = false;
    hasSell = false;
    alreadyPlaced = false;
+   alreadyPlacedPending = false;
 
    for(int i=0;i<PositionsTotal();i++)
    {
@@ -515,7 +517,11 @@ void ScanOpenState(string symbol, string orderId,
          long type = OrderGetInteger(ORDER_TYPE);
          if(type==ORDER_TYPE_BUY_LIMIT || type==ORDER_TYPE_BUY_STOP) hasBuy = true;
          if(type==ORDER_TYPE_SELL_LIMIT || type==ORDER_TYPE_SELL_STOP) hasSell = true;
-         if(OrderGetString(ORDER_COMMENT)==orderId) alreadyPlaced = true;
+         if(OrderGetString(ORDER_COMMENT)==orderId)
+         {
+            alreadyPlaced = true;
+            alreadyPlacedPending = true;
+         }
       }
    }
 }
@@ -563,6 +569,41 @@ bool ValidateMargin(string symbol, string side, double lot, double price, string
 
 //------------------------------ Daily loss halt --------------------------------
 
+string DailyStateFileName()
+{
+   return "ITGuruMt5Bridge_dailystate_"+InpTerminalId+".csv";
+}
+
+// Persist the UTC day boundary, start-of-day equity, and halt flag so an EA
+// restart during the same UTC day does not reset the loss baseline or clear
+// an active halt (the "remainder of the trading day" safeguard).
+void SaveDailyState()
+{
+   int fh = FileOpen(DailyStateFileName(), FILE_WRITE|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(fh==INVALID_HANDLE) return;
+   FileWrite(fh, (string)(long)g_dayStart+","+DoubleToString(g_dayStartEquity,2)+","+(string)(g_dailyLossHalted?1:0));
+   FileClose(fh);
+}
+
+void LoadDailyState()
+{
+   int fh = FileOpen(DailyStateFileName(), FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
+   if(fh==INVALID_HANDLE) return;
+   if(!FileIsEnding(fh))
+   {
+      string line = FileReadString(fh);
+      string parts[];
+      int cnt = StringSplit(line, ',', parts);
+      if(cnt>=3)
+      {
+         g_dayStart        = (datetime)StringToInteger(parts[0]);
+         g_dayStartEquity  = StringToDouble(parts[1]);
+         g_dailyLossHalted = (StringToInteger(parts[2])!=0);
+      }
+   }
+   FileClose(fh);
+}
+
 void RecomputeHaltState()
 {
    g_tradingHalted = g_dailyLossHalted || g_serverHalted;
@@ -590,6 +631,7 @@ void ResetDailyTrackingIfNeeded()
          RecomputeHaltState();
          LogEvent("INFO","DAILY_RESET","","New trading day, halt cleared, start equity="+DoubleToString(g_dayStartEquity,2));
       }
+      SaveDailyState();
    }
 }
 
@@ -602,6 +644,7 @@ void CheckDailyLossHalt()
    {
       g_dailyLossHalted = true;
       RecomputeHaltState();
+      SaveDailyState();
       LogEvent("ERROR","DAILY_LOSS_HALT","","loss%="+DoubleToString(lossPct,2)+" limit%="+(string)InpDailyLossLimitPct);
       Alert("ITGuruMt5Bridge: Daily loss limit reached ("+DoubleToString(lossPct,2)+"%). New trades halted.");
       SendNotification("ITGuruMt5Bridge: Daily loss limit reached. Trading halted.");
@@ -619,8 +662,7 @@ bool IsRetriableRetcode(uint retcode)
        || retcode==TRADE_RETCODE_TIMEOUT
        || retcode==TRADE_RETCODE_CONNECTION
        || retcode==TRADE_RETCODE_TRADE_DISABLED
-       || retcode==10004 /*REQUOTE legacy*/
-       || retcode==TRADE_RETCODE_TRADE_CONTEXT_BUSY;
+       || retcode==10004; /*REQUOTE legacy; trade-context-busy is read via GetLastError(), not retcode*/
 }
 
 bool ConfirmExecution(const MqlTradeResult &res, string &confirmNote)
@@ -728,17 +770,26 @@ bool SendTrade(const BridgeOrder &o)
       return false;
    }
 
-   int countSameSymbol; double totalExposure; bool hasBuy, hasSell, alreadyPlaced;
-   ScanOpenState(o.symbol, o.orderId, countSameSymbol, totalExposure, hasBuy, hasSell, alreadyPlaced);
+   int countSameSymbol; double totalExposure; bool hasBuy, hasSell, alreadyPlaced, alreadyPlacedPending;
+   ScanOpenState(o.symbol, o.orderId, countSameSymbol, totalExposure, hasBuy, hasSell, alreadyPlaced, alreadyPlacedPending);
 
    if(alreadyPlaced)
    {
       // Idempotency guard: an order tagged with this orderId already exists on
       // the account (e.g. a prior send succeeded but the HTTP confirmation was
       // lost before a retry). Do not place a second order.
-      g_statSignalsFilled++;
-      LogEvent("WARN","DUPLICATE_GUARD",o.orderId,"matching ticket already exists on account; skipping resend");
-      PostStatus(o.orderId,"FILLED","", "Already placed on account (idempotent skip)", 0.0);
+      if(alreadyPlacedPending)
+      {
+         g_statSignalsPending++;
+         LogEvent("WARN","DUPLICATE_GUARD",o.orderId,"matching pending order already exists on account; skipping resend");
+         PostStatus(o.orderId,"RECEIVED","", "Already placed on account as a pending order (idempotent skip)", 0.0);
+      }
+      else
+      {
+         g_statSignalsFilled++;
+         LogEvent("WARN","DUPLICATE_GUARD",o.orderId,"matching ticket already exists on account; skipping resend");
+         PostStatus(o.orderId,"FILLED","", "Already placed on account (idempotent skip)", 0.0);
+      }
       MarkProcessed(o.orderId);
       return true;
    }
@@ -807,8 +858,13 @@ bool SendTrade(const BridgeOrder &o)
       return false;
    }
 
-   // All checks passed; tell backend we're about to act.
-   PostStatus(o.orderId,"RECEIVED","", "EA validated signal, submitting to broker", 0.0);
+   // All checks passed; about to act. Do NOT advance server status yet: the order
+   // must remain dispatchable (QUEUED/DISPATCHED) until a definitive broker outcome
+   // is known. Otherwise, if the EA terminates before reporting a final result, the
+   // order gets stuck forever since api/mt5/pull.php only redispatches QUEUED or
+   // stale DISPATCHED orders, never RECEIVED. The idempotency guard above (alreadyPlaced)
+   // safely handles any redispatch of an order that actually reached the broker.
+   LogEvent("INFO","SIGNAL_VALIDATED",o.orderId,"EA validated signal, submitting to broker");
 
    MqlTradeRequest req;
    MqlTradeResult  res;
@@ -896,9 +952,10 @@ bool SendTrade(const BridgeOrder &o)
    }
    else
    {
+      int filledDigits = (int)SymbolInfoInteger(o.symbol, SYMBOL_DIGITS);
       g_statSignalsFilled++;
-      LogEvent("INFO","ORDER_FILLED",o.orderId,"ticket="+ticket+" price="+DoubleToString(res.price,_Digits));
-      PostStatus(o.orderId,"FILLED",ticket,"Executed. "+confirmNote,res.price);
+      LogEvent("INFO","ORDER_FILLED",o.orderId,"ticket="+ticket+" price="+DoubleToString(res.price,filledDigits));
+      PostStatus(o.orderId,"FILLED",ticket,"Executed. "+confirmNote,res.price,filledDigits);
    }
 
    MarkProcessed(o.orderId);
@@ -1019,6 +1076,78 @@ void UpdateDashboard()
 
 //=============================== EA lifecycle ==================================
 
+//----------------------- Pending-order final-state reporting -------------------
+
+// This EA reports a pending order as "RECEIVED" once placed on the broker, but
+// has no further hook to report its eventual fill/cancellation/expiration/rejection.
+// OnTradeTransaction closes that gap by watching for deals/order-history entries
+// tied to pending order types (identified via the order comment == orderId) and
+// pushing the final status to the backend so monitoring/order status stays accurate.
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                         const MqlTradeRequest &request,
+                         const MqlTradeResult &result)
+{
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(!HistoryDealSelect(trans.deal)) return;
+      if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic) return;
+      if((long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_IN) return; // only new fills
+
+      ulong orderTicket = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
+      if(orderTicket==0 || !HistoryOrderSelect(orderTicket)) return;
+
+      long otype = HistoryOrderGetInteger(orderTicket, ORDER_TYPE);
+      bool wasPending = (otype==ORDER_TYPE_BUY_LIMIT || otype==ORDER_TYPE_SELL_LIMIT ||
+                          otype==ORDER_TYPE_BUY_STOP  || otype==ORDER_TYPE_SELL_STOP  ||
+                          otype==ORDER_TYPE_BUY_STOP_LIMIT || otype==ORDER_TYPE_SELL_STOP_LIMIT);
+      if(!wasPending) return; // market fills already reported synchronously in SendTrade()
+
+      string orderId = HistoryOrderGetString(orderTicket, ORDER_COMMENT);
+      if(orderId=="") return;
+
+      string symbol = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      double price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+      string ticket = (string)orderTicket;
+
+      LogEvent("INFO","ORDER_TRANSACTION_FILLED",orderId,"pending order filled, deal=#"+(string)trans.deal);
+      PostStatus(orderId,"FILLED",ticket,"Pending order filled (OnTradeTransaction)",price,digits);
+      g_statSignalsPending = MathMax(0, g_statSignalsPending-1);
+      g_statSignalsFilled++;
+      MarkProcessed(orderId);
+      return;
+   }
+
+   if(trans.type==TRADE_TRANSACTION_HISTORY_ADD)
+   {
+      if(!HistoryOrderSelect(trans.order)) return;
+      if((long)HistoryOrderGetInteger(trans.order, ORDER_MAGIC) != InpMagic) return;
+
+      long otype = HistoryOrderGetInteger(trans.order, ORDER_TYPE);
+      bool wasPending = (otype==ORDER_TYPE_BUY_LIMIT || otype==ORDER_TYPE_SELL_LIMIT ||
+                          otype==ORDER_TYPE_BUY_STOP  || otype==ORDER_TYPE_SELL_STOP  ||
+                          otype==ORDER_TYPE_BUY_STOP_LIMIT || otype==ORDER_TYPE_SELL_STOP_LIMIT);
+      if(!wasPending) return;
+
+      long state = HistoryOrderGetInteger(trans.order, ORDER_STATE);
+      if(state==ORDER_STATE_FILLED) return; // handled via TRADE_TRANSACTION_DEAL_ADD above
+
+      string orderId = HistoryOrderGetString(trans.order, ORDER_COMMENT);
+      if(orderId=="") return;
+
+      string status, msg;
+      if(state==ORDER_STATE_EXPIRED)       { status="EXPIRED";   msg="Pending order expired"; }
+      else if(state==ORDER_STATE_REJECTED) { status="REJECTED";  msg="Pending order rejected by broker"; }
+      else if(state==ORDER_STATE_CANCELED) { status="CANCELLED"; msg="Pending order cancelled"; }
+      else return; // other transitional states are not relevant here
+
+      LogEvent("INFO","ORDER_TRANSACTION_"+status,orderId,msg);
+      PostStatus(orderId,status,(string)trans.order,msg,0.0);
+      g_statSignalsPending = MathMax(0, g_statSignalsPending-1);
+      MarkProcessed(orderId);
+   }
+}
+
 int OnInit()
 {
    if(StringLen(InpBridgeKey) < 16)
@@ -1029,6 +1158,8 @@ int OnInit()
    }
 
    LoadProcessedIds();
+   LoadDailyState();
+   RecomputeHaltState();
    ResetDailyTrackingIfNeeded();
 
    EventSetTimer(MathMax(1,InpPollSeconds));
