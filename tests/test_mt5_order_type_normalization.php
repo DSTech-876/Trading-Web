@@ -31,15 +31,16 @@ function check(string $label, string $actual, string $expected): void
     }
 }
 
-/* A matching, valid orderType is always honored as-is. */
+/* A matching, valid orderType is always honored as-is, even when normal
+ * derivation would pick the opposite pending type for these prices. */
 check(
     'matching BUY_LIMIT is honored',
-    mt5ResolveOrderType('BUY', 1.085, 1.090, 'BUY_LIMIT'),
+    mt5ResolveOrderType('BUY', 1.090, 1.085, 'BUY_LIMIT'),
     'BUY_LIMIT'
 );
 check(
     'matching SELL_STOP is honored',
-    mt5ResolveOrderType('SELL', 1.085, 1.090, 'SELL_STOP'),
+    mt5ResolveOrderType('SELL', 1.090, 1.085, 'SELL_STOP'),
     'SELL_STOP'
 );
 

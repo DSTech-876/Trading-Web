@@ -16527,7 +16527,8 @@ function submitMt5BridgeTrade({
 
      NOTE: this is a trading-behavior change, not purely diagnostic — a
      signal that previously reached the MT5 bridge (and relied on the
-     server's 422 rejection) is now silently skipped client-side instead.
+     server's 422 rejection) is now skipped client-side instead (an addLog
+     entry records the reason).
      Acceptance criteria, covered by tests/test_mt5_dispatch_gate.js:
        - Dispatch proceeds unchanged when entry/SL/TP are all finite,
          positive, and on the correct side of entry for effectiveDir.
