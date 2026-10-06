@@ -106,13 +106,21 @@ test('submitMt5BridgeTrade dispatches when SL/TP are valid for the direction', (
   assert.equal(fetchCalls.length, 1);
 });
 
-test('submitMt5BridgeTrade skips dispatch when SL/TP are missing/invalid', () => {
-  const { context, fetchCalls, logs } = makeContext();
-  const submitMt5BridgeTrade = run(context);
-  submitMt5BridgeTrade(baseArgs({ tradeSl: NaN, tradeTp: 0 }));
-  assert.equal(fetchCalls.length, 0);
-  assert.ok(logs.some(l => /missing a valid entry\/SL\/TP/.test(l)));
-});
+const invalidValues = [['NaN', NaN], ['undefined', undefined], ['null', null], ['zero', 0], ['negative', -1]];
+for (const field of ['entry', 'tradeSl', 'tradeTp']) {
+  for (const [name, bad] of invalidValues) {
+    test(`submitMt5BridgeTrade skips dispatch when ${field} is ${name}`, () => {
+      const { context, fetchCalls, logs } = makeContext();
+      const submitMt5BridgeTrade = run(context);
+      const args = field === 'entry'
+        ? baseArgs({ signal: { entry: bad, dir: 'BULL' } })
+        : baseArgs({ [field]: bad });
+      submitMt5BridgeTrade(args);
+      assert.equal(fetchCalls.length, 0);
+      assert.ok(logs.some(l => /missing a valid entry\/SL\/TP/.test(l)));
+    });
+  }
+}
 
 test('submitMt5BridgeTrade skips dispatch when SL is on the wrong side of entry', () => {
   const { context, fetchCalls, logs } = makeContext();

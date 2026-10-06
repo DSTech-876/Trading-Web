@@ -261,8 +261,9 @@ function mt5InferDigits(string $symbol, float $price): int
  *    derived from `$side`, `$entry`, and `$currentPrice` using the same
  *    pending/market rules as when no order type was supplied at all (see
  *    below). Callers that need to detect/reject a mismatched order type
- *    must compare the input `$requested` against the returned value
- *    themselves; this function never surfaces a validation error for it.
+ *    must compare the canonicalized input (trim + strtoupper of
+ *    `$requested`, since valid requests like `buy_limit` are accepted and
+ *    returned as `BUY_LIMIT`) against the returned value themselves; this function never surfaces a validation error for it.
  *  - When no (or an invalid) order type is requested, the type is derived
  *    from the entry price relative to `$currentPrice`: entry beyond current
  *    price yields a STOP order, entry before current price yields a LIMIT
