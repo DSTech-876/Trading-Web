@@ -176,7 +176,15 @@ function mt5InferDigits(string $symbol, float $price): int
 function mt5ResolveOrderType(string $side, float $entry, ?float $currentPrice, string $requested = ''): string
 {
     $req = strtoupper(trim($requested));
-    if ($req !== '' && in_array($req, MT5_ALLOWED_ORDER_TYPES, true)) return $req;
+    /* Only trust a client-requested order type when its BUY_/SELL_ prefix
+     * matches the resolved trade side. Without this check a mismatched
+     * payload (e.g. side=BUY with a stale/incorrect orderType=SELL_LIMIT)
+     * would be placed as-is, sending a trade in the wrong direction while
+     * every other field (side, sl/tp orientation) still reflects the
+     * original side. */
+    if ($req !== '' && in_array($req, MT5_ALLOWED_ORDER_TYPES, true) && str_starts_with($req, $side . '_')) {
+        return $req;
+    }
 
     if ($currentPrice === null || $currentPrice <= 0) {
         return $side === 'BUY' ? 'BUY_MARKET' : 'SELL_MARKET';
