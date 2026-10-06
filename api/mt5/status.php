@@ -24,6 +24,7 @@ if (!is_array($updates)) {
         'brokerTicket' => $body['brokerTicket'] ?? null,
         'message' => $body['message'] ?? null,
         'filledPrice' => $body['filledPrice'] ?? null,
+        'terminal' => $body['terminal'] ?? null,
     ];
     $updates = [$single];
 }
@@ -51,6 +52,7 @@ foreach ($updates as $u) {
         'brokerTicket' => isset($u['brokerTicket']) ? (string) $u['brokerTicket'] : null,
         'message' => isset($u['message']) ? (string) $u['message'] : null,
         'filledPrice' => isset($u['filledPrice']) ? (float) $u['filledPrice'] : null,
+        'terminal' => isset($u['terminal']) ? trim((string) $u['terminal']) : null,
     ];
 }
 
@@ -68,6 +70,7 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
     $applied = 0;
     $missing = [];
     $transitions = [];
+    $ignored = [];
 
     foreach ($validUpdates as $u) {
         $orderId = $u['orderId'];
@@ -77,6 +80,30 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
         }
         $order = &$state['orders'][$orderId];
         $fromStatus = (string) ($order['status'] ?? 'UNKNOWN');
+
+        /* Lifecycle-revert guard: once an order has reached a FINAL status
+         * (FILLED/REJECTED/CANCELLED/EXPIRED), that outcome is permanent —
+         * never let a later status update (a redelivered/duplicate signal
+         * resync, an out-of-order callback, or a stale retry) overwrite it
+         * with a different status. Without this guard a late-arriving
+         * non-final update (e.g. "RECEIVED") could silently revert an
+         * already-finalized order, which both corrupts the persisted
+         * lifecycle and can resurrect an order for further dispatch. The
+         * EA's resync of a terminal status it already knows about (see
+         * SIGNAL_DUPLICATE handling in ITGuruMt5Bridge.mq5) is still
+         * accepted/no-op'd below so it is acknowledged with HTTP 200 and the
+         * EA stops retrying. */
+        if (in_array($fromStatus, MT5_FINAL_STATUS, true) && $u['status'] !== $fromStatus) {
+            $ignored[] = [
+                'orderId' => $orderId,
+                'symbol' => $order['symbol'] ?? null,
+                'from' => $fromStatus,
+                'attemptedTo' => $u['status'],
+                'reason' => 'order already finalized; status update ignored to prevent lifecycle revert',
+            ];
+            continue;
+        }
+
         $order['status'] = $u['status'];
         if ($u['brokerTicket'] !== null && $u['brokerTicket'] !== '') {
             $order['brokerTicket'] = $u['brokerTicket'];
@@ -87,6 +114,9 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
         if ($u['filledPrice'] !== null && $u['filledPrice'] > 0) {
             $order['filledPrice'] = $u['filledPrice'];
         }
+        if (isset($u['terminal']) && $u['terminal'] !== '') {
+            $order['lastStatusTerminal'] = $u['terminal'];
+        }
         $order['updatedAt'] = $now;
         if (!isset($order['history']) || !is_array($order['history'])) $order['history'] = [];
         $order['history'][] = [
@@ -96,6 +126,7 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
         ];
         $transitions[] = [
             'orderId' => $orderId,
+            'terminal' => $u['terminal'] ?? null,
             'symbol' => $order['symbol'] ?? null,
             'brokerSymbolHint' => $order['brokerSymbolHint'] ?? null,
             'from' => $fromStatus,
@@ -105,7 +136,7 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
         unset($order);
     }
 
-    return ['applied' => $applied, 'missing' => $missing, 'transitions' => $transitions];
+    return ['applied' => $applied, 'missing' => $missing, 'transitions' => $transitions, 'ignored' => $ignored];
 });
 
 mt5LogDiagnostic('status.php', [
@@ -114,11 +145,13 @@ mt5LogDiagnostic('status.php', [
     'applied' => $result['applied'],
     'missingOrderIds' => $result['missing'],
     'lifecycleTransitions' => $result['transitions'],
+    'ignoredRevertAttempts' => $result['ignored'],
 ]);
 
 jsonResponse([
     'ok' => true,
     'applied' => $result['applied'],
     'missingOrderIds' => $result['missing'],
+    'ignoredRevertAttempts' => $result['ignored'],
 ]);
 

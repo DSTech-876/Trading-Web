@@ -597,6 +597,7 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
       "\"status\":\""+JsonEscape(status)+"\","
       "\"brokerTicket\":\""+JsonEscape(brokerTicket)+"\","
       "\"message\":\""+JsonEscape(message)+"\","
+      "\"terminal\":\""+JsonEscape(InpTerminalId)+"\","
       "\"filledPrice\":"+DoubleToString(filledPrice,fmtDigits)+"}";
 
    // Diagnostics requirement: always log the raw outgoing JSON body for a

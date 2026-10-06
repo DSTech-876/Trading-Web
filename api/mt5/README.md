@@ -133,7 +133,8 @@ When the operator sets `MT5_TRADING_HALTED=true` in `.env` (emergency kill-switc
   "status": "FILLED",
   "brokerTicket": "12345678",
   "message": "Filled by broker",
-  "filledPrice": 1.08502
+  "filledPrice": 1.08502,
+  "terminal": "MT5-TERM-01"
 }
 ```
 
@@ -147,21 +148,44 @@ When the operator sets `MT5_TRADING_HALTED=true` in `.env` (emergency kill-switc
       "status": "RECEIVED",
       "brokerTicket": "12345678",
       "message": "Accepted",
-      "filledPrice": 0
+      "filledPrice": 0,
+      "terminal": "MT5-TERM-01"
     }
   ]
 }
 ```
 
+- `terminal` is optional and should be set to the EA's `InpTerminalId`. It is stored as
+  `lastStatusTerminal` on the order and included in diagnostics/lifecycle-transition logs so a
+  status update can always be traced back to the reporting terminal.
+
 **Allowed status values**
 - `QUEUED`, `DISPATCHED`, `RECEIVED`, `FILLED`, `MODIFIED`, `REJECTED`, `CANCELLED`, `EXPIRED`
+
+**Lifecycle-revert guard**
+Once an order reaches a final status (`FILLED`, `REJECTED`, `CANCELLED`, `EXPIRED`), that outcome is
+permanent. Any later update that attempts to change it to a *different* status (e.g. a stale/duplicate
+EA resync replaying an older `RECEIVED`/`DISPATCHED` state) is ignored rather than applied — the order
+is never reverted. The request still returns `HTTP 200` for these ignored updates (so the EA does not
+treat it as a failure and retry indefinitely); the ignored attempt is reported back in
+`ignoredRevertAttempts` and logged via `mt5LogDiagnostic()`. A resync that resends the *same* final
+status is accepted as a no-op/idempotent update.
 
 **Response**
 ```json
 {
   "ok": true,
   "applied": 1,
-  "missingOrderIds": []
+  "missingOrderIds": [],
+  "ignoredRevertAttempts": [
+    {
+      "orderId": "mt5_20260516235154_ab12cd34",
+      "symbol": "stpRNG5",
+      "from": "REJECTED",
+      "attemptedTo": "RECEIVED",
+      "reason": "order already finalized; status update ignored to prevent lifecycle revert"
+    }
+  ]
 }
 ```
 

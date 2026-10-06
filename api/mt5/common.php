@@ -416,6 +416,8 @@ function mt5PublicOrder(array $order): array
         'brokerTicket' => $order['brokerTicket'] ?? null,
         'message' => $order['message'] ?? null,
         'attempts' => $order['attempts'] ?? 0,
+        'terminal' => $order['terminal'] ?? null,
+        'lastStatusTerminal' => $order['lastStatusTerminal'] ?? null,
         'createdAt' => $order['createdAt'] ?? null,
         'updatedAt' => $order['updatedAt'] ?? null,
     ];
