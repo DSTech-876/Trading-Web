@@ -16523,7 +16523,22 @@ function submitMt5BridgeTrade({
      being sent (effectiveDir, after opposite-mode swaps). Catching this here
      — before a request is ever built/sent — avoids relying on the server's
      422 rejection (which still means "signal fired but no order was placed
-     with SL/TP", the exact failure mode this bridge must prevent). */
+     with SL/TP", the exact failure mode this bridge must prevent).
+
+     NOTE: this is a trading-behavior change, not purely diagnostic — a
+     signal that previously reached the MT5 bridge (and relied on the
+     server's 422 rejection) is now silently skipped client-side instead.
+     Acceptance criteria, covered by tests/test_mt5_dispatch_gate.js:
+       - Dispatch proceeds unchanged when entry/SL/TP are all finite,
+         positive, and on the correct side of entry for effectiveDir.
+       - Dispatch is skipped (no fetch call) when entry/SL/TP is missing,
+         non-finite, or <= 0.
+       - Dispatch is skipped (no fetch call) when SL and/or TP sit on the
+         wrong side of entry for effectiveDir (BULL: sl < entry < tp; BEAR:
+         tp < entry < sl).
+       - The check uses effectiveDir (post opposite-mode swap), not the
+         original signal.dir, so opposite-mode trades are validated against
+         the direction actually being sent to the broker. */
   const entryNum = Number(signal.entry);
   const slNum = Number(tradeSl);
   const tpNum = Number(tradeTp);
