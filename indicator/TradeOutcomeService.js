@@ -26,6 +26,29 @@ class TradeOutcomeService {
     }
 
     /**
+     * Build a human-readable description of a failed fetch response.
+     * `response.statusText` is frequently blank (e.g. HTTP/2 responses), so
+     * fall back to the JSON/text error body and the numeric status code.
+     */
+    async _describeErrorResponse(response) {
+        let detail = '';
+        try {
+            const text = await response.text();
+            if (text) {
+                try {
+                    const data = JSON.parse(text);
+                    detail = (data && (data.error || data.message)) || text;
+                } catch {
+                    detail = text;
+                }
+            }
+        } catch {
+            // ignore body read failures; fall back to status below
+        }
+        return detail || response.statusText || `HTTP ${response.status}`;
+    }
+
+    /**
      * Generate a unique trade ID (UUID v4)
      */
     generateTradeId() {
@@ -337,7 +360,7 @@ class TradeOutcomeService {
             });
 
             if (!response.ok) {
-                this._log('WARN', `Failed to record notification: ${response.statusText}`);
+                this._log('WARN', `Failed to record notification: ${await this._describeErrorResponse(response)}`);
             }
         } catch (err) {
             this._log('WARN', `Error recording notification to database: ${err.message}`);
@@ -415,7 +438,7 @@ class TradeOutcomeService {
             if (response.ok) {
                 this._log('DEBUG', `Trade outcome logged to database: ${payload.trade_id}`);
             } else {
-                this._log('WARN', `Failed to log outcome: ${response.statusText}`);
+                this._log('WARN', `Failed to log outcome: ${await this._describeErrorResponse(response)}`);
             }
         } catch (err) {
             this._log('WARN', `Error logging outcome to database: ${err.message}`);
@@ -452,7 +475,7 @@ class TradeOutcomeService {
             });
 
             if (!response.ok) {
-                this._log('WARN', `Failed to update partial TP: ${response.statusText}`);
+                this._log('WARN', `Failed to update partial TP: ${await this._describeErrorResponse(response)}`);
             }
         } catch (err) {
             this._log('WARN', `Error updating partial TP: ${err.message}`);
