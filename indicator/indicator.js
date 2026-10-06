@@ -250,6 +250,12 @@ const AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT = 4;
  * Falls back to AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT if the fetch fails or
  * the endpoint is unreachable (e.g. logged out, offline). */
 let AUTO_TRADE_DAILY_LOSS_CAP_PCT = AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT;
+/* Tracks whether the initial boot-time fetchRiskConfig() request has settled
+ * (succeeded, failed, or was skipped because the user isn't logged in). Trade
+ * execution is gated on this so a stricter server-configured cap can never be
+ * raced by a signal firing against the hardcoded default before the first
+ * request completes. Set true as soon as that first request settles. */
+let riskConfigInitialRequestSettled = false;
 const AUTO_TRADE_COOLDOWN_AFTER_LOSS_MS = 90 * 1000;
 const AUTO_TRADE_SYMBOL_FREQ_WINDOW_MS  = 15 * 60 * 1000;
 const AUTO_TRADE_MAX_TRADES_PER_SYMBOL_WINDOW = 4;
@@ -16421,6 +16427,7 @@ async function fetchRiskConfig() {
       addLog(`⚙ Daily loss cap set from admin config: ${fmt(pct, 1)}%`);
     }
   } catch { /* keep default — non-critical background fetch */ }
+  finally { riskConfigInitialRequestSettled = true; }
 }
 
 function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake) {
@@ -16709,6 +16716,16 @@ function executeAutoTrade(signal, _capturedWs) {
   /* Block if session TP/SL has been hit */
   if (autoTradeHalted) {
     addLog("⛔ Auto-trade blocked — session limit hit (reset session to resume)");
+    return;
+  }
+
+  /* Gate execution until the initial fetchRiskConfig() request settles, so a
+   * signal can never fire against the hardcoded AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT
+   * while a stricter admin-configured cap is still in flight. Once the initial
+   * request settles (success, failure, or skipped while logged out) this never
+   * blocks again — later fetches (e.g. after login) only refine the cap value. */
+  if (!riskConfigInitialRequestSettled) {
+    addLog("⏳ Auto-trade skipped — waiting for risk config to load");
     return;
   }
 
@@ -28802,6 +28819,13 @@ function initLoginGate() {
           applyStrategyAccess();
           bootstrapAdaptiveIntelligence(true);
         });
+        /* Re-fetch the admin-configured daily loss cap now that a session
+           exists — the initial boot-time fetch is skipped while logged out,
+           so without this, auto-trading would keep running on the hardcoded
+           AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT after an in-page login.
+           fetchRiskConfig() already catches its own errors internally, so it
+           is safe to fire-and-forget here without an extra wrapper. */
+        fetchRiskConfig();
         loadNotificationPreferences().then(renderNotificationPreferencesUI);
       }
     });

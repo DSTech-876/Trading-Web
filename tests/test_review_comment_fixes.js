@@ -2438,6 +2438,7 @@ test('initLoginGate initializes adaptive runtime immediately on login and re-che
     ensureAdaptiveRuntimeScope: () => callOrder.push('ensure_scope'),
     applyStrategyAccess: () => callOrder.push('apply_access'),
     bootstrapAdaptiveIntelligence: () => callOrder.push('bootstrap'),
+    fetchRiskConfig: () => callOrder.push('fetch_risk_config'),
     loadNotificationPreferences: () => Promise.resolve().then(() => callOrder.push('load_notifications')),
     renderNotificationPreferencesUI: () => callOrder.push('render_notifications'),
     UI: { loginOverlay: { style: {} } },
@@ -2451,7 +2452,7 @@ test('initLoginGate initializes adaptive runtime immediately on login and re-che
 
   initLoginGate();
   loginHandler();
-  assert.deepEqual(callOrder, ['remove_token', 'init_runtime']);
+  assert.deepEqual(callOrder, ['remove_token', 'init_runtime', 'fetch_risk_config']);
 
   resolveVerify();
   await verifyPromise;
@@ -2469,6 +2470,7 @@ test('initLoginGate initializes adaptive runtime immediately on login and re-che
   assert.ok(bootstrapIndex > applyIndex);
   assert.ok(loadIndex !== -1);
   assert.ok(renderIndex > loadIndex);
+  assert.ok(callOrder.includes('fetch_risk_config'));
 });
 
 test('syncPersistentAdaptiveTradeHistory does not record rejected cached adaptive decisions', async () => {
