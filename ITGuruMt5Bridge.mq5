@@ -238,7 +238,7 @@ bool IsDuplicateSignal(string orderId)
    return FindProcessedIndex(orderId) >= 0;
 }
 
-// Returns the last known final status/ticket/fill price we reported for this
+// Returns the last reported status/ticket/fill price we sent for this
 // orderId, so a duplicate redispatch can resync the server instead of being
 // dropped with no trace, which previously left orders stuck non-final forever
 // (endlessly redispatched and counted as a duplicate every single poll).
@@ -290,9 +290,13 @@ void MarkProcessed(string orderId, string status="", string ticket="", double pr
 // break that loop, derive the real outcome from the account's current open
 // state and trade history instead of guessing: a still-open position/pending
 // order tagged with this orderId is reported as FILLED/RECEIVED with its true
-// fill price, and a closed-out position found in history is reported as
-// FILLED with the original deal's entry price. If none of that is found the
-// order was never placed on this account, so it is safe to report REJECTED.
+// fill price, a filled deal resolved to its originating order's ORDER_COMMENT
+// is reported as FILLED, and a historical order that was cancelled, expired,
+// or rejected before ever filling is reported with that same final status. If
+// none of that is found the order was never placed on this account, so it is
+// safe to report REJECTED. Returns false if history could not be queried, so
+// the caller can retry reconciliation on the next redispatch instead of
+// permanently persisting a REJECTED outcome without having checked history.
 bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket, double &price, int &digits)
 {
    for(int i=0;i<PositionsTotal();i++)
@@ -321,22 +325,46 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
       return true;
    }
 
-   if(HistorySelect((datetime)((long)TimeGMT()-PROCESSED_TTL_SECS), TimeGMT()))
+   if(!HistorySelect((datetime)((long)TimeCurrent()-PROCESSED_TTL_SECS), TimeCurrent()))
+      return false; // selection failed; retry reconciliation on the next redispatch
+
+   int totalDeals = HistoryDealsTotal();
+   for(int i=0;i<totalDeals;i++)
    {
-      int totalDeals = HistoryDealsTotal();
-      for(int i=0;i<totalDeals;i++)
-      {
-         ulong dealTicket = HistoryDealGetTicket(i);
-         if(dealTicket==0) continue;
-         if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
-         if(HistoryDealGetString(dealTicket, DEAL_COMMENT)!=o.orderId) continue;
-         if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY)!=DEAL_ENTRY_IN) continue;
-         status="FILLED";
-         ticket=(string)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
-         price=HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-         digits=(int)SymbolInfoInteger(HistoryDealGetString(dealTicket, DEAL_SYMBOL), SYMBOL_DIGITS);
-         return true;
-      }
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket==0) continue;
+      if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
+      if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY)!=DEAL_ENTRY_IN) continue;
+      ulong orderTicket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
+      if(orderTicket==0 || !HistoryOrderSelect(orderTicket)) continue;
+      if(HistoryOrderGetString(orderTicket, ORDER_COMMENT)!=o.orderId) continue;
+      status="FILLED";
+      ticket=(string)orderTicket;
+      price=HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+      digits=(int)SymbolInfoInteger(HistoryDealGetString(dealTicket, DEAL_SYMBOL), SYMBOL_DIGITS);
+      return true;
+   }
+
+   // No matching fill: check historical orders for a pending order that was
+   // cancelled, expired, or rejected before ever filling, so these distinct
+   // final statuses (already reported by OnTradeTransaction going forward)
+   // aren't misreported as REJECTED-with-no-trace below.
+   int totalOrders = HistoryOrdersTotal();
+   for(int i=0;i<totalOrders;i++)
+   {
+      ulong orderTicket = HistoryOrderGetTicket(i);
+      if(orderTicket==0) continue;
+      if((long)HistoryOrderGetInteger(orderTicket, ORDER_MAGIC) != InpMagic) continue;
+      if(HistoryOrderGetString(orderTicket, ORDER_COMMENT)!=o.orderId) continue;
+      long state = HistoryOrderGetInteger(orderTicket, ORDER_STATE);
+      if(state==ORDER_STATE_EXPIRED)       status="EXPIRED";
+      else if(state==ORDER_STATE_REJECTED) status="REJECTED";
+      else if(state==ORDER_STATE_CANCELED) status="CANCELLED";
+      else continue;
+      ticket=(string)orderTicket;
+      price=0.0;
+      digits=-1;
+      return true;
    }
 
    // No trace of this orderId anywhere on the account: it was never placed,
