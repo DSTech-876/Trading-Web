@@ -437,7 +437,7 @@ bool HttpRequest(string method, string url, string headers, string body, string 
          else
             hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
       }
-      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" bodyBytes="+(string)StringLen(body));
+      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" bodyBytes="+(string)ArraySize(data));
       return false;
    }
    resp = CharArrayToString(result, 0, -1, CP_UTF8);
@@ -612,8 +612,10 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
    // Diagnostics requirement: always log the outgoing request metadata (never the body, which carries the bridge key) for a
    // status callback, tagged with the endpoint URL and signal id, *before*
    // transmission — so a server-side "Invalid JSON body" (or any other 4xx)
-   // can be compared byte-for-byte against what was actually sent.
-   LogEvent("DEBUG","STATUS_POST_REQUEST",orderId,"endpoint="+url+" status="+status+" bodyBytes="+(string)StringLen(body));
+   // can be correlated against what was actually sent by endpoint, status, and byte count.
+   uchar bodyBytesArr[];
+   int bodyByteCount = StringToCharArray(body, bodyBytesArr, 0, -1, CP_UTF8) - 1; // exclude the NUL terminator
+   LogEvent("DEBUG","STATUS_POST_REQUEST",orderId,"endpoint="+url+" status="+status+" bodyBytes="+(string)bodyByteCount);
 
    string resp, respHeaders;
    int code=-1;
@@ -624,7 +626,7 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
    }
 
    if(code!=200)
-      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"endpoint="+url+" HTTP "+(string)code+" responseBody="+resp+" bodyBytes="+(string)StringLen(body));
+      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"endpoint="+url+" HTTP "+(string)code+" responseBody="+resp+" bodyBytes="+(string)bodyByteCount);
    else
       LogEvent("INFO","STATUS_POST_OK",orderId,"endpoint="+url+" status="+status+" ticket="+brokerTicket+" responseBody="+resp);
 }

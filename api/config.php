@@ -640,12 +640,14 @@ function requirePost(): void
 /**
  * Read and decode the JSON request body.
  *
- * On failure, logs the raw body (trimmed) plus the exact json_last_error()
- * reason and a hex dump of the trailing bytes before rejecting the request.
+ * On failure, logs the endpoint, the exact json_last_error() reason, the
+ * byte length of the raw body, and whether the last byte was a NUL —
+ * without logging the raw body itself or a hex dump of its trailing bytes.
  * This is essential for diagnosing "Invalid JSON body" errors from non-PHP
  * clients (e.g. the MT5 bridge EA): a stray trailing byte — such as the NUL
- * terminator MQL5's StringToCharArray() can include — is invisible in a
- * plain-text log but decodes JSON to NULL, and the hex dump makes it obvious.
+ * terminator MQL5's StringToCharArray() can include — decodes JSON to NULL,
+ * and the lastByteNul flag makes that case obvious without exposing the
+ * (potentially sensitive) request body in logs.
  */
 function getJsonBody(): array
 {
