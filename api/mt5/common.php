@@ -239,15 +239,34 @@ function mt5InferDigits(string $symbol, float $price): int
     return max(2, min(8, $decimals));
 }
 
+/**
+ * Resolves the final order type dispatched to MT5, normalizing against the
+ * resolved trade `$side` (which is itself derived from `dir`/`direction` and
+ * is treated as the source of truth for trade direction).
+ *
+ * Contract:
+ *  - A client-supplied `$requested` order type is only honored when it is one
+ *    of MT5_ALLOWED_ORDER_TYPES AND its BUY_/SELL_ prefix matches `$side`.
+ *    Without this check, a mismatched payload (e.g. side=BUY with a
+ *    stale/incorrect orderType=SELL_LIMIT) would be placed as-is, sending a
+ *    trade in the wrong direction while every other field (side, sl/tp
+ *    orientation) still reflects the original side.
+ *  - A direction-mismatched `$requested` value is NOT honored and is NOT
+ *    rejected either: it is silently discarded and a fresh order type is
+ *    derived from `$side`, `$entry`, and `$currentPrice` using the same
+ *    pending/market rules as when no order type was supplied at all (see
+ *    below). Callers that need to detect/reject a mismatched order type
+ *    must compare the input `$requested` against the returned value
+ *    themselves; this function never surfaces a validation error for it.
+ *  - When no (or an invalid) order type is requested, the type is derived
+ *    from the entry price relative to `$currentPrice`: entry beyond current
+ *    price yields a STOP order, entry before current price yields a LIMIT
+ *    order, and an equal (or missing `$currentPrice`) entry yields a MARKET
+ *    order.
+ */
 function mt5ResolveOrderType(string $side, float $entry, ?float $currentPrice, string $requested = ''): string
 {
     $req = strtoupper(trim($requested));
-    /* Only trust a client-requested order type when its BUY_/SELL_ prefix
-     * matches the resolved trade side. Without this check a mismatched
-     * payload (e.g. side=BUY with a stale/incorrect orderType=SELL_LIMIT)
-     * would be placed as-is, sending a trade in the wrong direction while
-     * every other field (side, sl/tp orientation) still reflects the
-     * original side. */
     if ($req !== '' && in_array($req, MT5_ALLOWED_ORDER_TYPES, true) && str_starts_with($req, $side . '_')) {
         return $req;
     }

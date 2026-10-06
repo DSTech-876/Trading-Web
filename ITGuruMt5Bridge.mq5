@@ -421,13 +421,22 @@ bool HttpRequest(string method, string url, string headers, string body, string 
    {
       int err = GetLastError();
       string hint = "";
-      // err 4014 = ERR_FUNCTION_NOT_ALLOWED: the base URL is not (yet) allow-listed in
-      // Tools > Options > Expert Advisors > "Allow WebRequest for listed URL", or the
-      // terminal needs a restart/EA re-attach after adding it. Every poll will fail
-      // identically until this is fixed, so surface the fix directly in the log instead
-      // of forcing the operator to look up the MQL5 error code.
+      // err 4014 = ERR_FUNCTION_NOT_ALLOWED. In the Strategy Tester, WebRequest()
+      // always returns this error because outbound web requests are never permitted
+      // there, regardless of the allow-list — so the allow-list remedy below is
+      // guaranteed wrong for backtests. Outside the tester, it means the base URL is
+      // not (yet) allow-listed in Tools > Options > Expert Advisors > "Allow
+      // WebRequest for listed URL", or the terminal needs a restart/EA re-attach
+      // after adding it. Every poll will fail identically until this is fixed, so
+      // surface the correct fix directly in the log instead of forcing the operator
+      // to look up the MQL5 error code.
       if(err == 4014)
-         hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
+      {
+         if(MQLInfoInteger(MQL_TESTER))
+            hint = " (WebRequest is not available in the Strategy Tester; this EA requires live web access and cannot be backtested)";
+         else
+            hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
+      }
       LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" requestBody="+body);
       return false;
    }
