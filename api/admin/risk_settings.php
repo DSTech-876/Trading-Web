@@ -78,25 +78,38 @@ try {
     $before = riskSettingsRow($pdo);
     $adminId = (int) $GLOBALS['adminUserId'];
 
-    $stmt = $pdo->prepare(
-        'UPDATE risk_settings SET daily_loss_limit_pct = ?, updated_by = ? WHERE id = 1'
-    );
-    $stmt->execute([$newPct, $adminId]);
+    $pdo->beginTransaction();
+    try {
+        $pdo->exec('INSERT IGNORE INTO risk_settings (id, daily_loss_limit_pct) VALUES (1, 5.00)');
+        $lockStmt = $pdo->query('SELECT daily_loss_limit_pct FROM risk_settings WHERE id = 1 FOR UPDATE');
+        $lockedRow = $lockStmt ? $lockStmt->fetch(PDO::FETCH_ASSOC) : false;
+        $oldValue = is_array($lockedRow) ? (string) $lockedRow['daily_loss_limit_pct'] : (string) $before['daily_loss_limit_pct'];
 
-    $pdo->prepare(
-        'INSERT INTO admin_audit_trail
-            (admin_id, action, entity_type, entity_id, old_value, new_value, ip_address, user_agent, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())'
-    )->execute([
-        $adminId,
-        'risk_settings_updated',
-        'risk_settings',
-        'daily_loss_limit_pct',
-        (string) $before['daily_loss_limit_pct'],
-        (string) $newPct,
-        $_SERVER['REMOTE_ADDR'] ?? null,
-        $_SERVER['HTTP_USER_AGENT'] ?? null,
-    ]);
+        $stmt = $pdo->prepare(
+            'UPDATE risk_settings SET daily_loss_limit_pct = ?, updated_by = ? WHERE id = 1'
+        );
+        $stmt->execute([$newPct, $adminId]);
+
+        $pdo->prepare(
+            'INSERT INTO admin_audit_trail
+                (admin_id, action, entity_type, entity_id, old_value, new_value, ip_address, user_agent, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())'
+        )->execute([
+            $adminId,
+            'risk_settings_updated',
+            'risk_settings',
+            'daily_loss_limit_pct',
+            $oldValue,
+            (string) $newPct,
+            $_SERVER['REMOTE_ADDR'] ?? null,
+            $_SERVER['HTTP_USER_AGENT'] ?? null,
+        ]);
+
+        $pdo->commit();
+    } catch (\Throwable $e) {
+        $pdo->rollBack();
+        throw $e;
+    }
 
     jsonResponse(riskSettingsPublic(riskSettingsRow($pdo)));
 } catch (\Throwable $e) {

@@ -958,10 +958,11 @@ bool SendTrade(const BridgeOrder &o)
       req.type_filling = ORDER_FILLING_RETURN;
    }
 
+   int reqDigits = (int)SymbolInfoInteger(req.symbol, SYMBOL_DIGITS);
    LogEvent("INFO","ORDER_SEND_REQUEST",o.orderId,
             "action="+(string)req.action+" type="+(string)req.type+" symbol="+req.symbol+
-            " volume="+DoubleToString(req.volume,2)+" price="+DoubleToString(req.price,_Digits)+
-            " sl="+DoubleToString(req.sl,_Digits)+" tp="+DoubleToString(req.tp,_Digits)+
+            " volume="+DoubleToString(req.volume,2)+" price="+DoubleToString(req.price,reqDigits)+
+            " sl="+DoubleToString(req.sl,reqDigits)+" tp="+DoubleToString(req.tp,reqDigits)+
             " deviation="+(string)req.deviation+" magic="+(string)req.magic);
 
    bool ok=false;
@@ -972,7 +973,7 @@ bool SendTrade(const BridgeOrder &o)
       ok = OrderSend(req,res);
       LogEvent("INFO","BROKER_RESPONSE",o.orderId,
                "attempt="+(string)(attempt+1)+" ok="+(string)ok+" retcode="+(string)res.retcode+
-               " deal="+(string)res.deal+" order="+(string)res.order+" price="+DoubleToString(res.price,_Digits)+
+               " deal="+(string)res.deal+" order="+(string)res.order+" price="+DoubleToString(res.price,reqDigits)+
                " comment="+res.comment);
       if(ok && (res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_DONE_PARTIAL || res.retcode==TRADE_RETCODE_PLACED))
          break;
