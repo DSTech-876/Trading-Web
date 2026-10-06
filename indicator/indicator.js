@@ -16518,6 +16518,28 @@ function submitMt5BridgeTrade({
     return;
   }
 
+  /* Guard against dispatching a broker order with missing/invalid SL or TP,
+     or stops on the wrong side of entry for the trade direction actually
+     being sent (effectiveDir, after opposite-mode swaps). Catching this here
+     — before a request is ever built/sent — avoids relying on the server's
+     422 rejection (which still means "signal fired but no order was placed
+     with SL/TP", the exact failure mode this bridge must prevent). */
+  const entryNum = Number(signal.entry);
+  const slNum = Number(tradeSl);
+  const tpNum = Number(tradeTp);
+  if (!Number.isFinite(entryNum) || entryNum <= 0 ||
+      !Number.isFinite(slNum) || slNum <= 0 ||
+      !Number.isFinite(tpNum) || tpNum <= 0) {
+    addLog(`⚠ MT5 bridge skipped — ${label} signal is missing a valid entry/SL/TP (entry=${signal.entry}, sl=${tradeSl}, tp=${tradeTp})`);
+    return;
+  }
+  const slOk = effectiveDir === "BULL" ? slNum < entryNum : slNum > entryNum;
+  const tpOk = effectiveDir === "BULL" ? tpNum > entryNum : tpNum < entryNum;
+  if (!slOk || !tpOk) {
+    addLog(`⚠ MT5 bridge skipped — ${label} SL/TP on wrong side of entry for ${effectiveDir} (entry=${entryNum}, sl=${slNum}, tp=${tpNum})`);
+    return;
+  }
+
   const payload = buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake);
   const headers = mt5BridgeHeaders({ "X-Idempotency-Key": payload.idempotencyKey });
   const oppositeTag = (effectiveDir !== signal.dir) ? " [OPPOSITE]" : "";

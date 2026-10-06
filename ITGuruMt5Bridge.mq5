@@ -398,7 +398,16 @@ bool HttpRequest(string method, string url, string headers, string body, string 
    statusCode = WebRequest(method, url, headers, InpHttpTimeoutMs, data, result, respHeaders);
    if(statusCode == -1)
    {
-      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)GetLastError());
+      int err = GetLastError();
+      string hint = "";
+      // err 4014 = ERR_FUNCTION_NOT_ALLOWED: the base URL is not (yet) allow-listed in
+      // Tools > Options > Expert Advisors > "Allow WebRequest for listed URL", or the
+      // terminal needs a restart/EA re-attach after adding it. Every poll will fail
+      // identically until this is fixed, so surface the fix directly in the log instead
+      // of forcing the operator to look up the MQL5 error code.
+      if(err == 4014)
+         hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
+      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint);
       return false;
    }
    resp = CharArrayToString(result, 0, -1, CP_UTF8);
