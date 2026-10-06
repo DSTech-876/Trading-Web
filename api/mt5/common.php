@@ -110,6 +110,11 @@ function mt5LogDiagnostic(string $endpoint, array $context): void
     $path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
         . DIRECTORY_SEPARATOR
         . 'itguru_mt5_bridge_diagnostics_' . sha1(__DIR__) . '.log';
+    // Cap the file so a long-running bridge cannot fill the temp filesystem.
+    clearstatcache(true, $path);
+    if (is_file($path) && (int) @filesize($path) > 1048576) {
+        @rename($path, $path . '.1');
+    }
     @file_put_contents($path, $line . "\n", FILE_APPEND | LOCK_EX);
 }
 
@@ -423,7 +428,7 @@ function mt5PublicOrder(array $order): array
         'orderId' => $order['orderId'] ?? '',
         'status' => $order['status'] ?? 'UNKNOWN',
         'symbol' => $order['symbol'] ?? '',
-        'brokerSymbolHint' => $order['brokerSymbolHint'] ?? null,
+        'brokerSymbolHint' => ($order['brokerSymbolHint'] ?? '') !== '' ? $order['brokerSymbolHint'] : null,
         'side' => $order['side'] ?? '',
         'orderType' => $order['orderType'] ?? '',
         'entry' => $order['entry'] ?? null,

@@ -59,7 +59,7 @@ foreach ($updates as $u) {
 if ($validUpdates === []) {
     mt5LogDiagnostic('status.php', [
         'event' => 'STATUS_UPDATE_REJECTED',
-        'rawBody' => $rawBody,
+        'bodyBytes' => strlen((string) $rawBody),
         'validationErrors' => $rejectedUpdates,
     ]);
     jsonResponse(['error' => 'No valid updates provided', 'validationErrors' => $rejectedUpdates], 422);
@@ -93,7 +93,10 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
          * SIGNAL_DUPLICATE handling in ITGuruMt5Bridge.mq5) is still
          * accepted/no-op'd below so it is acknowledged with HTTP 200 and the
          * EA stops retrying. */
-        if (in_array($fromStatus, MT5_FINAL_STATUS, true) && $u['status'] !== $fromStatus) {
+        if (in_array($fromStatus, MT5_FINAL_STATUS, true)) {
+            if ($u['status'] === $fromStatus) {
+                continue;
+            }
             $ignored[] = [
                 'orderId' => $orderId,
                 'symbol' => $order['symbol'] ?? null,
@@ -141,7 +144,7 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
 
 mt5LogDiagnostic('status.php', [
     'event' => 'STATUS_UPDATE_APPLIED',
-    'rawBody' => $rawBody,
+    'bodyBytes' => strlen((string) $rawBody),
     'applied' => $result['applied'],
     'missingOrderIds' => $result['missing'],
     'lifecycleTransitions' => $result['transitions'],

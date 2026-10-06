@@ -64,7 +64,7 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
 $public = array_map(static fn(array $o): array => [
     'orderId' => $o['orderId'] ?? '',
     'symbol' => $o['symbol'] ?? '',
-    'brokerSymbolHint' => $o['brokerSymbolHint'] ?? null,
+    'brokerSymbolHint' => ($o['brokerSymbolHint'] ?? '') !== '' ? $o['brokerSymbolHint'] : null,
     'side' => $o['side'] ?? '',
     'orderType' => $o['orderType'] ?? '',
     'entry' => $o['entry'] ?? null,

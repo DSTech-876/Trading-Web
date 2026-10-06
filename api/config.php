@@ -655,12 +655,11 @@ function getJsonBody(): array
     if (!is_array($data)) {
         $script = basename((string) ($_SERVER['SCRIPT_NAME'] ?? 'unknown'));
         error_log(sprintf(
-            '[JSON_BODY_INVALID] endpoint=%s error=%s bytes=%d preview=%s trailingHex=%s',
+            '[JSON_BODY_INVALID] endpoint=%s error=%s bytes=%d lastByteNul=%s',
             $script,
             json_last_error_msg(),
             strlen($raw),
-            substr($raw, 0, 1000),
-            bin2hex(substr($raw, -8))
+            $raw !== '' && substr($raw, -1) === "\0" ? 'yes' : 'no'
         ));
         jsonResponse(['error' => 'Invalid JSON body', 'detail' => json_last_error_msg()], 400);
     }

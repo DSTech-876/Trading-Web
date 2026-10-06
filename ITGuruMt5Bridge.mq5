@@ -412,7 +412,7 @@ bool HttpRequest(string method, string url, string headers, string body, string 
       ArrayResize(data, 0);
 
    if(InpVerboseLogging)
-      LogEvent("DEBUG","HTTP_REQUEST","", "method="+method+" url="+url+" bodyBytes="+(string)ArraySize(data)+" body="+body);
+      LogEvent("DEBUG","HTTP_REQUEST","", "method="+method+" url="+url+" bodyBytes="+(string)ArraySize(data));
 
    char result[];
    ResetLastError();
@@ -437,7 +437,7 @@ bool HttpRequest(string method, string url, string headers, string body, string 
          else
             hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
       }
-      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" requestBody="+body);
+      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" bodyBytes="+(string)StringLen(body));
       return false;
    }
    resp = CharArrayToString(result, 0, -1, CP_UTF8);
@@ -609,11 +609,11 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
       "\"terminal\":\""+JsonEscape(InpTerminalId)+"\","
       "\"filledPrice\":"+DoubleToString(filledPrice,fmtDigits)+"}";
 
-   // Diagnostics requirement: always log the raw outgoing JSON body for a
+   // Diagnostics requirement: always log the outgoing request metadata (never the body, which carries the bridge key) for a
    // status callback, tagged with the endpoint URL and signal id, *before*
    // transmission — so a server-side "Invalid JSON body" (or any other 4xx)
    // can be compared byte-for-byte against what was actually sent.
-   LogEvent("DEBUG","STATUS_POST_REQUEST",orderId,"endpoint="+url+" status="+status+" requestBody="+body);
+   LogEvent("DEBUG","STATUS_POST_REQUEST",orderId,"endpoint="+url+" status="+status+" bodyBytes="+(string)StringLen(body));
 
    string resp, respHeaders;
    int code=-1;
@@ -624,7 +624,7 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
    }
 
    if(code!=200)
-      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"endpoint="+url+" HTTP "+(string)code+" responseBody="+resp+" requestBody="+body);
+      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"endpoint="+url+" HTTP "+(string)code+" responseBody="+resp+" bodyBytes="+(string)StringLen(body));
    else
       LogEvent("INFO","STATUS_POST_OK",orderId,"endpoint="+url+" status="+status+" ticket="+brokerTicket+" responseBody="+resp);
 }
@@ -794,7 +794,6 @@ bool ResolveBrokerSymbol(string requested, string brokerSymbolHint, string order
    }
 
    LogEvent("ERROR","SYMBOL_RESOLVE_FAIL",orderId,"requested="+requested+" no broker symbol could be resolved (hint="+brokerSymbolHint+", alias="+alias+")");
-   SymbolResolveCachePut(requested, "");
    resolved="";
    return false;
 }
