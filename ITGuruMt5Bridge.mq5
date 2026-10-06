@@ -50,12 +50,17 @@ input string Inp_LoggingHeader   = "===== Logging =====";  // (label)
 input bool   InpVerboseLogging   = true;
 input string InpLogFileName      = "ITGuruMt5Bridge_log.csv";
 
+input string Inp_SymbolHeader    = "===== Symbol Resolution =====";  // (label)
+input string InpSymbolAliasMap   = ""; // manual overrides: "stpRNG5=Step Index 500;EURUSD=EURUSD.m" (code=brokerSymbol pairs, ';' separated)
+input string InpSymbolSuffixCandidates = ""; // broker suffixes to try appended to the raw code, e.g. "m,.a,-ECN,#" (comma separated)
+
 //================================= Types =====================================
 
 struct BridgeOrder
 {
    string orderId;
    string symbol;
+   string brokerSymbolHint; // optional server-suggested broker/MarketWatch symbol name
    string side;
    string orderType;
    double entry;
@@ -389,9 +394,25 @@ bool HttpRequest(string method, string url, string headers, string body, string 
 {
    char data[];
    if(method=="POST")
+   {
       StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+      // CRITICAL: StringToCharArray() with count=WHOLE_ARRAY copies the string's
+      // terminating NUL byte into the array as well. WebRequest() sends the raw
+      // array contents as the POST body, so without trimming this off, every
+      // single POST (status.php, signal.php, etc.) is transmitted with a stray
+      // trailing 0x00 byte. PHP's json_decode() treats any trailing non-whitespace
+      // byte after the JSON value as a parse error and returns NULL — which is
+      // exactly the "Invalid JSON body" HTTP 400 the server was returning for
+      // every STATUS_POST call. Drop the terminator so the wire body is pure JSON.
+      int sz = ArraySize(data);
+      if(sz>0 && data[sz-1]==0)
+         ArrayResize(data, sz-1);
+   }
    else
       ArrayResize(data, 0);
+
+   if(InpVerboseLogging)
+      LogEvent("DEBUG","HTTP_REQUEST","", "method="+method+" url="+url+" bodyBytes="+(string)ArraySize(data)+" body="+body);
 
    char result[];
    ResetLastError();
@@ -407,10 +428,12 @@ bool HttpRequest(string method, string url, string headers, string body, string 
       // of forcing the operator to look up the MQL5 error code.
       if(err == 4014)
          hint = " (URL not allow-listed: add '"+TrimSlash(InpBaseUrl)+"' in Tools > Options > Expert Advisors > Allow WebRequest for listed URL, then re-attach this EA)";
-      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint);
+      LogEvent("ERROR","HTTP_FAIL","", "method="+method+" url="+url+" err="+(string)err+hint+" requestBody="+body);
       return false;
    }
    resp = CharArrayToString(result, 0, -1, CP_UTF8);
+   if(InpVerboseLogging)
+      LogEvent("DEBUG","HTTP_RESPONSE","", "method="+method+" url="+url+" code="+(string)statusCode+" body="+resp);
    return true;
 }
 
@@ -536,6 +559,7 @@ int ParseOrders(string json, BridgeOrder &out[])
       BridgeOrder o;
       o.orderId   = JsonGetString(obj,"orderId");
       o.symbol    = JsonGetString(obj,"symbol");
+      o.brokerSymbolHint = JsonGetString(obj,"brokerSymbolHint");
       o.side      = JsonGetString(obj,"side");
       o.orderType = JsonGetString(obj,"orderType");
       o.entry     = JsonGetNumber(obj,"entry",0.0);
@@ -573,23 +597,198 @@ void PostStatus(string orderId, string status, string brokerTicket, string messa
       "\"status\":\""+JsonEscape(status)+"\","
       "\"brokerTicket\":\""+JsonEscape(brokerTicket)+"\","
       "\"message\":\""+JsonEscape(message)+"\","
+      "\"terminal\":\""+JsonEscape(InpTerminalId)+"\","
       "\"filledPrice\":"+DoubleToString(filledPrice,fmtDigits)+"}";
+
+   // Diagnostics requirement: always log the raw outgoing JSON body for a
+   // status callback, tagged with the endpoint URL and signal id, *before*
+   // transmission — so a server-side "Invalid JSON body" (or any other 4xx)
+   // can be compared byte-for-byte against what was actually sent.
+   LogEvent("DEBUG","STATUS_POST_REQUEST",orderId,"endpoint="+url+" status="+status+" requestBody="+body);
 
    string resp, respHeaders;
    int code=-1;
    if(!HttpRequest("POST",url,headers,body,resp,respHeaders,code))
    {
-      LogEvent("ERROR","STATUS_POST_FAIL",orderId,"could not reach status.php, status="+status);
+      LogEvent("ERROR","STATUS_POST_FAIL",orderId,"could not reach "+url+", status="+status);
       return;
    }
 
    if(code!=200)
-      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"HTTP "+(string)code+" body="+resp);
+      LogEvent("ERROR","STATUS_POST_HTTP",orderId,"endpoint="+url+" HTTP "+(string)code+" responseBody="+resp+" requestBody="+body);
    else
-      LogEvent("INFO","STATUS_POST_OK",orderId,"status="+status+" ticket="+brokerTicket);
+      LogEvent("INFO","STATUS_POST_OK",orderId,"endpoint="+url+" status="+status+" ticket="+brokerTicket+" responseBody="+resp);
 }
 
 //============================ Risk / validation ===============================
+
+//--------------------------- Symbol resolution --------------------------------
+// Cache of resolved symbols so repeated signals for the same code don't
+// re-scan the full MarketWatch / re-log the resolution attempts every time.
+string g_symbolResolveFrom[];
+string g_symbolResolveTo[];
+
+string NormalizeSymbolForMatch(string s)
+{
+   string out = s;
+   StringToUpper(out);
+   StringReplace(out, " ", "");
+   StringReplace(out, "_", "");
+   StringReplace(out, "-", "");
+   StringReplace(out, ".", "");
+   StringReplace(out, "#", "");
+   return out;
+}
+
+// Looks up "code=brokerSymbol" pairs from InpSymbolAliasMap (";"-separated).
+// Returns "" if no alias is configured for the requested code.
+string LookupSymbolAlias(string requested)
+{
+   if(InpSymbolAliasMap=="") return "";
+   string pairs[];
+   int n = StringSplit(InpSymbolAliasMap, StringGetCharacter(";",0), pairs);
+   for(int i=0;i<n;i++)
+   {
+      string pair = pairs[i];
+      StringTrimLeft(pair); StringTrimRight(pair);
+      if(pair=="") continue;
+      int eq = StringFind(pair,"=");
+      if(eq<=0) continue;
+      string key = StringSubstr(pair,0,eq);
+      string val = StringSubstr(pair,eq+1);
+      StringTrimLeft(key); StringTrimRight(key);
+      StringTrimLeft(val); StringTrimRight(val);
+      if(val!="" && StringCompare(key,requested,false)==0) return val;
+   }
+   return "";
+}
+
+int g_symbolResolveCacheSize = 0;
+
+bool SymbolResolveCacheGet(string requested, string &resolved)
+{
+   for(int i=0;i<g_symbolResolveCacheSize;i++)
+   {
+      if(g_symbolResolveFrom[i]==requested) { resolved=g_symbolResolveTo[i]; return true; }
+   }
+   return false;
+}
+
+void SymbolResolveCachePut(string requested, string resolved)
+{
+   int sz=ArraySize(g_symbolResolveFrom);
+   if(g_symbolResolveCacheSize>=sz)
+   {
+      ArrayResize(g_symbolResolveFrom, sz+16);
+      ArrayResize(g_symbolResolveTo, sz+16);
+   }
+   g_symbolResolveFrom[g_symbolResolveCacheSize]=requested;
+   g_symbolResolveTo[g_symbolResolveCacheSize]=resolved;
+   g_symbolResolveCacheSize++;
+}
+
+/**
+ * Resolves the symbol code carried on an incoming signal (e.g. the
+ * TradingView/indicator shorthand "stpRNG5") to a broker/MarketWatch symbol
+ * name that SymbolSelect() actually accepts, instead of failing outright with
+ * "Symbol not found/selectable". Tries, in order, and logs every attempt:
+ *   1. Exact match (already a valid broker symbol — the common case).
+ *   2. Server-supplied brokerSymbolHint (from MT5_SYMBOL_MAP on the server).
+ *   3. Manually configured InpSymbolAliasMap override.
+ *   4. Configured broker suffix candidates appended to the raw code
+ *      (e.g. "EURUSD" + "m" => "EURUSDm").
+ *   5. Case/punctuation-insensitive scan of the full available symbol list
+ *      (Market Watch + all symbols the terminal knows about).
+ * Successful non-exact resolutions are cached so this only runs once per
+ * unique requested code per EA session.
+ */
+bool ResolveBrokerSymbol(string requested, string brokerSymbolHint, string orderId, string &resolved)
+{
+   if(requested=="")
+   {
+      resolved="";
+      return false;
+   }
+
+   if(SymbolResolveCacheGet(requested, resolved))
+      return resolved!="";
+
+   // 1. Exact match
+   if(SymbolSelect(requested,true))
+   {
+      LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+requested+" method=exact");
+      SymbolResolveCachePut(requested, requested);
+      resolved=requested;
+      return true;
+   }
+   LogEvent("WARN","SYMBOL_RESOLVE",orderId,"requested="+requested+" exact match not selectable, attempting resolution");
+
+   // 2. Server-supplied hint
+   if(brokerSymbolHint!="" && brokerSymbolHint!=requested)
+   {
+      if(SymbolSelect(brokerSymbolHint,true))
+      {
+         LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+brokerSymbolHint+" method=serverHint");
+         SymbolResolveCachePut(requested, brokerSymbolHint);
+         resolved=brokerSymbolHint;
+         return true;
+      }
+      LogEvent("WARN","SYMBOL_RESOLVE",orderId,"requested="+requested+" serverHint="+brokerSymbolHint+" not selectable");
+   }
+
+   // 3. Manual alias map
+   string alias = LookupSymbolAlias(requested);
+   if(alias!="" && SymbolSelect(alias,true))
+   {
+      LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+alias+" method=aliasMap");
+      SymbolResolveCachePut(requested, alias);
+      resolved=alias;
+      return true;
+   }
+   if(alias!="")
+      LogEvent("WARN","SYMBOL_RESOLVE",orderId,"requested="+requested+" alias="+alias+" not selectable");
+
+   // 4. Suffix candidates
+   if(InpSymbolSuffixCandidates!="")
+   {
+      string suffixes[];
+      int sn = StringSplit(InpSymbolSuffixCandidates, StringGetCharacter(",",0), suffixes);
+      for(int i=0;i<sn;i++)
+      {
+         string suf = suffixes[i];
+         StringTrimLeft(suf); StringTrimRight(suf);
+         if(suf=="") continue;
+         string candidate = requested+suf;
+         if(SymbolSelect(candidate,true))
+         {
+            LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+candidate+" method=suffix("+suf+")");
+            SymbolResolveCachePut(requested, candidate);
+            resolved=candidate;
+            return true;
+         }
+      }
+   }
+
+   // 5. Normalized fuzzy scan across every symbol the terminal knows about
+   string normReq = NormalizeSymbolForMatch(requested);
+   int total = SymbolsTotal(false);
+   for(int i=0;i<total;i++)
+   {
+      string name = SymbolName(i,false);
+      if(NormalizeSymbolForMatch(name)==normReq && SymbolSelect(name,true))
+      {
+         LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+name+" method=fuzzyScan");
+         SymbolResolveCachePut(requested, name);
+         resolved=name;
+         return true;
+      }
+   }
+
+   LogEvent("ERROR","SYMBOL_RESOLVE_FAIL",orderId,"requested="+requested+" no broker symbol could be resolved (hint="+brokerSymbolHint+", alias="+alias+")");
+   SymbolResolveCachePut(requested, "");
+   resolved="";
+   return false;
+}
 
 // Returns true if symbol is selected and currently tradable.
 bool ValidateSymbolTradable(string symbol, string &reason)
@@ -918,12 +1117,25 @@ bool ConfirmExecution(const MqlTradeResult &res, string &confirmNote)
    return false;
 }
 
-bool SendTrade(const BridgeOrder &o)
+bool SendTrade(BridgeOrder o)
 {
    g_statSignalsReceived++;
    LogEvent("INFO","SIGNAL_RECEIVED",o.orderId,
             o.symbol+" "+o.side+" "+o.orderType+" lot="+DoubleToString(o.lot,2)+
             " entry="+DoubleToString(o.entry,_Digits)+" sl="+DoubleToString(o.sl,_Digits)+" tp="+DoubleToString(o.tp,_Digits));
+
+   // Resolve the signal's symbol code to a broker/MarketWatch symbol name
+   // before any downstream use (duplicate/chart checks, validation, order
+   // placement). o.symbol is overwritten in place with the resolved name so
+   // every subsequent step — including PostStatus messages — operates on a
+   // symbol the terminal actually recognizes. The original requested code is
+   // preserved in `requestedSymbol` for diagnostics.
+   string requestedSymbol = o.symbol;
+   string resolvedSymbol = "";
+   bool symbolResolved = ResolveBrokerSymbol(requestedSymbol, o.brokerSymbolHint, o.orderId, resolvedSymbol);
+   if(symbolResolved)
+      o.symbol = resolvedSymbol;
+   LogEvent("INFO","SIGNAL_STATE",o.orderId,"lifecycle=RECEIVED requestedSymbol="+requestedSymbol+" mappedSymbol="+(symbolResolved?resolvedSymbol:"(unresolved)"));
 
    if(IsDuplicateSignal(o.orderId))
    {

@@ -87,6 +87,72 @@ function mt5ReadState(): array
     return $state;
 }
 
+/**
+ * Structured diagnostic logger for the MT5 bridge pipeline. Writes to PHP's
+ * error_log AND to a dedicated file under sys_get_temp_dir() (so logs are
+ * available even when error_log is redirected/disabled), tagged with the
+ * endpoint, so HTTP 400s, status-sync failures, and symbol-resolution issues
+ * can be traced end-to-end: raw request body, response body/code, endpoint
+ * URL, signal id, and mapped symbol.
+ *
+ * @param array<string,mixed> $context
+ */
+function mt5LogDiagnostic(string $endpoint, array $context): void
+{
+    $line = sprintf(
+        '[%s] endpoint=%s %s',
+        gmdate('Y-m-d\TH:i:s\Z'),
+        $endpoint,
+        json_encode($context, JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR)
+    );
+    error_log('[MT5_BRIDGE] ' . $line);
+
+    $path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR
+        . 'itguru_mt5_bridge_diagnostics_' . sha1(__DIR__) . '.log';
+    @file_put_contents($path, $line . "\n", FILE_APPEND | LOCK_EX);
+}
+
+/**
+ * Optional admin-configured symbol map (MT5_SYMBOL_MAP env var, JSON object)
+ * translating internal/TradingView instrument codes (e.g. "stpRNG5") to the
+ * broker's actual MarketWatch symbol name (e.g. "Step Index 500"). Surfaced
+ * to the EA as `brokerSymbolHint` via pull.php so ITGuruMt5Bridge.mq5's
+ * ResolveBrokerSymbol() can try it before falling back to its own alias
+ * map/fuzzy MarketWatch scan. Example:
+ *   MT5_SYMBOL_MAP={"stpRNG5":"Step Index 500","EURUSD":"EURUSD.m"}
+ *
+ * @return array<string,string>
+ */
+function mt5SymbolMap(): array
+{
+    static $map = null;
+    if ($map !== null) return $map;
+
+    $raw = env('MT5_SYMBOL_MAP', '');
+    $decoded = $raw !== '' ? json_decode($raw, true) : null;
+    $map = [];
+    if (is_array($decoded)) {
+        foreach ($decoded as $k => $v) {
+            if (is_string($k) && is_string($v) && $v !== '') {
+                $map[$k] = $v;
+            }
+        }
+    } elseif ($raw !== '') {
+        error_log('[MT5_BRIDGE] MT5_SYMBOL_MAP env var is not valid JSON: ' . json_last_error_msg());
+    }
+    return $map;
+}
+
+/** Case-insensitive lookup into mt5SymbolMap(); returns null if unmapped. */
+function mt5ResolveBrokerSymbolHint(string $symbol): ?string
+{
+    foreach (mt5SymbolMap() as $code => $brokerSymbol) {
+        if (strcasecmp($code, $symbol) === 0) return $brokerSymbol;
+    }
+    return null;
+}
+
 function mt5AuthUserId(): int
 {
     return authenticateUserFromToken();
@@ -301,8 +367,17 @@ function mt5NormalizeSignalPayload(array $body): array
     $strategyName = trim((string) ($body['strategyName'] ?? ''));
     $idempotencyKey = trim((string) ($body['idempotencyKey'] ?? ''));
 
+    // Client may pass an explicit brokerSymbolHint; otherwise fall back to the
+    // admin-configured MT5_SYMBOL_MAP so the EA gets an automatic resolution
+    // candidate for shorthand/TradingView instrument codes (e.g. "stpRNG5").
+    $brokerSymbolHint = trim((string) ($body['brokerSymbolHint'] ?? ''));
+    if ($brokerSymbolHint === '') {
+        $brokerSymbolHint = mt5ResolveBrokerSymbolHint($symbol) ?? '';
+    }
+
     return [
         'symbol' => $symbol,
+        'brokerSymbolHint' => $brokerSymbolHint,
         'side' => $side,
         'entry' => $entry,
         'sl' => $sl,
@@ -329,6 +404,7 @@ function mt5PublicOrder(array $order): array
         'orderId' => $order['orderId'] ?? '',
         'status' => $order['status'] ?? 'UNKNOWN',
         'symbol' => $order['symbol'] ?? '',
+        'brokerSymbolHint' => $order['brokerSymbolHint'] ?? null,
         'side' => $order['side'] ?? '',
         'orderType' => $order['orderType'] ?? '',
         'entry' => $order['entry'] ?? null,
@@ -340,6 +416,8 @@ function mt5PublicOrder(array $order): array
         'brokerTicket' => $order['brokerTicket'] ?? null,
         'message' => $order['message'] ?? null,
         'attempts' => $order['attempts'] ?? 0,
+        'terminal' => $order['terminal'] ?? null,
+        'lastStatusTerminal' => $order['lastStatusTerminal'] ?? null,
         'createdAt' => $order['createdAt'] ?? null,
         'updatedAt' => $order['updatedAt'] ?? null,
     ];
