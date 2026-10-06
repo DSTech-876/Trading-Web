@@ -284,7 +284,12 @@ function mt5InferDigits(string $symbol, float $price): int
  *    below). Callers that need to detect/reject a mismatched order type
  *    must compare the canonicalized input (trim + strtoupper of
  *    `$requested`, since valid requests like `buy_limit` are accepted and
- *    returned as `BUY_LIMIT`) against the returned value themselves; this function never surfaces a validation error for it.
+ *    returned as `BUY_LIMIT`) against the returned value themselves, but
+ *    only when that canonicalized input is non-empty: an empty canonicalized
+ *    `$requested` (i.e. no order type was supplied) is the normal, supported
+ *    case and must not be treated as a mismatch, even though the returned
+ *    value will differ from it. This function never surfaces a validation
+ *    error for a mismatch.
  *  - When no (or an invalid) order type is requested, the type is derived
  *    from the entry price relative to `$currentPrice`: entry beyond current
  *    price yields a STOP order, entry before current price yields a LIMIT
