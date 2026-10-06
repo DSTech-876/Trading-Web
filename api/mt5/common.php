@@ -116,20 +116,21 @@ function mt5LogDiagnostic(string $endpoint, array $context): void
     // cannot both observe an oversized file and race to rotate it, which
     // would otherwise let the second rotation discard the first's archive.
     $lockFh = fopen($lockPath, 'c');
-    if ($lockFh !== false) {
-        if (flock($lockFh, LOCK_EX)) {
-            // Cap the file so a long-running bridge cannot fill the temp filesystem.
-            clearstatcache(true, $path);
-            if (is_file($path) && (int) @filesize($path) > 1048576) {
-                @rename($path, $path . '.1');
-            }
-            @file_put_contents($path, $line . "\n", FILE_APPEND);
-            flock($lockFh, LOCK_UN);
+    if ($lockFh !== false && flock($lockFh, LOCK_EX)) {
+        // Cap the file so a long-running bridge cannot fill the temp filesystem.
+        clearstatcache(true, $path);
+        if (is_file($path) && (int) @filesize($path) > 1048576) {
+            @rename($path, $path . '.1');
         }
+        @file_put_contents($path, $line . "\n", FILE_APPEND);
+        flock($lockFh, LOCK_UN);
         fclose($lockFh);
     } else {
         // Fall back to best-effort unsynchronized append if the lock file
-        // cannot be opened.
+        // cannot be opened or advisory locking is unavailable.
+        if ($lockFh !== false) {
+            fclose($lockFh);
+        }
         clearstatcache(true, $path);
         if (is_file($path) && (int) @filesize($path) > 1048576) {
             @rename($path, $path . '.1');
