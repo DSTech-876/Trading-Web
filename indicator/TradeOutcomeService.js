@@ -26,6 +26,20 @@ class TradeOutcomeService {
     }
 
     /**
+     * Get the app's JWT auth token for API requests.
+     * NOTE: `getTelegramCredentials().token` is the Telegram BOT token, not the
+     * user's session JWT — using it here previously caused every trade-outcome
+     * API call to be rejected with 401 Unauthorized. ITGuruAuth.getToken() is
+     * the correct accessor for the JWT used by all other authenticated calls.
+     */
+    _getAuthToken() {
+        if (typeof ITGuruAuth !== 'undefined' && ITGuruAuth && typeof ITGuruAuth.getToken === 'function') {
+            return ITGuruAuth.getToken() || '';
+        }
+        return sessionStorage.getItem('itguru_auth_token') || '';
+    }
+
+    /**
      * Build a human-readable description of a failed fetch response.
      * `response.statusText` is frequently blank (e.g. HTTP/2 responses), so
      * fall back to the JSON/text error body and the numeric status code.
@@ -318,7 +332,7 @@ class TradeOutcomeService {
             try {
                 const response = await fetch('/api/trades/check_notification?trade_id=' + 
                     encodeURIComponent(tradeId) + '&notification_type=' + encodeURIComponent(notificationType), {
-                    headers: { 'Authorization': 'Bearer ' + (getTelegramCredentials?.().token || '') }
+                    headers: { 'Authorization': 'Bearer ' + this._getAuthToken() }
                 });
                 if (response.ok) {
                     const data = await response.json();
@@ -345,7 +359,7 @@ class TradeOutcomeService {
 
         // Log to database
         try {
-            const token = getTelegramCredentials?.()?.token || sessionStorage.getItem('authToken') || '';
+            const token = this._getAuthToken();
             const response = await fetch('/api/trades/check_notification', {
                 method: 'POST',
                 headers: {
@@ -372,7 +386,7 @@ class TradeOutcomeService {
      */
     async _logOutcomeToDatabase(trade) {
         try {
-            const token = getTelegramCredentials?.()?.token || sessionStorage.getItem('authToken') || '';
+            const token = this._getAuthToken();
             const metadata = {
                 candleIdx: trade.candleIdx,
                 epoch: trade.epoch,
@@ -456,7 +470,7 @@ class TradeOutcomeService {
      */
     async _updatePartialTPInDatabase(trade, index, level) {
         try {
-            const token = getTelegramCredentials?.()?.token || sessionStorage.getItem('authToken') || '';
+            const token = this._getAuthToken();
             const payload = {
                 trade_id: trade.tradeId || trade.signalId,
                 partial_tp_hit: 1,
