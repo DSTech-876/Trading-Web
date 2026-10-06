@@ -2619,3 +2619,48 @@ echo json_encode([
   assert.equal(parsed.has_raw_factor_details, false);
   assert.ok(parsed.confluence_factors_present.includes('MTF Confirmation'));
 });
+
+test('fetchRiskConfig resets the settled gate before a post-login request so trades wait for it', async () => {
+  const fnSource = extractFunction('fetchRiskConfig');
+  const harness = `${fnSource}\nmodule.exports = { fetchRiskConfig };`;
+
+  let resolveFetch;
+  const deferred = new Promise((resolve) => { resolveFetch = resolve; });
+  let loggedIn = false;
+
+  const context = {
+    module: { exports: {} },
+    ITGuruAuth: { isLoggedIn: () => loggedIn },
+    mt5BridgeHeaders: () => ({}),
+    safeJson: async (resp) => resp.__body,
+    addLog: () => {},
+    fmt: (value, dp) => Number(value).toFixed(dp),
+    AUTO_TRADE_DAILY_LOSS_CAP_PCT: 4,
+    riskConfigInitialRequestSettled: false,
+    fetch: () => deferred,
+    Number,
+    console
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { fetchRiskConfig } = context.module.exports;
+
+  /* Simulate the initial boot-time fetch while logged out: it returns early
+     but still settles the gate since there is nothing to wait for. */
+  await fetchRiskConfig();
+  assert.equal(context.riskConfigInitialRequestSettled, true);
+
+  /* Now simulate an in-page login triggering a refresh. The gate must be
+     reset to false as soon as the authenticated request starts, so any
+     signal firing while it's in flight is blocked rather than racing the
+     stale default cap. */
+  loggedIn = true;
+  const pending = fetchRiskConfig();
+  assert.equal(context.riskConfigInitialRequestSettled, false);
+
+  resolveFetch({ ok: true, __body: { ok: true, dailyLossLimitPct: 2 } });
+  await pending;
+
+  assert.equal(context.riskConfigInitialRequestSettled, true);
+  assert.equal(context.AUTO_TRADE_DAILY_LOSS_CAP_PCT, 2);
+});

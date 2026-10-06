@@ -144,8 +144,9 @@
         }
 
         function renderSettings(data) {
-            document.getElementById('currentValue').textContent = data.dailyLossLimitPct + '%';
-            document.getElementById('dailyLossLimitPct').value = data.dailyLossLimitPct;
+            const pct = Number(data?.dailyLossLimitPct);
+            document.getElementById('currentValue').textContent = Number.isFinite(pct) ? pct + '%' : '—';
+            document.getElementById('dailyLossLimitPct').value = Number.isFinite(pct) ? pct : '';
             const meta = [];
             if (data.updatedAt) meta.push('Last updated: ' + new Date(data.updatedAt).toLocaleString());
             document.getElementById('metaInfo').textContent = meta.join(' · ');
