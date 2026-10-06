@@ -14,10 +14,16 @@ if (!rateLimit(60, 60)) {
 
 $userId = mt5AuthUserId();
 $body = getJsonBody();
+$rawBody = file_get_contents('php://input');
 
 try {
     $normalized = mt5NormalizeSignalPayload($body);
 } catch (\Throwable $e) {
+    mt5LogDiagnostic('signal.php', [
+        'event' => 'VALIDATION_ERROR',
+        'rawBody' => $rawBody,
+        'error' => $e->getMessage(),
+    ]);
     jsonResponse(['error' => $e->getMessage()], 422);
 }
 
@@ -51,6 +57,7 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
         'userId' => $userId,
         'status' => 'QUEUED',
         'symbol' => $normalized['symbol'],
+        'brokerSymbolHint' => $normalized['brokerSymbolHint'],
         'side' => $normalized['side'],
         'orderType' => $normalized['orderType'],
         'entry' => $normalized['entry'],
@@ -80,9 +87,20 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
     return ['duplicate' => false, 'order' => $order];
 });
 
+$publicOrder = mt5PublicOrder($result['order']);
+
+mt5LogDiagnostic('signal.php', [
+    'event' => 'SIGNAL_QUEUED',
+    'signalId' => $publicOrder['orderId'],
+    'duplicate' => (bool) $result['duplicate'],
+    'symbol' => $normalized['symbol'],
+    'mappedSymbol' => $normalized['brokerSymbolHint'] !== '' ? $normalized['brokerSymbolHint'] : null,
+    'status' => $publicOrder['status'],
+    'rawBody' => $rawBody,
+]);
+
 jsonResponse([
     'ok' => true,
     'duplicate' => (bool) $result['duplicate'],
-    'order' => mt5PublicOrder($result['order']),
+    'order' => $publicOrder,
 ]);
-

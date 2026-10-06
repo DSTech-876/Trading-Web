@@ -64,6 +64,7 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
 $public = array_map(static fn(array $o): array => [
     'orderId' => $o['orderId'] ?? '',
     'symbol' => $o['symbol'] ?? '',
+    'brokerSymbolHint' => $o['brokerSymbolHint'] ?? null,
     'side' => $o['side'] ?? '',
     'orderType' => $o['orderType'] ?? '',
     'entry' => $o['entry'] ?? null,
@@ -78,6 +79,18 @@ $public = array_map(static fn(array $o): array => [
     'attempts' => $o['attempts'] ?? 0,
     'createdAt' => $o['createdAt'] ?? null,
 ], $orders);
+
+if ($public !== []) {
+    mt5LogDiagnostic('pull.php', [
+        'event' => 'DISPATCH',
+        'terminal' => $terminal,
+        'dispatchedOrderIds' => array_column($public, 'orderId'),
+        'mappedSymbols' => array_combine(
+            array_column($public, 'orderId'),
+            array_map(static fn(array $o) => $o['brokerSymbolHint'] ?? $o['symbol'], $public)
+        ),
+    ]);
+}
 
 jsonResponse([
     'ok' => true,

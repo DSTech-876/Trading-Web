@@ -12,6 +12,7 @@ if (!rateLimit(180, 60)) {
     jsonResponse(['error' => 'Rate limit exceeded'], 429);
 }
 
+$rawBody = file_get_contents('php://input');
 $body = getJsonBody();
 mt5RequireBridgeKey($body);
 
@@ -28,11 +29,22 @@ if (!is_array($updates)) {
 }
 
 $validUpdates = [];
+$rejectedUpdates = [];
 foreach ($updates as $u) {
-    if (!is_array($u)) continue;
+    if (!is_array($u)) {
+        $rejectedUpdates[] = ['reason' => 'not an object', 'raw' => $u];
+        continue;
+    }
     $orderId = trim((string) ($u['orderId'] ?? ''));
     $status = strtoupper(trim((string) ($u['status'] ?? '')));
-    if ($orderId === '' || $status === '' || !in_array($status, MT5_ALLOWED_STATUS, true)) continue;
+    if ($orderId === '' || $status === '' || !in_array($status, MT5_ALLOWED_STATUS, true)) {
+        $rejectedUpdates[] = [
+            'reason' => $orderId === '' ? 'missing orderId' : ($status === '' ? 'missing status' : 'unrecognized status: ' . $status),
+            'orderId' => $orderId,
+            'status' => $status,
+        ];
+        continue;
+    }
     $validUpdates[] = [
         'orderId' => $orderId,
         'status' => $status,
@@ -43,13 +55,19 @@ foreach ($updates as $u) {
 }
 
 if ($validUpdates === []) {
-    jsonResponse(['error' => 'No valid updates provided'], 422);
+    mt5LogDiagnostic('status.php', [
+        'event' => 'STATUS_UPDATE_REJECTED',
+        'rawBody' => $rawBody,
+        'validationErrors' => $rejectedUpdates,
+    ]);
+    jsonResponse(['error' => 'No valid updates provided', 'validationErrors' => $rejectedUpdates], 422);
 }
 
 $now = time();
 $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): array {
     $applied = 0;
     $missing = [];
+    $transitions = [];
 
     foreach ($validUpdates as $u) {
         $orderId = $u['orderId'];
@@ -58,6 +76,7 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
             continue;
         }
         $order = &$state['orders'][$orderId];
+        $fromStatus = (string) ($order['status'] ?? 'UNKNOWN');
         $order['status'] = $u['status'];
         if ($u['brokerTicket'] !== null && $u['brokerTicket'] !== '') {
             $order['brokerTicket'] = $u['brokerTicket'];
@@ -75,12 +94,27 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
             'ts' => $now,
             'message' => $u['message'] ?? null,
         ];
+        $transitions[] = [
+            'orderId' => $orderId,
+            'symbol' => $order['symbol'] ?? null,
+            'brokerSymbolHint' => $order['brokerSymbolHint'] ?? null,
+            'from' => $fromStatus,
+            'to' => $u['status'],
+        ];
         $applied++;
         unset($order);
     }
 
-    return ['applied' => $applied, 'missing' => $missing];
+    return ['applied' => $applied, 'missing' => $missing, 'transitions' => $transitions];
 });
+
+mt5LogDiagnostic('status.php', [
+    'event' => 'STATUS_UPDATE_APPLIED',
+    'rawBody' => $rawBody,
+    'applied' => $result['applied'],
+    'missingOrderIds' => $result['missing'],
+    'lifecycleTransitions' => $result['transitions'],
+]);
 
 jsonResponse([
     'ok' => true,

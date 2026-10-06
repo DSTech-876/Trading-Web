@@ -37,6 +37,7 @@ This document provides minimal request/response templates matching these endpoin
     "orderId": "mt5_20260516235154_ab12cd34",
     "status": "QUEUED",
     "symbol": "EURUSD",
+    "brokerSymbolHint": null,
     "side": "BUY",
     "orderType": "BUY_MARKET",
     "entry": 1.085,
@@ -90,6 +91,7 @@ GET /api/mt5/pull.php?bridge_key=<MT5_BRIDGE_KEY>&limit=20&terminal=MT5-TERM-01
     {
       "orderId": "mt5_20260516235154_ab12cd34",
       "symbol": "EURUSD",
+      "brokerSymbolHint": null,
       "side": "BUY",
       "orderType": "BUY_MARKET",
       "entry": 1.085,
@@ -240,3 +242,24 @@ The reference EA in the repo root implements, in addition to the server-side con
 
 `InpBridgeKey` has **no default value** — it must be set explicitly to match `MT5_BRIDGE_KEY` on the
 server. Never commit a real bridge key into source control.
+
+---
+
+## 6) Diagnostics & symbol resolution
+
+- **Request/response diagnostics** — `signal.php`, `pull.php`, and `status.php` log a structured line
+  (via `mt5LogDiagnostic()` in `api/mt5/common.php`) for every call: endpoint, raw request body, signal
+  id(s), mapped symbol, applied/validation results, and (for `status.php`) the full
+  from-status → to-status lifecycle transition. Logs go to PHP's `error_log` and to
+  `itguru_mt5_bridge_diagnostics_*.log` under the system temp directory. `getJsonBody()` (in
+  `api/config.php`) additionally logs the raw body, `json_last_error()` reason, and a hex dump of the
+  trailing bytes whenever a request fails to parse as JSON — the quickest way to catch stray bytes
+  (e.g. a trailing NUL) in a non-PHP client's POST body.
+- **Automatic symbol resolution** — `MT5_SYMBOL_MAP` (server `.env`, JSON object mapping an internal/
+  TradingView instrument code to the broker's actual MarketWatch name, e.g.
+  `{"stpRNG5":"Step Index 500"}`) is surfaced to the EA as `brokerSymbolHint` on every order
+  (`signal.php` response, `pull.php` queue, and `order_status.php`). `ITGuruMt5Bridge.mq5`'s
+  `ResolveBrokerSymbol()` tries, in order: exact match → `brokerSymbolHint` → its own
+  `InpSymbolAliasMap` input → `InpSymbolSuffixCandidates` → a case/punctuation-insensitive scan of
+  every symbol the terminal knows about — logging each attempt (`SYMBOL_RESOLVE` /
+  `SYMBOL_RESOLVE_FAIL` events) and caching the result per orderId's symbol code for the EA session.

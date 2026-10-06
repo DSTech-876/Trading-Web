@@ -637,13 +637,32 @@ function requirePost(): void
     }
 }
 
-/** Read and decode the JSON request body. */
+/**
+ * Read and decode the JSON request body.
+ *
+ * On failure, logs the raw body (trimmed) plus the exact json_last_error()
+ * reason and a hex dump of the trailing bytes before rejecting the request.
+ * This is essential for diagnosing "Invalid JSON body" errors from non-PHP
+ * clients (e.g. the MT5 bridge EA): a stray trailing byte — such as the NUL
+ * terminator MQL5's StringToCharArray() can include — is invisible in a
+ * plain-text log but decodes JSON to NULL, and the hex dump makes it obvious.
+ */
 function getJsonBody(): array
 {
     $raw  = file_get_contents('php://input');
-    $data = json_decode($raw ?: '', true);
+    $raw  = $raw === false ? '' : $raw;
+    $data = json_decode($raw, true);
     if (!is_array($data)) {
-        jsonResponse(['error' => 'Invalid JSON body'], 400);
+        $script = basename((string) ($_SERVER['SCRIPT_NAME'] ?? 'unknown'));
+        error_log(sprintf(
+            '[JSON_BODY_INVALID] endpoint=%s error=%s bytes=%d preview=%s trailingHex=%s',
+            $script,
+            json_last_error_msg(),
+            strlen($raw),
+            substr($raw, 0, 1000),
+            bin2hex(substr($raw, -8))
+        ));
+        jsonResponse(['error' => 'Invalid JSON body', 'detail' => json_last_error_msg()], 400);
     }
     return $data;
 }
