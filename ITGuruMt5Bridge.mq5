@@ -1127,7 +1127,7 @@ bool ConfirmExecution(const MqlTradeResult &res, string &confirmNote)
    return false;
 }
 
-bool SendTrade(BridgeOrder o)
+bool SendTrade(BridgeOrder &o)
 {
    g_statSignalsReceived++;
    LogEvent("INFO","SIGNAL_RECEIVED",o.orderId,
