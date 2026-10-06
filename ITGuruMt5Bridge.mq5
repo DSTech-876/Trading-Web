@@ -88,9 +88,18 @@ double   g_dayStartEquity       = 0.0;
 // compiled-in InpDailyLossLimitPct input until the first successful poll.
 double   g_serverDailyLossLimitPct = -1.0;
 
-// Processed-signal de-duplication (persisted across restarts)
+// Processed-signal de-duplication (persisted across restarts). The last known
+// final status/ticket is kept alongside each orderId so that if the server
+// never received (or never persisted) our status callback — e.g. a transient
+// HTTP failure on PostStatus() — a later redispatch of the SAME orderId can be
+// resynced instead of silently dropped forever (which previously left the
+// order stuck as non-final server-side, causing it to be redispatched on every
+// poll cycle and counted as a duplicate every single time, with no trade ever
+// reaching the broker).
 string   g_processedIds[];
 long     g_processedAt[];
+string   g_processedStatus[];
+string   g_processedTicket[];
 
 // Monitoring counters
 int      g_statSignalsReceived  = 0;
@@ -158,6 +167,8 @@ void LoadProcessedIds()
 {
    ArrayResize(g_processedIds,0);
    ArrayResize(g_processedAt,0);
+   ArrayResize(g_processedStatus,0);
+   ArrayResize(g_processedTicket,0);
 
    int fh = FileOpen(ProcessedIdsFileName(), FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(fh==INVALID_HANDLE) return;
@@ -170,13 +181,33 @@ void LoadProcessedIds()
       int comma = StringFind(line,",");
       if(comma<0) continue;
       string id = StringSubstr(line,0,comma);
-      long ts = (long)StringToInteger(StringSubstr(line,comma+1));
+      string rest = StringSubstr(line,comma+1);
+      // rest may be "ts" (old format) or "ts,status,ticket" (current format)
+      string status="", ticket="";
+      int comma2 = StringFind(rest,",");
+      long ts;
+      if(comma2<0)
+      {
+         ts = (long)StringToInteger(rest);
+      }
+      else
+      {
+         ts = (long)StringToInteger(StringSubstr(rest,0,comma2));
+         string rest2 = StringSubstr(rest,comma2+1);
+         int comma3 = StringFind(rest2,",");
+         if(comma3<0) status = rest2;
+         else { status = StringSubstr(rest2,0,comma3); ticket = StringSubstr(rest2,comma3+1); }
+      }
       if(ts < cutoff) continue; // drop expired entries
       int sz=ArraySize(g_processedIds);
       ArrayResize(g_processedIds, sz+1);
       ArrayResize(g_processedAt, sz+1);
+      ArrayResize(g_processedStatus, sz+1);
+      ArrayResize(g_processedTicket, sz+1);
       g_processedIds[sz]=id;
       g_processedAt[sz]=ts;
+      g_processedStatus[sz]=status;
+      g_processedTicket[sz]=ticket;
    }
    FileClose(fh);
 }
@@ -188,26 +219,57 @@ void SaveProcessedIds()
    int n=ArraySize(g_processedIds);
    int start = MathMax(0, n-MAX_PROCESSED_ENTRIES); // cap file growth
    for(int i=start;i<n;i++)
-      FileWrite(fh, g_processedIds[i]+","+(string)g_processedAt[i]);
+      FileWrite(fh, g_processedIds[i]+","+(string)g_processedAt[i]+","+g_processedStatus[i]+","+g_processedTicket[i]);
    FileClose(fh);
+}
+
+int FindProcessedIndex(string orderId)
+{
+   int n=ArraySize(g_processedIds);
+   for(int i=0;i<n;i++)
+      if(g_processedIds[i]==orderId) return i;
+   return -1;
 }
 
 bool IsDuplicateSignal(string orderId)
 {
-   int n=ArraySize(g_processedIds);
-   for(int i=0;i<n;i++)
-      if(g_processedIds[i]==orderId) return true;
-   return false;
+   return FindProcessedIndex(orderId) >= 0;
 }
 
-void MarkProcessed(string orderId)
+// Returns the last known final status/ticket we reported for this orderId, so
+// a duplicate redispatch can resync the server instead of being dropped with
+// no trace, which previously left orders stuck non-final forever (endlessly
+// redispatched and counted as a duplicate every single poll).
+bool GetProcessedStatus(string orderId, string &status, string &ticket)
 {
-   if(IsDuplicateSignal(orderId)) return;
+   int idx = FindProcessedIndex(orderId);
+   if(idx<0) return false;
+   status = g_processedStatus[idx];
+   ticket = g_processedTicket[idx];
+   return status!="";
+}
+
+void MarkProcessed(string orderId, string status="", string ticket="")
+{
+   int idx = FindProcessedIndex(orderId);
+   if(idx>=0)
+   {
+      // Already recorded (e.g. first MarkProcessed call without a status, or a
+      // resync): update the status/ticket in place if we now have one.
+      if(status!="") g_processedStatus[idx]=status;
+      if(ticket!="") g_processedTicket[idx]=ticket;
+      SaveProcessedIds();
+      return;
+   }
    int sz=ArraySize(g_processedIds);
    ArrayResize(g_processedIds, sz+1);
    ArrayResize(g_processedAt, sz+1);
+   ArrayResize(g_processedStatus, sz+1);
+   ArrayResize(g_processedTicket, sz+1);
    g_processedIds[sz]=orderId;
    g_processedAt[sz]=(long)TimeGMT();
+   g_processedStatus[sz]=status;
+   g_processedTicket[sz]=ticket;
    SaveProcessedIds();
 }
 
@@ -747,8 +809,25 @@ bool SendTrade(const BridgeOrder &o)
    if(IsDuplicateSignal(o.orderId))
    {
       g_statSignalsDuplicate++;
-      LogEvent("WARN","SIGNAL_DUPLICATE",o.orderId,"already processed, ignoring");
-      return false; // already final; do not re-post status
+      // The server only stops redispatching an order once it has recorded a
+      // final status for it. If our earlier PostStatus() call never reached
+      // (or was never persisted by) the server — a transient HTTP failure —
+      // the server keeps redispatching this SAME orderId forever, and without
+      // this resync it would be silently dropped every time: "duplicates
+      // ignored" growing in lockstep with "signals received" while no trade
+      // (or rejection) is ever finalized on the server. Re-send our last
+      // known status so the server can finalize it and stop redispatching.
+      string dupStatus="", dupTicket="";
+      if(GetProcessedStatus(o.orderId, dupStatus, dupTicket))
+      {
+         LogEvent("WARN","SIGNAL_DUPLICATE",o.orderId,"already processed as "+dupStatus+"; resyncing status to server");
+         PostStatus(o.orderId, dupStatus, dupTicket, "Resynced (duplicate signal redelivered)", 0.0);
+      }
+      else
+      {
+         LogEvent("WARN","SIGNAL_DUPLICATE",o.orderId,"already processed, ignoring");
+      }
+      return false;
    }
 
    if(g_tradingHalted)
@@ -756,7 +835,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","SIGNAL_REJECTED",o.orderId,"trading halted: "+g_haltReason);
       PostStatus(o.orderId,"REJECTED","", "Trading halted: "+g_haltReason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -770,7 +849,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -779,7 +858,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,"invalid side: "+o.side);
       PostStatus(o.orderId,"REJECTED","", "Invalid signal direction", 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -788,7 +867,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,reason);
       PostStatus(o.orderId,"EXPIRED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "EXPIRED", "");
       return false;
    }
 
@@ -797,7 +876,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -807,7 +886,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -817,7 +896,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,"lot size invalid after capping");
       PostStatus(o.orderId,"REJECTED","", "Lot size invalid", 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -834,14 +913,15 @@ bool SendTrade(const BridgeOrder &o)
          g_statSignalsPending++;
          LogEvent("WARN","DUPLICATE_GUARD",o.orderId,"matching pending order already exists on account; skipping resend");
          PostStatus(o.orderId,"RECEIVED","", "Already placed on account as a pending order (idempotent skip)", 0.0);
+         MarkProcessed(o.orderId, "RECEIVED", "");
       }
       else
       {
          g_statSignalsFilled++;
          LogEvent("WARN","DUPLICATE_GUARD",o.orderId,"matching ticket already exists on account; skipping resend");
          PostStatus(o.orderId,"FILLED","", "Already placed on account (idempotent skip)", 0.0);
+         MarkProcessed(o.orderId, "FILLED", "");
       }
-      MarkProcessed(o.orderId);
       return true;
    }
 
@@ -851,7 +931,7 @@ bool SendTrade(const BridgeOrder &o)
       reason = "Max trades per symbol reached ("+(string)countSameSymbol+"/"+(string)InpMaxTradesPerSymbol+")";
       LogEvent("WARN","RISK_REJECT",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -861,7 +941,7 @@ bool SendTrade(const BridgeOrder &o)
       reason = "Max total exposure exceeded ("+DoubleToString(totalExposure,2)+"+"+DoubleToString(lot,2)+">"+DoubleToString(InpMaxTotalExposureLots,2)+")";
       LogEvent("WARN","RISK_REJECT",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -873,7 +953,7 @@ bool SendTrade(const BridgeOrder &o)
          reason = "Hedging disabled: opposite position already open on "+o.symbol;
          LogEvent("WARN","RISK_REJECT",o.orderId,reason);
          PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-         MarkProcessed(o.orderId);
+         MarkProcessed(o.orderId, "REJECTED", "");
          return false;
       }
    }
@@ -884,7 +964,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,"SymbolInfoTick failed");
       PostStatus(o.orderId,"REJECTED","", "SymbolInfoTick failed: "+o.symbol, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -896,7 +976,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","VALIDATION_FAIL",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -905,7 +985,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsRejected++;
       LogEvent("WARN","RISK_REJECT",o.orderId,reason);
       PostStatus(o.orderId,"REJECTED","", reason, 0.0);
-      MarkProcessed(o.orderId);
+      MarkProcessed(o.orderId, "REJECTED", "");
       return false;
    }
 
@@ -950,7 +1030,7 @@ bool SendTrade(const BridgeOrder &o)
          g_statSignalsRejected++;
          LogEvent("WARN","VALIDATION_FAIL",o.orderId,"Unknown orderType: "+ot);
          PostStatus(o.orderId,"REJECTED","", "Unknown orderType: "+ot, 0.0);
-         MarkProcessed(o.orderId);
+         MarkProcessed(o.orderId, "REJECTED", "");
          return false;
       }
       req.price        = o.entry;
@@ -995,7 +1075,7 @@ bool SendTrade(const BridgeOrder &o)
       string msg = "Broker reject after "+(string)(attempt+1)+" attempt(s) retcode="+(string)res.retcode+" comment="+res.comment;
       LogEvent("ERROR","ORDER_REJECTED",o.orderId,msg);
       PostStatus(o.orderId,"REJECTED",ticket,msg,0.0);
-      MarkProcessed(o.orderId); // final state; do not retry further from EA side
+      MarkProcessed(o.orderId, "REJECTED", ticket);
       return false;
    }
 
@@ -1008,6 +1088,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsPending++;
       LogEvent("INFO","ORDER_PENDING_PLACED",o.orderId,"ticket="+ticket);
       PostStatus(o.orderId,"RECEIVED",ticket,"Pending order placed. "+confirmNote,0.0);
+      MarkProcessed(o.orderId, "RECEIVED", ticket);
    }
    else
    {
@@ -1015,9 +1096,9 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsFilled++;
       LogEvent("INFO","ORDER_FILLED",o.orderId,"ticket="+ticket+" price="+DoubleToString(res.price,filledDigits));
       PostStatus(o.orderId,"FILLED",ticket,"Executed. "+confirmNote,res.price,filledDigits);
+      MarkProcessed(o.orderId, "FILLED", ticket);
    }
 
-   MarkProcessed(o.orderId);
    return true;
 }
 
@@ -1182,7 +1263,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       PostStatus(orderId,"FILLED",ticket,"Pending order filled (OnTradeTransaction)",price,digits);
       g_statSignalsPending = MathMax(0, g_statSignalsPending-1);
       g_statSignalsFilled++;
-      MarkProcessed(orderId);
+      MarkProcessed(orderId, "FILLED", ticket);
       return;
    }
 
@@ -1212,7 +1293,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       LogEvent("INFO","ORDER_TRANSACTION_"+status,orderId,msg);
       PostStatus(orderId,status,(string)trans.order,msg,0.0);
       g_statSignalsPending = MathMax(0, g_statSignalsPending-1);
-      MarkProcessed(orderId);
+      MarkProcessed(orderId, status, (string)trans.order);
    }
 }
 
