@@ -348,7 +348,14 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
    // No matching fill: check historical orders for a pending order that was
    // cancelled, expired, or rejected before ever filling, so these distinct
    // final statuses (already reported by OnTradeTransaction going forward)
-   // aren't misreported as REJECTED-with-no-trace below.
+   // aren't misreported as REJECTED-with-no-trace below. HistoryOrderSelect()
+   // above (in the deal loop) replaces the order list built by the earlier
+   // HistorySelect() with just the selected order, so the history must be
+   // re-selected before scanning orders or this loop would only see the last
+   // order examined by the deal loop.
+   if(!HistorySelect((datetime)((long)TimeCurrent()-PROCESSED_TTL_SECS), TimeCurrent()))
+      return false; // selection failed; retry reconciliation on the next redispatch
+
    int totalOrders = HistoryOrdersTotal();
    for(int i=0;i<totalOrders;i++)
    {
