@@ -16419,6 +16419,12 @@ function mt5BridgeHeaders(extra = {}) {
 async function fetchRiskConfig() {
   try {
     if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
+    /* Reset the gate before starting this authenticated request — a prior
+       logged-out call (or an earlier settled fetch) may have already set
+       riskConfigInitialRequestSettled, which would otherwise let trades
+       through against the stale/default cap while this refresh (e.g. after
+       an in-page login) is still in flight. */
+    riskConfigInitialRequestSettled = false;
     const resp = await fetch("/api/mt5/risk_config.php", { headers: mt5BridgeHeaders() });
     const data = await safeJson(resp);
     const pct = Number(data?.dailyLossLimitPct);
