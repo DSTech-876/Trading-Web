@@ -100,6 +100,8 @@ string   g_processedIds[];
 long     g_processedAt[];
 string   g_processedStatus[];
 string   g_processedTicket[];
+double   g_processedPrice[];
+int      g_processedDigits[];
 
 // Monitoring counters
 int      g_statSignalsReceived  = 0;
@@ -169,6 +171,8 @@ void LoadProcessedIds()
    ArrayResize(g_processedAt,0);
    ArrayResize(g_processedStatus,0);
    ArrayResize(g_processedTicket,0);
+   ArrayResize(g_processedPrice,0);
+   ArrayResize(g_processedDigits,0);
 
    int fh = FileOpen(ProcessedIdsFileName(), FILE_READ|FILE_TXT|FILE_ANSI|FILE_SHARE_READ);
    if(fh==INVALID_HANDLE) return;
@@ -178,36 +182,33 @@ void LoadProcessedIds()
    {
       string line = FileReadString(fh);
       if(StringLen(line)==0) continue;
-      int comma = StringFind(line,",");
-      if(comma<0) continue;
-      string id = StringSubstr(line,0,comma);
-      string rest = StringSubstr(line,comma+1);
-      // rest may be "ts" (old format) or "ts,status,ticket" (current format)
-      string status="", ticket="";
-      int comma2 = StringFind(rest,",");
-      long ts;
-      if(comma2<0)
-      {
-         ts = (long)StringToInteger(rest);
-      }
-      else
-      {
-         ts = (long)StringToInteger(StringSubstr(rest,0,comma2));
-         string rest2 = StringSubstr(rest,comma2+1);
-         int comma3 = StringFind(rest2,",");
-         if(comma3<0) status = rest2;
-         else { status = StringSubstr(rest2,0,comma3); ticket = StringSubstr(rest2,comma3+1); }
-      }
+      // Formats seen on disk, oldest to newest:
+      //   id,ts                              (legacy, no status)
+      //   id,ts,status,ticket                 (status/ticket resync)
+      //   id,ts,status,ticket,price,digits    (current, replayable fill price)
+      string parts[];
+      int n = StringSplit(line, ',', parts);
+      if(n<2) continue;
+      string id = parts[0];
+      long ts = (long)StringToInteger(parts[1]);
+      string status  = (n>2) ? parts[2] : "";
+      string ticket   = (n>3) ? parts[3] : "";
+      double price    = (n>4) ? StringToDouble(parts[4]) : 0.0;
+      int    digits   = (n>5) ? (int)StringToInteger(parts[5]) : -1;
       if(ts < cutoff) continue; // drop expired entries
       int sz=ArraySize(g_processedIds);
       ArrayResize(g_processedIds, sz+1);
       ArrayResize(g_processedAt, sz+1);
       ArrayResize(g_processedStatus, sz+1);
       ArrayResize(g_processedTicket, sz+1);
+      ArrayResize(g_processedPrice, sz+1);
+      ArrayResize(g_processedDigits, sz+1);
       g_processedIds[sz]=id;
       g_processedAt[sz]=ts;
       g_processedStatus[sz]=status;
       g_processedTicket[sz]=ticket;
+      g_processedPrice[sz]=price;
+      g_processedDigits[sz]=digits;
    }
    FileClose(fh);
 }
@@ -219,7 +220,8 @@ void SaveProcessedIds()
    int n=ArraySize(g_processedIds);
    int start = MathMax(0, n-MAX_PROCESSED_ENTRIES); // cap file growth
    for(int i=start;i<n;i++)
-      FileWrite(fh, g_processedIds[i]+","+(string)g_processedAt[i]+","+g_processedStatus[i]+","+g_processedTicket[i]);
+      FileWrite(fh, g_processedIds[i]+","+(string)g_processedAt[i]+","+g_processedStatus[i]+","+g_processedTicket[i]+
+                    ","+DoubleToString(g_processedPrice[i],8)+","+(string)g_processedDigits[i]);
    FileClose(fh);
 }
 
@@ -236,28 +238,32 @@ bool IsDuplicateSignal(string orderId)
    return FindProcessedIndex(orderId) >= 0;
 }
 
-// Returns the last known final status/ticket we reported for this orderId, so
-// a duplicate redispatch can resync the server instead of being dropped with
-// no trace, which previously left orders stuck non-final forever (endlessly
-// redispatched and counted as a duplicate every single poll).
-bool GetProcessedStatus(string orderId, string &status, string &ticket)
+// Returns the last known final status/ticket/fill price we reported for this
+// orderId, so a duplicate redispatch can resync the server instead of being
+// dropped with no trace, which previously left orders stuck non-final forever
+// (endlessly redispatched and counted as a duplicate every single poll).
+bool GetProcessedStatus(string orderId, string &status, string &ticket, double &price, int &digits)
 {
    int idx = FindProcessedIndex(orderId);
    if(idx<0) return false;
    status = g_processedStatus[idx];
    ticket = g_processedTicket[idx];
+   price  = g_processedPrice[idx];
+   digits = g_processedDigits[idx];
    return status!="";
 }
 
-void MarkProcessed(string orderId, string status="", string ticket="")
+void MarkProcessed(string orderId, string status="", string ticket="", double price=0.0, int digits=-1)
 {
    int idx = FindProcessedIndex(orderId);
    if(idx>=0)
    {
       // Already recorded (e.g. first MarkProcessed call without a status, or a
-      // resync): update the status/ticket in place if we now have one.
+      // resync): update the status/ticket/price in place if we now have one.
       if(status!="") g_processedStatus[idx]=status;
       if(ticket!="") g_processedTicket[idx]=ticket;
+      if(price!=0.0) g_processedPrice[idx]=price;
+      if(digits>=0) g_processedDigits[idx]=digits;
       SaveProcessedIds();
       return;
    }
@@ -266,11 +272,80 @@ void MarkProcessed(string orderId, string status="", string ticket="")
    ArrayResize(g_processedAt, sz+1);
    ArrayResize(g_processedStatus, sz+1);
    ArrayResize(g_processedTicket, sz+1);
+   ArrayResize(g_processedPrice, sz+1);
+   ArrayResize(g_processedDigits, sz+1);
    g_processedIds[sz]=orderId;
    g_processedAt[sz]=(long)TimeGMT();
    g_processedStatus[sz]=status;
    g_processedTicket[sz]=ticket;
+   g_processedPrice[sz]=price;
+   g_processedDigits[sz]=digits;
    SaveProcessedIds();
+}
+
+// Legacy processed entries (persisted before status/ticket/price were tracked,
+// or written by an older build) load with an empty status. Previously a
+// duplicate redispatch for one of these was simply ignored forever, leaving
+// the order stuck non-final on the server and redispatched on every poll. To
+// break that loop, derive the real outcome from the account's current open
+// state and trade history instead of guessing: a still-open position/pending
+// order tagged with this orderId is reported as FILLED/RECEIVED with its true
+// fill price, and a closed-out position found in history is reported as
+// FILLED with the original deal's entry price. If none of that is found the
+// order was never placed on this account, so it is safe to report REJECTED.
+bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket, double &price, int &digits)
+{
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong t=PositionGetTicket(i);
+      if(t==0 || !PositionSelectByTicket(t)) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+      if(PositionGetString(POSITION_COMMENT)!=o.orderId) continue;
+      status="FILLED";
+      ticket=(string)t;
+      price=PositionGetDouble(POSITION_PRICE_OPEN);
+      digits=(int)SymbolInfoInteger(PositionGetString(POSITION_SYMBOL), SYMBOL_DIGITS);
+      return true;
+   }
+
+   for(int i=0;i<OrdersTotal();i++)
+   {
+      ulong t=OrderGetTicket(i);
+      if(t==0 || !OrderSelect(t)) continue;
+      if((long)OrderGetInteger(ORDER_MAGIC)!=InpMagic) continue;
+      if(OrderGetString(ORDER_COMMENT)!=o.orderId) continue;
+      status="RECEIVED";
+      ticket=(string)t;
+      price=0.0;
+      digits=-1;
+      return true;
+   }
+
+   if(HistorySelect((datetime)((long)TimeGMT()-PROCESSED_TTL_SECS), TimeGMT()))
+   {
+      int totalDeals = HistoryDealsTotal();
+      for(int i=0;i<totalDeals;i++)
+      {
+         ulong dealTicket = HistoryDealGetTicket(i);
+         if(dealTicket==0) continue;
+         if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
+         if(HistoryDealGetString(dealTicket, DEAL_COMMENT)!=o.orderId) continue;
+         if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY)!=DEAL_ENTRY_IN) continue;
+         status="FILLED";
+         ticket=(string)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
+         price=HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+         digits=(int)SymbolInfoInteger(HistoryDealGetString(dealTicket, DEAL_SYMBOL), SYMBOL_DIGITS);
+         return true;
+      }
+   }
+
+   // No trace of this orderId anywhere on the account: it was never placed,
+   // so it is safe to finalize it as rejected rather than leaving it stuck.
+   status="REJECTED";
+   ticket="";
+   price=0.0;
+   digits=-1;
+   return true;
 }
 
 //=============================== HTTP / JSON =================================
@@ -818,10 +893,19 @@ bool SendTrade(const BridgeOrder &o)
       // (or rejection) is ever finalized on the server. Re-send our last
       // known status so the server can finalize it and stop redispatching.
       string dupStatus="", dupTicket="";
-      if(GetProcessedStatus(o.orderId, dupStatus, dupTicket))
+      double dupPrice=0.0; int dupDigits=-1;
+      if(GetProcessedStatus(o.orderId, dupStatus, dupTicket, dupPrice, dupDigits))
       {
          LogEvent("WARN","SIGNAL_DUPLICATE",o.orderId,"already processed as "+dupStatus+"; resyncing status to server");
-         PostStatus(o.orderId, dupStatus, dupTicket, "Resynced (duplicate signal redelivered)", 0.0);
+         PostStatus(o.orderId, dupStatus, dupTicket, "Resynced (duplicate signal redelivered)", dupPrice, dupDigits);
+      }
+      else if(ReconcileLegacyStatus(o, dupStatus, dupTicket, dupPrice, dupDigits))
+      {
+         // Legacy entry with no stored status: derive and persist the real
+         // outcome from broker state instead of ignoring the redispatch.
+         LogEvent("WARN","SIGNAL_DUPLICATE",o.orderId,"legacy entry missing status; reconciled as "+dupStatus+" from broker state");
+         MarkProcessed(o.orderId, dupStatus, dupTicket, dupPrice, dupDigits);
+         PostStatus(o.orderId, dupStatus, dupTicket, "Resynced (reconciled from broker history/open state)", dupPrice, dupDigits);
       }
       else
       {
@@ -1096,7 +1180,7 @@ bool SendTrade(const BridgeOrder &o)
       g_statSignalsFilled++;
       LogEvent("INFO","ORDER_FILLED",o.orderId,"ticket="+ticket+" price="+DoubleToString(res.price,filledDigits));
       PostStatus(o.orderId,"FILLED",ticket,"Executed. "+confirmNote,res.price,filledDigits);
-      MarkProcessed(o.orderId, "FILLED", ticket);
+      MarkProcessed(o.orderId, "FILLED", ticket, res.price, filledDigits);
    }
 
    return true;
@@ -1263,7 +1347,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       PostStatus(orderId,"FILLED",ticket,"Pending order filled (OnTradeTransaction)",price,digits);
       g_statSignalsPending = MathMax(0, g_statSignalsPending-1);
       g_statSignalsFilled++;
-      MarkProcessed(orderId, "FILLED", ticket);
+      MarkProcessed(orderId, "FILLED", ticket, price, digits);
       return;
    }
 

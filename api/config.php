@@ -548,10 +548,22 @@ function authenticateUserFromToken(): int
 /**
  * Simple rate limiter.  Returns TRUE if the request is allowed.
  *
- * @param int $maxAttempts  Maximum requests per window
- * @param int $windowSecs   Window duration in seconds
+ * Each caller is bucketed separately by (IP, endpoint) by default, keyed off
+ * the calling script's filename. Without this, every endpoint that calls
+ * rateLimit() would share a single IP-wide counter, so high-frequency polling
+ * endpoints (e.g. the MT5 bridge's pull.php/status.php) would exhaust the
+ * shared quota and cause unrelated, low-frequency endpoints (e.g. signal.php)
+ * to be falsely throttled with "Rate limit exceeded" even though that
+ * specific endpoint was called well within its own configured limit.
+ *
+ * @param int         $maxAttempts  Maximum requests per window
+ * @param int         $windowSecs   Window duration in seconds
+ * @param string|null $bucket       Explicit bucket name to rate-limit on
+ *                                  instead of the calling script (use this to
+ *                                  intentionally share a quota across
+ *                                  endpoints).
  */
-function rateLimit(int $maxAttempts = 5, int $windowSecs = 60): bool
+function rateLimit(int $maxAttempts = 5, int $windowSecs = 60, ?string $bucket = null): bool
 {
     /* Resolve client IP.
      * Only trust X-Forwarded-For when TRUSTED_PROXY_IPS is configured in .env
@@ -569,6 +581,10 @@ function rateLimit(int $maxAttempts = 5, int $windowSecs = 60): bool
         }
     }
 
+    if ($bucket === null) {
+        $bucket = basename((string) ($_SERVER['SCRIPT_FILENAME'] ?? $_SERVER['SCRIPT_NAME'] ?? 'default'));
+    }
+
     $rateDir = sys_get_temp_dir() . '/trading_rate_limits';
 
     if (!is_dir($rateDir) && !mkdir($rateDir, 0700, true)) {
@@ -576,7 +592,7 @@ function rateLimit(int $maxAttempts = 5, int $windowSecs = 60): bool
         return true; /* fail open — don't block requests if dir creation fails */
     }
 
-    $file     = $rateDir . '/' . md5($ip) . '.json';
+    $file     = $rateDir . '/' . md5($ip . '|' . $bucket) . '.json';
     $attempts = [];
 
     if (is_file($file)) {

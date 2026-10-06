@@ -216,7 +216,7 @@ GET /api/mt5/order_status.php?since=0&limit=50
 
 The reference EA in the repo root implements, in addition to the server-side controls above:
 
-- **Duplicate protection** — every `orderId` is recorded (with its last known final status) in a
+- **Duplicate protection** — every `orderId` is recorded (with its last reported status) in a
   persisted local file; already-processed signals are not resent even across EA restarts, and a
   `comment`-tag match against existing positions/pending orders prevents a resend if a prior HTTP
   confirmation was lost. If a duplicate redispatch is received for an orderId whose status callback
