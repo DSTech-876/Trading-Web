@@ -46,10 +46,7 @@ function mt5WithStateLock(callable $callback): mixed
     }
 
     $raw = stream_get_contents($fh);
-    $state = is_string($raw) && $raw !== '' ? (json_decode($raw, true) ?: []) : [];
-    if (!is_array($state)) $state = [];
-    if (!isset($state['orders']) || !is_array($state['orders'])) $state['orders'] = [];
-    if (!isset($state['idempotency']) || !is_array($state['idempotency'])) $state['idempotency'] = [];
+    $state = mt5DecodeState(is_string($raw) ? $raw : '', $path);
 
     $result = $callback($state);
 
@@ -71,6 +68,42 @@ function mt5WithStateLock(callable $callback): mixed
 }
 
 /**
+ * Decodes the persisted bridge state.
+ *
+ * A non-empty payload that does not decode into an array means the queue file
+ * is corrupt (partial write, disk-full truncation, concurrent clobber). The
+ * previous behaviour (`json_decode(...) ?: []`) silently replaced it with an
+ * empty queue, so every QUEUED order vanished without a single log line and
+ * pull.php reported `count: 0` forever with no trace of why. Now the corrupt
+ * payload is preserved next to the state file and the event is logged as
+ * STATE_CORRUPT so the loss is attributable.
+ *
+ * @return array<string,mixed>
+ */
+function mt5DecodeState(string $raw, string $path): array
+{
+    $state = [];
+    if ($raw !== '') {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            $state = $decoded;
+        } else {
+            @copy($path, $path . '.corrupt');
+            mt5LogDiagnostic('state', [
+                'event' => 'STATE_CORRUPT',
+                'path' => $path,
+                'bytes' => strlen($raw),
+                'jsonError' => json_last_error_msg(),
+                'preservedCopy' => $path . '.corrupt',
+            ]);
+        }
+    }
+    if (!isset($state['orders']) || !is_array($state['orders'])) $state['orders'] = [];
+    if (!isset($state['idempotency']) || !is_array($state['idempotency'])) $state['idempotency'] = [];
+    return $state;
+}
+
+/**
  * @return array<string,mixed>
  */
 function mt5ReadState(): array
@@ -80,11 +113,70 @@ function mt5ReadState(): array
         return ['orders' => [], 'idempotency' => []];
     }
     $raw = @file_get_contents($path);
-    $state = $raw ? (json_decode($raw, true) ?: []) : [];
-    if (!is_array($state)) $state = [];
-    if (!isset($state['orders']) || !is_array($state['orders'])) $state['orders'] = [];
-    if (!isset($state['idempotency']) || !is_array($state['idempotency'])) $state['idempotency'] = [];
-    return $state;
+    return mt5DecodeState(is_string($raw) ? $raw : '', $path);
+}
+
+/**
+ * Builds a census of the queue so an *empty* pull.php response is explainable
+ * without shell access to the server: how many orders exist at all, how they
+ * break down by status, which terminals they are pinned to, and — for every
+ * order that was not dispatched — the exact reason it was skipped.
+ *
+ * @param array<string,mixed> $orders           $state['orders']
+ * @param list<string>        $dispatchedIds    order ids actually returned
+ * @param bool                $halted           true when dispatch is suppressed
+ * @return array<string,mixed>
+ */
+function mt5QueueCensus(array $orders, array $dispatchedIds, string $terminal, int $now, int $retryAfterSecs, bool $halted = false): array
+{
+    $dispatched = array_flip($dispatchedIds);
+    $byStatus = [];
+    $byTerminal = [];
+    $skipped = [];
+
+    foreach ($orders as $orderId => $order) {
+        if (!is_array($order)) continue;
+        $status = (string) ($order['status'] ?? 'UNKNOWN');
+        $byStatus[$status] = ($byStatus[$status] ?? 0) + 1;
+
+        $orderTerminal = trim((string) ($order['terminal'] ?? ''));
+        $terminalKey = $orderTerminal === '' ? '(unassigned)' : $orderTerminal;
+        $byTerminal[$terminalKey] = ($byTerminal[$terminalKey] ?? 0) + 1;
+
+        if (isset($dispatched[(string) $orderId])) continue;
+
+        if (in_array($status, MT5_FINAL_STATUS, true)) {
+            $reason = 'final status ' . $status;
+        } elseif ($halted) {
+            $reason = 'dispatch halted (MT5_TRADING_HALTED)';
+        } elseif ($terminal !== '' && $orderTerminal !== '' && $orderTerminal !== $terminal) {
+            $reason = sprintf('terminal mismatch (order="%s", request="%s")', $orderTerminal, $terminal);
+        } elseif ($status === 'QUEUED') {
+            $reason = 'limit reached before this order was reached';
+        } elseif ($status === 'DISPATCHED') {
+            $age = $now - (int) ($order['lastDispatchedAt'] ?? 0);
+            $reason = $age >= $retryAfterSecs
+                ? 'limit reached before this order was reached'
+                : sprintf('awaiting retry window (%ds of %ds elapsed)', $age, $retryAfterSecs);
+        } else {
+            $reason = 'in-flight at EA (status ' . $status . ')';
+        }
+
+        $skipped[] = [
+            'orderId' => (string) $orderId,
+            'symbol' => $order['symbol'] ?? null,
+            'status' => $status,
+            'terminal' => $orderTerminal !== '' ? $orderTerminal : null,
+            'reason' => $reason,
+        ];
+    }
+
+    return [
+        'totalOrders' => count($orders),
+        'byStatus' => $byStatus,
+        'byTerminal' => $byTerminal,
+        'notDispatched' => $skipped,
+    ];
 }
 
 /**

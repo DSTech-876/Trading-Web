@@ -28,9 +28,11 @@ $retryAfterSecs = 20;
 $now = time();
 $halted = mt5IsHalted();
 
+$census = ['totalOrders' => 0, 'byStatus' => [], 'byTerminal' => [], 'notDispatched' => []];
+
 // While halted, do not dispatch any new/retry orders to the EA. Existing
 // in-flight orders are left untouched so status callbacks still work.
-$orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now): array {
+$orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now, &$census): array {
     $out = [];
     foreach ($state['orders'] as &$order) {
         if (count($out) >= $limit) break;
@@ -58,8 +60,22 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
         $out[] = $order;
     }
     unset($order);
+
+    $census = mt5QueueCensus(
+        $state['orders'],
+        array_map(static fn(array $o): string => (string) ($o['orderId'] ?? ''), $out),
+        $terminal,
+        $now,
+        $retryAfterSecs
+    );
+
     return $out;
 });
+
+if ($halted) {
+    $state = mt5ReadState();
+    $census = mt5QueueCensus($state['orders'], [], $terminal, $now, $retryAfterSecs, true);
+}
 
 $public = array_map(static fn(array $o): array => [
     'orderId' => $o['orderId'] ?? '',
@@ -80,17 +96,27 @@ $public = array_map(static fn(array $o): array => [
     'createdAt' => $o['createdAt'] ?? null,
 ], $orders);
 
-if ($public !== []) {
-    mt5LogDiagnostic('pull.php', [
-        'event' => 'DISPATCH',
-        'terminal' => $terminal,
-        'dispatchedOrderIds' => array_column($public, 'orderId'),
-        'mappedSymbols' => array_combine(
+// Log EVERY poll, including empty ones. Previously only non-empty dispatches
+// were logged, so the "ok:true, count:0" failure mode left no server-side
+// trace at all and could not be distinguished from "no signals were ever
+// queued", "all orders are pinned to a different terminal", "every order is
+// already final", or "the queue file was reset". The census makes the reason
+// explicit on every single poll.
+mt5LogDiagnostic('pull.php', [
+    'event' => $public !== [] ? 'PULL_RESPONSE_DISPATCH' : 'PULL_RESPONSE_EMPTY',
+    'terminal' => $terminal !== '' ? $terminal : null,
+    'limit' => $limit,
+    'halted' => $halted,
+    'count' => count($public),
+    'queue' => $census,
+    'dispatchedOrderIds' => array_column($public, 'orderId'),
+    'mappedSymbols' => $public !== []
+        ? array_combine(
             array_column($public, 'orderId'),
             array_map(static fn(array $o) => $o['brokerSymbolHint'] ?? $o['symbol'], $public)
-        ),
-    ]);
-}
+        )
+        : [],
+]);
 
 jsonResponse([
     'ok' => true,
@@ -99,6 +125,13 @@ jsonResponse([
     'haltReason' => $halted ? mt5HaltReason() : null,
     'dailyLossLimitPct' => mt5GetDailyLossLimitPct(),
     'count' => count($public),
+    // Rows found vs rows returned, so an empty poll is self-explaining to the
+    // operator without needing server log access.
+    'queue' => [
+        'totalOrders' => $census['totalOrders'],
+        'byStatus' => $census['byStatus'],
+        'byTerminal' => $census['byTerminal'],
+    ],
     'orders' => $public,
 ]);
 

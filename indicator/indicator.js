@@ -2706,6 +2706,7 @@ let mt5MinLot                = 0.01;
 let mt5MaxLot                = 100;
 let mt5StatusPollingEnabled  = true;
 let mt5LastStatusSyncTs      = 0;
+let mt5StatusPollFailures    = 0;      /* consecutive order_status.php poll failures */
 const MT5_STATUS_POLL_MS     = 8000;
 const MT5_FINAL_STATUSES     = new Set(["FILLED", "REJECTED", "CANCELLED", "EXPIRED"]);
 /* --- Per-symbol auto-trade slots ---
@@ -16600,6 +16601,17 @@ function submitMt5BridgeTrade({
   });
 }
 
+/** Report order_status.php poll failures. Throttled so an outage logs on the
+ *  first failure and then once a minute, rather than every poll. */
+function noteMt5StatusPollFailure(reason) {
+  mt5StatusPollFailures++;
+  const throttle = Math.max(1, Math.round(60000 / MT5_STATUS_POLL_MS));
+  if (mt5StatusPollFailures === 1 || mt5StatusPollFailures % throttle === 0) {
+    addLog(`⚠ MT5 status poll failed (${mt5StatusPollFailures}×) — ${reason}. In-flight orders cannot be resolved, which will block new bridge trades once ${maxConcurrentTrades} are open per symbol.`);
+  }
+  logSignalEngineDebug("MT5_STATUS_POLL_FAILED", { consecutiveFailures: mt5StatusPollFailures, reason });
+}
+
 async function pollMt5BridgeStatus() {
   if (autoTradeExecutionMode !== "mt5" || !mt5StatusPollingEnabled || !mt5StatusApiUrl) return;
   if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
@@ -16608,7 +16620,15 @@ async function pollMt5BridgeStatus() {
   try {
     const resp = await fetch(url, { headers: mt5BridgeHeaders() });
     const data = await safeJson(resp);
-    if (!resp.ok || !data?.ok || !Array.isArray(data.orders)) return;
+    if (!resp.ok || !data?.ok || !Array.isArray(data.orders)) {
+      /* A status poll that keeps failing means MT5 orders never leave
+         slot.activeTrades, which silently caps every symbol at
+         maxConcurrentTrades and stops all further bridge dispatch. Surface it
+         instead of returning quietly. */
+      noteMt5StatusPollFailure(`HTTP ${resp.status}${data?.error ? ` — ${data.error}` : ""}`);
+      return;
+    }
+    mt5StatusPollFailures = 0;
     const serverTime = Number(data.serverTime || 0);
     if (Number.isFinite(serverTime) && serverTime > mt5LastStatusSyncTs) {
       mt5LastStatusSyncTs = serverTime;
@@ -16623,11 +16643,23 @@ async function pollMt5BridgeStatus() {
       if (MT5_FINAL_STATUSES.has(status)) {
         removeActiveTrade(symbol, tradeId);
         const result = resolveMt5HistoryResult(status);
-        resolveAutoTradeHistoryEntry(0, result, symbol, tradeId);
-        logSignalEngineDebug("MT5_STATUS_RESOLVED", {
-          signalId: tradeId, symbol, brokerStatus: status, scoredResult: result,
-          brokerTicket: o.brokerTicket || null, message: o.message || null
-        });
+        /* Resolve ONLY when this exact orderId is still pending. The server
+           overlaps the `since` watermark by one second (so a status landing in
+           the same second as a poll can never be lost), which means a final
+           status can be redelivered. resolveAutoTradeHistoryEntry() falls back
+           to a symbol lookup when the tradeId is not found, so an unguarded
+           redelivery would resolve an unrelated pending trade on the same
+           symbol with a fabricated outcome. */
+        const stillPending = autoTradeHistory.some(e => e && e.result === "PENDING" && e.tradeId === tradeId);
+        if (stillPending) {
+          resolveAutoTradeHistoryEntry(0, result, symbol, tradeId);
+          logSignalEngineDebug("MT5_STATUS_RESOLVED", {
+            signalId: tradeId, symbol, brokerStatus: status, scoredResult: result,
+            brokerTicket: o.brokerTicket || null, message: o.message || null
+          });
+        } else {
+          continue;  /* already resolved — skip the duplicate log lines below */
+        }
       }
       if (status === "REJECTED" || status === "CANCELLED") {
         const msg = o.message ? ` — ${o.message}` : "";
@@ -16643,7 +16675,11 @@ async function pollMt5BridgeStatus() {
         addLog(`⏱ MT5 ${status} ${tradeId}${o.message ? ` — ${o.message}` : ""} (no broker execution — not counted as a loss)`);
       }
     }
-  } catch { /* silent background poll */ }
+  } catch (err) {
+    /* Never swallow this: a persistently throwing status poll strands every
+       in-flight MT5 order in slot.activeTrades and halts future dispatch. */
+    noteMt5StatusPollFailure(String((err && err.message) || err));
+  }
 }
 
 function getTradeAnalytics(entries) {
