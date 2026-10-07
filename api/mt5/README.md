@@ -287,3 +287,58 @@ server. Never commit a real bridge key into source control.
   `InpSymbolAliasMap` input → `InpSymbolSuffixCandidates` → a case/punctuation-insensitive scan of
   every symbol the terminal knows about — logging each attempt (`SYMBOL_RESOLVE` /
   `SYMBOL_RESOLVE_FAIL` events) and caching the result per orderId's symbol code for the EA session.
+
+---
+
+## 7) Why `pull.php` returns `count: 0` — diagnosing an empty queue
+
+`{"ok":true,"halted":false,"count":0,"orders":[]}` means the EA is authenticated and the server is
+healthy; it only says the **queue had nothing dispatchable for this terminal**. Every poll now logs a
+`PULL_RESPONSE_EMPTY` / `PULL_RESPONSE_DISPATCH` line (and returns a `queue` object in the response)
+containing the queue census — `totalOrders`, `byStatus`, `byTerminal`, and, in the log, a
+`notDispatched` list giving the exact per-order skip reason. Read that first; it distinguishes all of
+the following causes, which are otherwise indistinguishable from the EA side:
+
+| `queue` census shows | Cause |
+| --- | --- |
+| `totalOrders: 0` | No order was ever created. `signal.php` was never called successfully — the chain broke **upstream of the server**. |
+| `byStatus` is all final (`FILLED`/`REJECTED`/`CANCELLED`/`EXPIRED`) | Everything already ran to completion; no new signals since. |
+| `byTerminal` lists a different id than the polling terminal | Orders were pinned to another terminal on first dispatch. `terminal` is matched **exactly and case-sensitively** in `pull.php`; `MT5-TERM-01` and `mt5-term-01` are different queues. |
+| `notDispatched` reason `awaiting retry window` | Orders are `DISPATCHED`; the EA already has them and a redispatch is throttled to 20 s. |
+| `notDispatched` reason `dispatch halted` | `MT5_TRADING_HALTED` is set. |
+| A `STATE_CORRUPT` line in the diagnostics log | The queue file was truncated/clobbered and the queue was reset. The unparseable payload is preserved as `<state file>.corrupt`. |
+
+### `totalOrders: 0` — where orders come from
+
+There is **no server-side signal generator and no signal/queue database table**. Orders exist only
+when `POST /api/mt5/signal.php` is called, and the only caller is `submitMt5BridgeTrade()` in
+`indicator/indicator.js`. All of the following must hold for a single order to be created:
+
+1. The indicator page is open and streaming candles (it is the signal engine).
+2. The user is logged in — `signal.php` requires a JWT; without one it returns `401`.
+3. **Execution Mode is set to "MT5 Bridge"** (`autoTradeExecutionMode === "mt5"`). It defaults to
+   `"deriv"`, in which case every signal is sent to Deriv and *nothing* is ever queued for MT5.
+4. The relevant auto-trade master toggle is on for the signal's source
+   (`autoTradeEnabled` / `autoTradeScalpEnabled` / `autoTradeStrategyEnabled`).
+5. `executeAutoTrade()` passes every risk gate — session TP/SL halt, risk-config load, daily loss
+   cap, symbol cooldown, trade-frequency cap, regime gating, strategy pause, **max concurrent trades
+   per symbol**, hedging guard, confluence gate, weighted-confluence tier, correlated exposure. Each
+   rejection is written to the indicator log with its reason.
+6. SL/TP are finite, positive, and on the correct side of entry for the traded direction.
+
+If `pull.php` reports `totalOrders: 0`, the failure is in that list, not in the bridge.
+
+### Queue storage
+
+Queue state is a single JSON file under the system temp directory
+(`mt5StoragePath()` in `api/mt5/common.php`), guarded by `flock()`. Consequences to be aware of when
+operating this bridge:
+
+- It is **not** a database. There are no `trade_signals` / `signal_queue` / `queue` tables; MySQL is
+  used only for auth, risk settings, and analytics.
+- The file lives in `sys_get_temp_dir()`. If the web tier is load-balanced across more than one host,
+  or PHP-FPM runs under a private/per-user temp directory that differs between the request that
+  calls `signal.php` and the request that calls `pull.php`, the EA polls a **different, empty**
+  queue. Pin `TMPDIR`/`sys_temp_dir` to a shared, persistent path in that case.
+- The file is also subject to OS temp reaping. A reaped or truncated file is reported as
+  `STATE_CORRUPT` rather than silently resetting the queue.

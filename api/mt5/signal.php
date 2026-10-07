@@ -47,7 +47,7 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
     $existingOrderId = $state['idempotency'][$incomingKey] ?? null;
     if (is_string($existingOrderId) && isset($state['orders'][$existingOrderId])) {
         $existing = $state['orders'][$existingOrderId];
-        return ['duplicate' => true, 'order' => $existing];
+        return ['duplicate' => true, 'order' => $existing, 'queueDepth' => count($state['orders'])];
     }
 
     $orderId = 'mt5_' . gmdate('YmdHis') . '_' . bin2hex(random_bytes(4));
@@ -84,18 +84,27 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
     $state['orders'][$orderId] = $order;
     $state['idempotency'][$incomingKey] = $orderId;
 
-    return ['duplicate' => false, 'order' => $order];
+    return ['duplicate' => false, 'order' => $order, 'queueDepth' => count($state['orders'])];
 });
 
 $publicOrder = mt5PublicOrder($result['order']);
 
 mt5LogDiagnostic('signal.php', [
-    'event' => 'SIGNAL_QUEUED',
+    'event' => $result['duplicate'] ? 'ORDER_DUPLICATE' : 'ORDER_QUEUED',
     'signalId' => $publicOrder['orderId'],
     'duplicate' => (bool) $result['duplicate'],
+    'userId' => $userId,
     'symbol' => $normalized['symbol'],
     'mappedSymbol' => $normalized['brokerSymbolHint'] !== '' ? $normalized['brokerSymbolHint'] : null,
+    'side' => $normalized['side'],
+    'orderType' => $normalized['orderType'],
+    'lot' => $normalized['lot'],
     'status' => $publicOrder['status'],
+    // Orders are created with no terminal binding; pull.php assigns the
+    // terminal on first dispatch. A non-null value here would mean the order
+    // is pinned and will be invisible to every other terminal id.
+    'terminal' => $result['order']['terminal'] ?? null,
+    'queueDepth' => $result['queueDepth'],
     'rawBody' => $rawBody,
 ]);
 

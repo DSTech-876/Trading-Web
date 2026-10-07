@@ -23,6 +23,17 @@ $since = (int) ($_GET['since'] ?? 0);
 $limit = (int) ($_GET['limit'] ?? 50);
 $limit = max(1, min(200, $limit));
 
+/* Take the watermark BEFORE reading the queue, and report it one second
+ * behind. `updatedAt` only has second resolution, so when a status callback
+ * lands in the same second as this read — but after it — the client would
+ * advance `since` past that second and the transition would be invisible to
+ * every later poll. For the web client that means an MT5 order never leaves
+ * `activeTrades`, the symbol stays permanently at its max-concurrent-trades
+ * cap, and no further signal is ever dispatched to the bridge. Overlapping by
+ * one second can only ever redeliver a status, which the client resolves
+ * idempotently by orderId. */
+$watermark = max(0, time() - 1);
+
 $state = mt5ReadState();
 $orders = [];
 foreach ($state['orders'] as $order) {
@@ -41,7 +52,7 @@ if (count($orders) > $limit) {
 
 jsonResponse([
     'ok' => true,
-    'serverTime' => time(),
+    'serverTime' => $watermark,
     'count' => count($orders),
     'orders' => $orders,
 ]);
