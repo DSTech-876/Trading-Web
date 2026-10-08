@@ -9305,6 +9305,60 @@ function processCustomStrategies() {
 /**
  * Monitor all custom strategy outcomes. Called from the main candle pipeline.
  */
+/**
+ * Opposite Trade Tracker: register every strategy trade that closes at STOP_LOSS
+ * and feed live candles to the tracker. Losses already present before the first
+ * sweep (restored history) are baselined and not re-analysed.
+ */
+let _oppTrackerBaselined = false;
+function sweepOppositeTradeTracking(candle) {
+  const tracker = typeof window !== "undefined" ? window.oppositeTradeTracker : null;
+  if (!tracker || !candle) return;
+  const histories = [
+    signalHistory,
+    liquiditySweepHistory, stopLossHuntHistory, failedPinBarHistory,
+    fibScalpHistory, po3History, gridScalperMAHistory, fvgStratHistory,
+    mtfTopDownHistory, nyOpenRangeHistory, sessionRangeHistory, tiktokHistory,
+    orderblockHistory, candleInterpHistory, po3_4hHistory, breakerBlockHistory,
+    oteGoldenPocketHistory, orbHistory, crtTbsHistory
+  ];
+  const baseline = !_oppTrackerBaselined;
+  _oppTrackerBaselined = true;
+  for (const history of histories) {
+    if (!Array.isArray(history)) continue;
+    for (const s of history) {
+      if (!s || s.result !== "LOSS" || s._oppTracked) continue;
+      s._oppTracked = true;
+      if (baseline || _historicalProcessing) continue;
+      const reason = String(s.terminal_reason || "STOP_LOSS").toUpperCase();
+      if (reason.indexOf("STOP_LOSS") !== 0) continue;
+      tracker.register(s, Number(candle.epoch), candles);
+    }
+  }
+  tracker.onCandle(candle);
+}
+
+/**
+ * Tighten Grid Scalper MA confirmation when historical opposite-trade data shows
+ * it enters too early. Only ever makes the confirmation mode stricter.
+ */
+function applyOppositeTradeAdviceToGridScalper() {
+  const tracker = typeof window !== "undefined" ? window.oppositeTradeTracker : null;
+  if (!tracker) return;
+  tracker.refreshAdvice().then(() => {
+    const f = tracker.getAdvice("grid_scalper_ma") || tracker.getAdvice("gridScalperMA");
+    if (!f) return;
+    const rank = { immediate: 0, one_candle: 1, follow_through: 2, close_beyond_trigger: 3, break_retest: 4 };
+    const want = f.requireRetestConfirmation ? "break_retest"
+      : f.requireCandleCloseConfirmation ? "close_beyond_trigger"
+      : f.delayEntry ? "one_candle" : null;
+    if (want && (rank[want] || 0) > (rank[gridScalperMAEntryDelayMode] || 0)) {
+      addLog(`🧠 Opposite-trade analysis: Grid Scalper MA confirmation ${gridScalperMAEntryDelayMode} → ${want}`);
+      gridScalperMAEntryDelayMode = want;
+    }
+  }).catch(() => {});
+}
+
 function monitorCustomStrategyOutcomes(candle) {
   monitorLiquiditySweepOutcomes(candle);
   monitorStopLossHuntOutcomes(candle);
@@ -9333,6 +9387,7 @@ function monitorCustomStrategyOutcomes(candle) {
   monitorCrtTbsOutcomes(candle);
   /* Feature 15: Multi-R ladder */
   monitorMultiRLadder(candles.length - 1);
+  sweepOppositeTradeTracking(candle);
 }
 
 /* ================= MTF TOP-DOWN STRATEGY (Strategy 11) ================= */
@@ -30855,6 +30910,7 @@ function initMultiSymbolPicker() {
 /* ================= BOOT ================= */
 document.addEventListener("DOMContentLoaded", () => {
   const initWarnings = [];
+  setTimeout(() => { try { applyOppositeTradeAdviceToGridScalper(); } catch (e) { /* optional */ } }, 5000);
   const reportInitError = (scope, err) => {
     console.error(`Indicator init step failed: ${scope}`, err);
     initWarnings.push(scope);
