@@ -21,7 +21,7 @@ input string InpBaseUrl         = "https://trading.dsitservicesja.com"; // no tr
 input string InpBridgeKey       = "";    // REQUIRED: set a strong secret, matches server MT5_BRIDGE_KEY. Never commit real keys.
 input string InpTerminalId      = "MT5-TERM-01";
 input int    InpPollSeconds     = 2;      // base polling interval
-input int    InpHttpTimeoutMs   = 5000;
+input int    InpHttpTimeoutMs   = 15000;
 input long   InpMagic           = 26051701;
 input bool   InpOnlyChartSymbol = false;  // true = skip orders not matching current chart symbol
 
@@ -651,6 +651,19 @@ string NormalizeSymbolForMatch(string s)
    return out;
 }
 
+// Looser key used for hint matching: also ignores the "INDEX" word and
+// "(1s)" style punctuation so "Volatility 75 (1s) Index" matches a broker's
+// "Volatility 75 (1s)" / "Volatility 75 1s" and so on. Never drops "1S",
+// so "Volatility 75" and "Volatility 75 (1s)" stay distinct.
+string NormalizeSymbolLoose(string s)
+{
+   string out = NormalizeSymbolForMatch(s);
+   StringReplace(out, "(", "");
+   StringReplace(out, ")", "");
+   StringReplace(out, "INDEX", "");
+   return out;
+}
+
 // Looks up "code=brokerSymbol" pairs from InpSymbolAliasMap (";"-separated).
 // Returns "" if no alias is configured for the requested code.
 string LookupSymbolAlias(string requested)
@@ -801,6 +814,23 @@ bool ResolveBrokerSymbol(string requested, string brokerSymbolHint, string order
          SymbolResolveCachePut(requested, name);
          resolved=name;
          return true;
+      }
+   }
+
+   // 6. Loose scan using the server hint (ignores "Index" / parentheses)
+   if(brokerSymbolHint!="")
+   {
+      string looseHint = NormalizeSymbolLoose(brokerSymbolHint);
+      for(int i=0;i<total;i++)
+      {
+         string name = SymbolName(i,false);
+         if(NormalizeSymbolLoose(name)==looseHint && SymbolSelect(name,true))
+         {
+            LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped="+name+" method=looseHintScan");
+            SymbolResolveCachePut(requested, name);
+            resolved=name;
+            return true;
+         }
       }
    }
 

@@ -16808,7 +16808,19 @@ async function pollMt5BridgeStatus() {
 
   const url = `${mt5StatusApiUrl}${mt5StatusApiUrl.includes("?") ? "&" : "?"}since=${encodeURIComponent(mt5LastStatusSyncTs)}&limit=100`;
   try {
-    const resp = await fetch(url, { headers: mt5BridgeHeaders() });
+    /* "Failed to fetch" is a transport-level TypeError (dropped connection,
+       server restart, momentary network loss) — not an API error. Retry with
+       a fresh, uncached request before counting it as a failed poll. */
+    let resp;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        resp = await fetch(url, { headers: mt5BridgeHeaders(), cache: "no-store" });
+        break;
+      } catch (netErr) {
+        if (attempt >= 2) throw netErr;
+        await new Promise(r => setTimeout(r, 750 * (attempt + 1)));
+      }
+    }
     const data = await safeJson(resp);
     if (!resp.ok || !data?.ok || !Array.isArray(data.orders)) {
       /* A status poll that keeps failing means MT5 orders never leave
@@ -16880,6 +16892,8 @@ async function pollMt5BridgeStatus() {
       }
     }
   } catch (err) {
+    /* The watermark is only advanced on success, so a failed poll is
+       re-fetched in full next cycle and no status change is lost. */
     /* Never swallow this: a persistently throwing status poll strands every
        in-flight MT5 order in slot.activeTrades and halts future dispatch. */
     noteMt5StatusPollFailure(String((err && err.message) || err));
