@@ -856,6 +856,28 @@ bool ValidateSymbolTradable(string symbol, string &reason)
    return true;
 }
 
+double NormalizeLotForSymbol(string symbol, double lot)
+{
+   double vmin  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double vmax  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double vstep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(vstep>0) lot = MathFloor(lot/vstep + 1e-9)*vstep;
+   if(vmin>0 && lot<vmin) lot = vmin;
+   if(vmax>0 && lot>vmax) lot = vmax;
+   int vd = 2;
+   if(vstep>0 && vstep<0.01) vd = 3;
+   if(vstep>0 && vstep<0.001) vd = 4;
+   return NormalizeDouble(lot, vd);
+}
+
+ENUM_ORDER_TYPE_FILLING PickFilling(string symbol)
+{
+   long fm = SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+   if((fm & SYMBOL_FILLING_FOK)!=0) return ORDER_FILLING_FOK;
+   if((fm & SYMBOL_FILLING_IOC)!=0) return ORDER_FILLING_IOC;
+   return ORDER_FILLING_RETURN;
+}
+
 bool ValidateSpread(string symbol, double &spreadPointsOut, string &reason)
 {
    MqlTick tick;
@@ -867,7 +889,11 @@ bool ValidateSpread(string symbol, double &spreadPointsOut, string &reason)
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    if(point<=0) point = _Point;
    spreadPointsOut = (tick.ask - tick.bid) / point;
-   if(InpMaxSpreadPoints>0 && spreadPointsOut > InpMaxSpreadPoints)
+   // The fixed point cap is meaningful only for FX; synthetic indices (Volatility,
+   // Boom/Crash, ...) quote spreads in hundreds/thousands of points.
+   long calcMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+   bool isFx = (calcMode==SYMBOL_CALC_MODE_FOREX || calcMode==SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE);
+   if(isFx && InpMaxSpreadPoints>0 && spreadPointsOut > InpMaxSpreadPoints)
    {
       reason = "Spread "+DoubleToString(spreadPointsOut,1)+" pts exceeds max "+(string)InpMaxSpreadPoints;
       return false;
@@ -1280,6 +1306,7 @@ bool SendTrade(BridgeOrder &o)
    }
 
    double lot = MathMin(o.lot, InpMaxLotSize);
+   if(lot>0) lot = NormalizeLotForSymbol(o.symbol, lot);
    if(lot<=0)
    {
       g_statSignalsRejected++;
@@ -1405,7 +1432,7 @@ bool SendTrade(BridgeOrder &o)
       req.action = TRADE_ACTION_DEAL;
       req.type   = (o.side=="BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
       req.price  = execPrice;
-      req.type_filling = ORDER_FILLING_FOK;
+      req.type_filling = PickFilling(o.symbol);
    }
    else
    {
