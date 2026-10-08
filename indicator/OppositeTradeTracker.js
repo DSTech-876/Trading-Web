@@ -102,11 +102,14 @@
       else if (tpHit) { o.hitTp = true; o.timeToTp = mins; o.done = true; }
     }
 
-    /** Feed each new closed/updated candle. Candle: { epoch, high, low }. */
-    onCandle(c) {
+    /** Feed each new closed/updated candle. Candle: { epoch, high, low, symbol }. */
+    onCandle(c, symbol) {
       if (!c || !Number.isFinite(Number(c.high)) || !Number.isFinite(Number(c.low))) return;
+      const candleSymbol = symbol || (c && c.symbol) || null;
       for (const w of Array.from(this.watches.values())) {
         if (w.done || !(Number(c.epoch) > w.close_epoch)) continue;
+        /* Skip candles from other symbols when symbol filtering is available */
+        if (candleSymbol && w.symbol && w.symbol !== candleSymbol) continue;
         w.candlesAfter++;
         this._feedOpposite(w, c);
         const bull = w.direction === 'BULL';

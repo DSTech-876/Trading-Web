@@ -92,17 +92,18 @@ final class OppositeTradeService
                     COUNT(*) AS losses,
                     SUM(eventual_original_tp = 1) AS reached_tp,
                     SUM(opposite_result = 'WIN') AS opp_wins,
-                    SUM(opposite_result <> 'WIN' AND eventual_original_tp = 0) AS neither,
-                    AVG(CASE WHEN eventual_original_tp = 1 THEN minutes_after_sl END) AS avg_recovery_min,
-                    SUM(classification = 'EARLY_ENTRY') AS early_entry,
-                    SUM(classification = 'WRONG_DIRECTION') AS wrong_direction,
-                    SUM(classification = 'HIGH_VOLATILITY_STOP') AS high_vol,
-                    SUM(classification = 'VALID_LOSS') AS valid_loss,
-                    SUM(classification = 'MISSED_REVERSAL') AS missed_reversal
-               FROM opposite_trade_tracking
-              WHERE $where
-           GROUP BY strategy
-           ORDER BY losses DESC"
+                   SUM(opposite_result = 'LOSS') AS opp_losses,
+                   SUM(opposite_result <> 'WIN' AND eventual_original_tp = 0) AS neither,
+                   AVG(CASE WHEN eventual_original_tp = 1 THEN minutes_after_sl END) AS avg_recovery_min,
+                   SUM(classification = 'EARLY_ENTRY') AS early_entry,
+                   SUM(classification = 'WRONG_DIRECTION') AS wrong_direction,
+                   SUM(classification = 'HIGH_VOLATILITY_STOP') AS high_vol,
+                   SUM(classification = 'VALID_LOSS') AS valid_loss,
+                   SUM(classification = 'MISSED_REVERSAL') AS missed_reversal
+              FROM opposite_trade_tracking
+             WHERE $where
+          GROUP BY strategy
+          ORDER BY losses DESC"
         );
         $stmt->execute($params);
         $out = [];
@@ -110,32 +111,33 @@ final class OppositeTradeService
             $losses = (int) $r['losses'];
             $reached = (int) $r['reached_tp'];
             $oppWins = (int) $r['opp_wins'];
-            $counts = [
-                self::CLASS_EARLY_ENTRY => (int) $r['early_entry'],
-                self::CLASS_WRONG_DIRECTION => (int) $r['wrong_direction'],
-                self::CLASS_HIGH_VOLATILITY_STOP => (int) $r['high_vol'],
-                self::CLASS_VALID_LOSS => (int) $r['valid_loss'],
-                self::CLASS_MISSED_REVERSAL => (int) $r['missed_reversal'],
-            ];
-            arsort($counts);
-            $dominant = (string) array_key_first($counts);
-            $row = [
-                'strategy' => (string) $r['strategy'],
-                'losses' => $losses,
-                'reachedTpAfterSl' => $reached,
-                'oppositeWins' => $oppWins,
-                'oppositeLosses' => $losses - $oppWins,
-                'neitherWorks' => (int) $r['neither'],
-                'reachedTpPct' => $losses ? round($reached / $losses * 100, 1) : 0.0,
-                'oppositeWinPct' => $losses ? round($oppWins / $losses * 100, 1) : 0.0,
-                'avgRecoveryMinutes' => $r['avg_recovery_min'] !== null ? round((float) $r['avg_recovery_min'], 1) : null,
-                'classifications' => $counts,
-                'dominantClassification' => $counts[$dominant] > 0 ? $dominant : null,
-                'diagnosis' => $counts[$dominant] > 0 ? self::diagnosis($dominant) : null,
-            ];
-            $row['healthScore'] = self::healthScore($row);
-            $row['recommendations'] = self::recommendations($row);
-            $out[] = $row;
+           $oppLosses = (int) $r['opp_losses'];
+           $counts = [
+               self::CLASS_EARLY_ENTRY => (int) $r['early_entry'],
+               self::CLASS_WRONG_DIRECTION => (int) $r['wrong_direction'],
+               self::CLASS_HIGH_VOLATILITY_STOP => (int) $r['high_vol'],
+               self::CLASS_VALID_LOSS => (int) $r['valid_loss'],
+               self::CLASS_MISSED_REVERSAL => (int) $r['missed_reversal'],
+           ];
+           arsort($counts);
+           $dominant = (string) array_key_first($counts);
+           $row = [
+               'strategy' => (string) $r['strategy'],
+               'losses' => $losses,
+               'reachedTpAfterSl' => $reached,
+               'oppositeWins' => $oppWins,
+               'oppositeLosses' => $oppLosses,
+               'neitherWorks' => (int) $r['neither'],
+               'reachedTpPct' => $losses ? round($reached / $losses * 100, 1) : 0.0,
+               'oppositeWinPct' => $losses ? round($oppWins / $losses * 100, 1) : 0.0,
+               'avgRecoveryMinutes' => $r['avg_recovery_min'] !== null ? round((float) $r['avg_recovery_min'], 1) : null,
+               'classifications' => $counts,
+               'dominantClassification' => $counts[$dominant] > 0 ? $dominant : null,
+               'diagnosis' => $counts[$dominant] > 0 ? self::diagnosis($dominant) : null,
+           ];
+           $row['healthScore'] = self::healthScore($row);
+           $row['recommendations'] = self::recommendations($row);
+           $out[] = $row;
         }
         return $out;
     }
@@ -232,19 +234,15 @@ final class OppositeTradeService
             }
             foreach ($patterns as $key => [$title, $message]) {
                 $sourceId = $strategy . '|' . $key;
-                $dup = $pdo->prepare(
-                    "SELECT 1 FROM admin_notifications_center
-                      WHERE source_entity = 'opposite_trade' AND source_id = ?
-                        AND created_at > (NOW() - INTERVAL " . self::ALERT_COOLDOWN_HOURS . " HOUR) LIMIT 1"
-                );
-                $dup->execute([$sourceId]);
-                if ($dup->fetchColumn()) {
-                    continue;
-                }
                 $pdo->prepare(
                     "INSERT INTO admin_notifications_center
-                        (notification_type, category, title, message, severity, source_entity, source_id, related_data, is_read, created_at)
-                     VALUES ('warning', 'strategy_health', ?, ?, 'high', 'opposite_trade', ?, ?, 0, NOW())"
+                       (notification_type, category, title, message, severity, source_entity, source_id, related_data, is_read, created_at)
+                     VALUES ('warning', 'strategy_health', ?, ?, 'high', 'opposite_trade', ?, ?, 0, NOW())
+                     ON DUPLICATE KEY UPDATE
+                       created_at = IF(NOW() < DATE_ADD(created_at, INTERVAL " . self::ALERT_COOLDOWN_HOURS . " HOUR), created_at, NOW()),
+                       title = IF(NOW() < DATE_ADD(created_at, INTERVAL " . self::ALERT_COOLDOWN_HOURS . " HOUR), title, VALUES(title)),
+                       message = IF(NOW() < DATE_ADD(created_at, INTERVAL " . self::ALERT_COOLDOWN_HOURS . " HOUR), message, VALUES(message)),
+                       related_data = IF(NOW() < DATE_ADD(created_at, INTERVAL " . self::ALERT_COOLDOWN_HOURS . " HOUR), related_data, VALUES(related_data))"
                 )->execute([$title, $message, $sourceId, json_encode($s)]);
                 $raised[] = $message;
             }
