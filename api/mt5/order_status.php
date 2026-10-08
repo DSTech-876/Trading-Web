@@ -23,18 +23,20 @@ $since = (int) ($_GET['since'] ?? 0);
 $limit = (int) ($_GET['limit'] ?? 50);
 $limit = max(1, min(200, $limit));
 
-/* Take the watermark BEFORE reading the queue, and report it one second
- * behind. `updatedAt` only has second resolution, so when a status callback
- * lands in the same second as this read — but after it — the client would
- * advance `since` past that second and the transition would be invisible to
- * every later poll. For the web client that means an MT5 order never leaves
+/* Read the queue under a shared lock and take the watermark while that lock
+ * is still held, reported one second behind. `updatedAt` only has second
+ * resolution, so if the timestamp were captured before the lock (or before
+ * the read), a status callback could land in between — or in the same
+ * second — making the watermark newer than the snapshot it is paired with.
+ * The client would then advance `since` past that second and the transition
+ * would be invisible to every later poll: an MT5 order never leaves
  * `activeTrades`, the symbol stays permanently at its max-concurrent-trades
- * cap, and no further signal is ever dispatched to the bridge. Overlapping by
- * one second can only ever redeliver a status, which the client resolves
- * idempotently by orderId. */
-$watermark = max(0, time() - 1);
-
-$state = mt5ReadState();
+ * cap, and no further signal is ever dispatched to the bridge. Reading and
+ * timestamping under the shared lock orders the snapshot and watermark
+ * consistently with any concurrent writer; overlapping by one second can
+ * only ever redeliver a status, which the client resolves idempotently by
+ * orderId. */
+[$state, $watermark] = mt5ReadStateLockedWithWatermark();
 $orders = [];
 foreach ($state['orders'] as $order) {
     if (!is_array($order)) continue;

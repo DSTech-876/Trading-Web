@@ -2664,3 +2664,142 @@ test('fetchRiskConfig resets the settled gate before a post-login request so tra
   assert.equal(context.riskConfigInitialRequestSettled, true);
   assert.equal(context.AUTO_TRADE_DAILY_LOSS_CAP_PCT, 2);
 });
+
+test('pollMt5BridgeStatus distinguishes a non-OK HTTP status from an invalid 200 response', async () => {
+  const fnSource = extractFunction('pollMt5BridgeStatus');
+  const harness = `${fnSource}\nmodule.exports = { pollMt5BridgeStatus };`;
+
+  const reasons = [];
+  let nextResponse;
+  const baseContext = {
+    module: { exports: {} },
+    autoTradeExecutionMode: 'mt5',
+    mt5StatusPollingEnabled: true,
+    mt5StatusApiUrl: 'https://example.test/order_status.php',
+    ITGuruAuth: { isLoggedIn: () => true },
+    mt5BridgeHeaders: () => ({}),
+    safeJson: async (resp) => resp.__body,
+    fetch: async () => nextResponse,
+    mt5LastStatusSyncTs: 0,
+    noteMt5StatusPollFailure: (reason) => { reasons.push(reason); },
+    MT5_FINAL_STATUSES: new Set(),
+    removeActiveTrade: () => {},
+    resolveMt5HistoryResult: () => 'LOSS',
+    autoTradeHistory: [],
+    resolveAutoTradeHistoryEntry: () => {},
+    logSignalEngineDebug: () => {},
+    addLog: () => {},
+    getActiveSymbol: () => 'R_100',
+    encodeURIComponent,
+    Number,
+    Array,
+    String,
+    console
+  };
+  const context = { ...baseContext };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { pollMt5BridgeStatus } = context.module.exports;
+
+  // Non-OK HTTP status: reason should surface the actual status code.
+  nextResponse = { ok: false, status: 500, __body: { ok: false, error: 'boom' } };
+  await pollMt5BridgeStatus();
+
+  // HTTP 200 but body failed to parse as JSON (safeJson() returned null).
+  nextResponse = { ok: true, status: 200, __body: null };
+  await pollMt5BridgeStatus();
+
+  // HTTP 200, valid JSON, but "orders" is missing/not an array.
+  nextResponse = { ok: true, status: 200, __body: { ok: true } };
+  await pollMt5BridgeStatus();
+
+  assert.equal(reasons.length, 3);
+  assert.match(reasons[0], /^HTTP 500/);
+  assert.match(reasons[1], /not valid JSON/);
+  assert.doesNotMatch(reasons[1], /^HTTP 200$/);
+  assert.match(reasons[2], /"orders" field is missing or not an array/);
+  assert.doesNotMatch(reasons[2], /^HTTP 200$/);
+});
+
+test('mt5DecodeState refuses mutating writes on corrupt payloads and preserves a copy', () => {
+  const phpCode = `
+require ${JSON.stringify(path.resolve(__dirname, '../api/mt5/common.php'))};
+$tmp = sys_get_temp_dir() . '/mt5_decode_test_' . bin2hex(random_bytes(6)) . '.json';
+file_put_contents($tmp, '{not valid json');
+$state = mt5DecodeState(file_get_contents($tmp), $tmp);
+echo json_encode([
+  'corrupt' => $state['__corrupt'] ?? false,
+  'ordersIsArray' => is_array($state['orders']),
+  'preservedCopyExists' => file_exists($tmp . '.corrupt'),
+]);
+unlink($tmp);
+if (file_exists($tmp . '.corrupt')) unlink($tmp . '.corrupt');
+`;
+  const stdout = execFileSync('php', ['-r', phpCode], { encoding: 'utf8' });
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.corrupt, true);
+  assert.equal(parsed.ordersIsArray, true);
+  assert.equal(parsed.preservedCopyExists, true);
+});
+
+test('mt5WithStateLock throws instead of overwriting a corrupt state file', () => {
+  const phpCode = `
+require ${JSON.stringify(path.resolve(__dirname, '../api/mt5/common.php'))};
+$path = mt5StoragePath();
+file_put_contents($path, '{still not valid json');
+try {
+  mt5WithStateLock(function (array &$state) { return true; });
+  echo 'NO_EXCEPTION';
+} catch (RuntimeException $e) {
+  echo 'THREW:' . $e->getMessage();
+}
+echo '|RAW:' . file_get_contents($path);
+unlink($path);
+if (file_exists($path . '.corrupt')) unlink($path . '.corrupt');
+`;
+  const stdout = execFileSync('php', ['-r', phpCode], { encoding: 'utf8' });
+  assert.match(stdout, /^THREW:/);
+  // The original corrupt bytes must still be on disk: the file must NOT have
+  // been truncated to an empty/initialized state.
+  assert.match(stdout, /RAW:\{still not valid json$/);
+});
+
+test('mt5SummarizeNotDispatched caps the per-order sample and groups by reason', () => {
+  const phpCode = `
+require ${JSON.stringify(path.resolve(__dirname, '../api/mt5/common.php'))};
+$skipped = [];
+for ($i = 0; $i < 30; $i++) {
+  $skipped[] = ['orderId' => (string) $i, 'reason' => $i % 2 === 0 ? 'reasonA' : 'reasonB'];
+}
+$summary = mt5SummarizeNotDispatched($skipped, 20);
+echo json_encode([
+  'sampleCount' => count($summary['sample']),
+  'total' => $summary['total'],
+  'truncated' => $summary['truncated'],
+  'byReason' => $summary['byReason'],
+]);
+`;
+  const stdout = execFileSync('php', ['-r', phpCode], { encoding: 'utf8' });
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.sampleCount, 20);
+  assert.equal(parsed.total, 30);
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.byReason.reasonA, 15);
+  assert.equal(parsed.byReason.reasonB, 15);
+});
+
+test('mt5ShouldLogPullEvent only logs on signature change or heartbeat expiry', () => {
+  const phpCode = `
+require ${JSON.stringify(path.resolve(__dirname, '../api/mt5/common.php'))};
+$terminal = 'test-terminal-' . bin2hex(random_bytes(6));
+$results = [];
+$results[] = mt5ShouldLogPullEvent($terminal, 'sigA', 1000, 300);
+$results[] = mt5ShouldLogPullEvent($terminal, 'sigA', 1001, 300);
+$results[] = mt5ShouldLogPullEvent($terminal, 'sigB', 1002, 300);
+$results[] = mt5ShouldLogPullEvent($terminal, 'sigB', 1303, 300);
+echo json_encode($results);
+`;
+  const stdout = execFileSync('php', ['-r', phpCode], { encoding: 'utf8' });
+  const parsed = JSON.parse(stdout);
+  assert.deepEqual(parsed, [true, false, true, true]);
+});

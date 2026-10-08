@@ -96,27 +96,48 @@ $public = array_map(static fn(array $o): array => [
     'createdAt' => $o['createdAt'] ?? null,
 ], $orders);
 
-// Log EVERY poll, including empty ones. Previously only non-empty dispatches
-// were logged, so the "ok:true, count:0" failure mode left no server-side
-// trace at all and could not be distinguished from "no signals were ever
-// queued", "all orders are pinned to a different terminal", "every order is
-// already final", or "the queue file was reset". The census makes the reason
-// explicit on every single poll.
-mt5LogDiagnostic('pull.php', [
-    'event' => $public !== [] ? 'PULL_RESPONSE_DISPATCH' : 'PULL_RESPONSE_EMPTY',
-    'terminal' => $terminal !== '' ? $terminal : null,
-    'limit' => $limit,
+// Log pull.php diagnostics only when the queue state/reason summary changes
+// (plus a throttled heartbeat), and summarize the per-order skip list rather
+// than emitting one entry per retained order. Previously every poll was
+// logged in full; at the EA's ~2s default interval that produced ~43,200
+// entries per terminal per day — most of them identical "nothing changed"
+// reports — with no pruning path for the resulting log file.
+$notDispatchedSummary = mt5SummarizeNotDispatched($census['notDispatched']);
+$event = $public !== [] ? 'PULL_RESPONSE_DISPATCH' : 'PULL_RESPONSE_EMPTY';
+$logSignature = json_encode([
+    'event' => $event,
     'halted' => $halted,
-    'count' => count($public),
-    'queue' => $census,
-    'dispatchedOrderIds' => array_column($public, 'orderId'),
-    'mappedSymbols' => $public !== []
-        ? array_combine(
-            array_column($public, 'orderId'),
-            array_map(static fn(array $o) => $o['brokerSymbolHint'] ?? $o['symbol'], $public)
-        )
-        : [],
-]);
+    'byStatus' => $census['byStatus'],
+    'byTerminal' => $census['byTerminal'],
+    'notDispatchedByReason' => $notDispatchedSummary['byReason'],
+    'dispatchedCount' => count($public),
+], JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+if (mt5ShouldLogPullEvent($terminal, (string) $logSignature, $now)) {
+    mt5LogDiagnostic('pull.php', [
+        'event' => $event,
+        'terminal' => $terminal !== '' ? $terminal : null,
+        'limit' => $limit,
+        'halted' => $halted,
+        'count' => count($public),
+        'queue' => [
+            'totalOrders' => $census['totalOrders'],
+            'byStatus' => $census['byStatus'],
+            'byTerminal' => $census['byTerminal'],
+            'notDispatchedSample' => $notDispatchedSummary['sample'],
+            'notDispatchedTotal' => $notDispatchedSummary['total'],
+            'notDispatchedTruncated' => $notDispatchedSummary['truncated'],
+            'notDispatchedByReason' => $notDispatchedSummary['byReason'],
+        ],
+        'dispatchedOrderIds' => array_column($public, 'orderId'),
+        'mappedSymbols' => $public !== []
+            ? array_combine(
+                array_column($public, 'orderId'),
+                array_map(static fn(array $o) => $o['brokerSymbolHint'] ?? $o['symbol'], $public)
+            )
+            : [],
+    ]);
+}
 
 jsonResponse([
     'ok' => true,
