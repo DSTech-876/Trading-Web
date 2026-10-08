@@ -15567,7 +15567,7 @@ function buildTrade(confirmCandle, confirmIdx) {
   const granSec = getCurrentGranularitySec();
   const dynamicConfluenceMin = getDynamicMinConfluence(symbol, granSec, regime);
   if (minConfluenceEnabled) {
-    if (requiredConfluences.length > 0) {
+    if (Array.isArray(requiredConfluences) && requiredConfluences.length > 0) {
       const confGate = checkConfluenceGate();
       if (!confGate.pass) {
         addLog(`⚠ Trade REJECTED — ${confGate.reason}`);
@@ -17155,7 +17155,7 @@ function executeAutoTrade(signal, _capturedWs) {
   /* Dynamic quality gate by market regime + profile */
   if (minConfluenceEnabled && signal.entry != null) {
     const gateIdx = signal.candleIdx != null ? signal.candleIdx : candles.length - 1;
-    if (requiredConfluences.length > 0) {
+    if (Array.isArray(requiredConfluences) && requiredConfluences.length > 0) {
       const confGate = checkConfluenceGate(effectiveDir, signal.entry, gateIdx);
       if (!confGate.pass) {
         addLog(`⚠ Auto-trade skipped — ${confGate.reason}`);
@@ -19535,7 +19535,7 @@ function buildTelegramCaption() {
   if (candleInterpEnabled) filters.push("Candle Interp");
   if (gridScalperMAEnabled) filters.push(`Grid Scalper MA [${gridScalperMAStrategy === "bos" ? "BOS" : gridScalperMAStrategy === "triple_ma" ? "Triple MA" : "Price vs MA"}]`);
   /* Profit-Direction Constraints */
-  if (minConfluenceEnabled) filters.push(requiredConfluences.length > 0 ? `Required Confluences [${requiredConfluences.join(", ")}]` : `Min Confluence ≥${minConfluenceValue}`);
+  if (minConfluenceEnabled) filters.push((Array.isArray(requiredConfluences) && requiredConfluences.length > 0) ? `Required Confluences [${requiredConfluences.join(", ")}]` : `Min Confluence ≥${minConfluenceValue}`);
   if (doubleRetestEnabled) filters.push("Double Retest");
   if (confirmBarEnabled) filters.push("Confirm Bar");
   if (divergenceFilterEnabled) filters.push("Divergence");
@@ -24811,7 +24811,7 @@ function getDynamicMinConfluence(symbol, granSec, regime) {
   if (profile && Number.isFinite(profile.requiredConfluence)) {
     threshold = Math.max(threshold, profile.requiredConfluence);
   }
-  return Math.max(6, Math.min(16, threshold));
+  return Math.max(0, Math.min(16, threshold));
 }
 
 function requiresStrongBreakoutNow(symbol, granSec, regime) {
@@ -24905,7 +24905,7 @@ function computeVWAP() {
 }
 
 function checkConfluenceGate(overrideDir, overrideLevel, overrideCandleIdx) {
-  if (requiredConfluences.length > 0) {
+  if (Array.isArray(requiredConfluences) && requiredConfluences.length > 0) {
     const active = getActiveConfluenceFactors(overrideDir, overrideLevel, overrideCandleIdx);
     const missing = requiredConfluences.filter(f => !active.includes(f));
     return {
@@ -24924,7 +24924,7 @@ function checkConfluenceGate(overrideDir, overrideLevel, overrideCandleIdx) {
 
 function isConfluenceSufficient(overrideDir, overrideLevel, overrideCandleIdx) {
   if (!minConfluenceEnabled) return true;
-  if (requiredConfluences.length > 0) {
+  if (Array.isArray(requiredConfluences) && requiredConfluences.length > 0) {
     return checkConfluenceGate(overrideDir, overrideLevel, overrideCandleIdx).pass;
   }
   const score = computeConfluenceScore(overrideDir, overrideLevel, overrideCandleIdx);
@@ -29665,6 +29665,7 @@ function activatePanel(p) {
     /* Profit-Direction Constraints */
     minConfluenceEnabled    = f.minConfluenceEnabled;
     minConfluenceValue      = f.minConfluenceValue;
+    requiredConfluences     = Array.isArray(f.requiredConfluences) ? f.requiredConfluences.slice() : [];
     doubleRetestEnabled     = f.doubleRetestEnabled;
     confirmBarEnabled       = f.confirmBarEnabled;
     divergenceFilterEnabled = f.divergenceFilterEnabled;
