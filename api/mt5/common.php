@@ -721,6 +721,17 @@ function mt5PublicOrder(array $order): array
 /** Hard caps so the ledger can never grow the state file without bound. */
 const MT5_SIGNAL_LOG_MAX = 500;
 const MT5_EVENT_LOG_MAX = 1000;
+/**
+ * Every bridge-key-authenticated poll can supply an arbitrary, unvalidated
+ * `terminal` value, and pull.php keys its persistent `pullStats` map by that
+ * value verbatim. Without a bound, an unlimited number of distinct terminal
+ * keys can accumulate; because every mutation re-encodes the whole state
+ * file under the exclusive lock, an unbounded map would eventually slow or
+ * disrupt dispatch. Cap both the key length and the number of distinct
+ * terminals retained.
+ */
+const MT5_TERMINAL_KEY_MAX_LEN = 80;
+const MT5_PULL_STATS_MAX_TERMINALS = 50;
 
 /** Canonical lifecycle event names recorded in $state['events']. */
 const MT5_LIFECYCLE_EVENTS = [
@@ -765,6 +776,25 @@ function mt5RecordEvent(array &$state, string $event, array $context = [], ?int 
     if ($overflow > 0) {
         $state['events'] = array_slice($state['events'], $overflow);
     }
+}
+
+/**
+ * Computes the status a SIGNAL_CREATED/SIGNAL_REJECTED ledger entry should
+ * write, given the signal's current persisted status.
+ *
+ * SIGNAL_CREATED and SIGNAL_REJECTED are sent by the browser as independent
+ * fire-and-forget requests, so they can reach signal_log.php out of order
+ * (the EA/browser issues them close together but the HTTP requests race).
+ * Without this guard, a SIGNAL_CREATED that lands after a SIGNAL_REJECTED
+ * (or after signal.php already moved the signal to ORDERED) would regress
+ * the status back to ACCEPTED, causing the audit to omit the rejection and
+ * report the wrong root cause. A rejection always wins; creation must never
+ * move a signal backwards out of a status it already reached.
+ */
+function mt5NextSignalStatus(?string $existingStatus, bool $isRejection): string
+{
+    if ($isRejection) return 'REJECTED';
+    return in_array($existingStatus, ['REJECTED', 'ORDERED'], true) ? $existingStatus : 'ACCEPTED';
 }
 
 /**

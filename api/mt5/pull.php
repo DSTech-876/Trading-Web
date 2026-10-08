@@ -62,7 +62,12 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
             'orderId' => (string) ($order['orderId'] ?? ''),
             'symbol' => $order['symbol'] ?? null,
             'lot' => $order['lot'] ?? null,
-            'terminal' => $terminal !== '' ? $terminal : null,
+            // The terminal actually bound to the order, not merely the
+            // request parameter: a blank-terminal poll is allowed to
+            // dispatch an order that was already pinned to a terminal, and
+            // recording the request's blank value here would falsely wipe
+            // the assignment from the lifecycle event.
+            'terminal' => ($order['terminal'] ?? '') !== '' ? $order['terminal'] : null,
             'status' => 'DISPATCHED',
         ];
 
@@ -77,7 +82,7 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
     // audit trail this ledger exists for. Discrete PULL_REQUEST/PULL_RESPONSE/
     // ORDER_ASSIGNED events are therefore only recorded when a poll actually
     // dispatched something.
-    $terminalKey = $terminal !== '' ? $terminal : '(unassigned)';
+    $terminalKey = $terminal !== '' ? substr($terminal, 0, MT5_TERMINAL_KEY_MAX_LEN) : '(unassigned)';
     if (!isset($state['pullStats']) || !is_array($state['pullStats'])) $state['pullStats'] = [];
     $stats = is_array($state['pullStats'][$terminalKey] ?? null) ? $state['pullStats'][$terminalKey] : [];
     $state['pullStats'][$terminalKey] = [
@@ -89,6 +94,17 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
         'dispatchedCount' => ((int) ($stats['dispatchedCount'] ?? 0)) + count($out),
         'lastDispatchAt' => $out !== [] ? $now : ($stats['lastDispatchAt'] ?? null),
     ];
+    // Bound the number of distinct terminals retained: prune to the
+    // MT5_PULL_STATS_MAX_TERMINALS most recently active ones so an
+    // ever-growing stream of distinct terminal values cannot accumulate
+    // permanent keys in the state file.
+    if (count($state['pullStats']) > MT5_PULL_STATS_MAX_TERMINALS) {
+        uasort(
+            $state['pullStats'],
+            static fn(array $a, array $b): int => ($b['lastPullAt'] ?? 0) <=> ($a['lastPullAt'] ?? 0)
+        );
+        $state['pullStats'] = array_slice($state['pullStats'], 0, MT5_PULL_STATS_MAX_TERMINALS, true);
+    }
 
     if ($assigned !== []) {
         mt5RecordEvent($state, 'PULL_REQUEST', [

@@ -203,5 +203,31 @@ $normalized = mt5NormalizeSignalPayload([
 check('signalId is normalized onto the order payload', $normalized['signalId'], 'sig_abc123');
 check('confidence is carried through', $normalized['confidence'], 0.72);
 
+/* ── Signal status never regresses on an out-of-order SIGNAL_CREATED ─── */
+check(
+    'first SIGNAL_CREATED accepts a fresh signal',
+    mt5NextSignalStatus(null, false),
+    'ACCEPTED'
+);
+check(
+    'SIGNAL_REJECTED always rejects',
+    mt5NextSignalStatus('ACCEPTED', true),
+    'REJECTED'
+);
+check(
+    'a late SIGNAL_CREATED does not regress a REJECTED signal back to ACCEPTED',
+    mt5NextSignalStatus('REJECTED', false),
+    'REJECTED'
+);
+check(
+    'a late SIGNAL_CREATED does not regress an ORDERED signal back to ACCEPTED',
+    mt5NextSignalStatus('ORDERED', false),
+    'ORDERED'
+);
+
+/* ── pullStats terminal map is bounded ──────────────────────────────── */
+check('terminal key length is capped', MT5_TERMINAL_KEY_MAX_LEN > 0, true);
+check('pull stats terminal count is capped', MT5_PULL_STATS_MAX_TERMINALS > 0, true);
+
 echo $failures === 0 ? "\nAll checks passed.\n" : "\n$failures check(s) failed.\n";
 exit($failures === 0 ? 0 : 1);

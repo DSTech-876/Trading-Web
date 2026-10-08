@@ -52,7 +52,11 @@ $now = time();
 $halted = mt5IsHalted();
 $retryAfterSecs = 20;
 
-$state = mt5ReadState();
+// Read under the shared lock writers hold while truncating/rewriting the
+// state file, so this endpoint never observes an empty/partial in-flight
+// write (which would otherwise falsely report SIGNAL_GENERATION or preserve
+// a transient partial write as `.corrupt`).
+[$state, ] = mt5ReadStateLockedWithWatermark();
 $orders = is_array($state['orders'] ?? null) ? $state['orders'] : [];
 $signals = is_array($state['signals'] ?? null) ? $state['signals'] : [];
 $events = is_array($state['events'] ?? null) ? $state['events'] : [];
@@ -167,6 +171,24 @@ $exactTerminalMismatch = $terminal === '' ? [] : array_values(array_filter(
     static fn(string $t): bool => strcasecmp($t, $terminal) !== 0
 ));
 
+// Terminals actually capable of blocking dispatch: only orders still
+// QUEUED/DISPATCHED can be pulled at all, so a terminal pinned to a FILLED,
+// RECEIVED or other historical order must not be blamed for an empty queue.
+// pull.php compares with strict `!==`, so any inequality — including a
+// case-only difference such as "mt5-term-01" vs "MT5-TERM-01" — blocks it.
+$blockingTerminalTokens = [];
+foreach ($orders as $o) {
+    if (!is_array($o)) continue;
+    $status = (string) ($o['status'] ?? '');
+    if ($status !== 'QUEUED' && $status !== 'DISPATCHED') continue;
+    $t = trim((string) ($o['terminal'] ?? ''));
+    if ($t !== '') $blockingTerminalTokens[$t] = true;
+}
+$blockingTerminalMismatches = $terminal === '' ? [] : array_values(array_filter(
+    array_keys($blockingTerminalTokens),
+    static fn(string $t): bool => $t !== $terminal
+));
+
 // pull.php performs no SQL: the queue is a flock()-guarded JSON document.
 // This is the literal selection predicate it applies, reproduced so the
 // "exact query executed" question has a truthful answer.
@@ -251,8 +273,13 @@ foreach ($orderRows as $r) {
         'tp' => $r['tp'],
         'dispatched' => in_array('ORDER_ASSIGNED', $seen, true),
         'received_by_ea' => in_array('ORDER_RECEIVED', $seen, true),
-        'executed' => in_array('ORDER_EXECUTED', $seen, true),
-        'failed' => in_array('ORDER_FAILED', $seen, true),
+        // The 1,000-entry event ring can evict the lifecycle events that
+        // proved these outcomes (or pre-existing orders may never have had
+        // one logged at all). Fall back to the durable order status, which
+        // persists independently of the ring, so a persisted FILLED/REJECTED
+        // order is never misreported as not executed/not failed.
+        'executed' => in_array('ORDER_EXECUTED', $seen, true) || $r['status'] === 'FILLED',
+        'failed' => in_array('ORDER_FAILED', $seen, true) || $r['status'] === 'REJECTED',
         'broker_ticket' => $r['broker_ticket'],
         // The EA reports the MT5 retcode + description in the status message.
         'broker_message' => $r['message'],
@@ -306,7 +333,12 @@ $deliveredNotExecuted = array_values(array_map(
 
 /* ── Root-cause classification ──────────────────────────────────────── */
 $totalOrders = count($orderRows);
-$polled = $pullStats !== [];
+// Polling is per-terminal: pull.php keys pullStats by the request's own
+// terminal (or "(unassigned)" when blank). Checking $pullStats !== []
+// treats any OTHER terminal's poll history as proof this terminal polled,
+// which misclassifies a never-polled terminal as IN_FLIGHT instead of
+// EA_POLLING. Check the requested terminal's own key when one was supplied.
+$polled = $terminal !== '' ? isset($pullStats[$terminal]) : $pullStats !== [];
 if ($halted) {
     $stage = 'PULL_DISPATCH';
     $rootCause = 'MT5_TRADING_HALTED is set — pull.php suppresses all dispatch. ' . mt5HaltReason();
@@ -316,7 +348,7 @@ if ($halted) {
         . '(indicator/indicator.js); the chain breaks upstream of this API. Check that the indicator page is '
         . 'open and streaming, the user is logged in, and Execution Mode is "MT5 Bridge" (autoTradeExecutionMode '
         . '=== "mt5"); it defaults to "deriv", in which case nothing is ever queued for MT5.';
-} elseif ($totalOrders === 0) {
+} elseif ($totalOrders === 0 && $signalRows !== [] && count($discardedSignals) === count($signalRows)) {
     $stage = 'SIGNAL_FILTERS';
     $rootCause = sprintf(
         'Signals were generated (%d) but every one was discarded before an order could be created. '
@@ -324,15 +356,37 @@ if ($halted) {
         count($signalRows),
         $rejectionsByFilter !== [] ? (string) array_key_first($rejectionsByFilter) : 'unknown'
     );
+} elseif ($totalOrders === 0) {
+    // Some signals were accepted (not rejected by a filter) yet no order
+    // exists for them: the break is between the signal engine and
+    // signal.php, not a filter decision, so it must not be reported as
+    // SIGNAL_FILTERS, which would contradict the ACCEPTED signal rows.
+    $stage = 'SIGNAL_TO_ORDER_BREAK';
+    $rootCause = sprintf(
+        'Signals were generated (%d) and %d were accepted by the engine, but none resulted in a queued order. '
+            . 'The chain breaks between the signal engine and signal.php (request never sent, auth failure, '
+            . 'or an error in signal.php that was never reported back).',
+        count($signalRows),
+        count($signalRows) - count($discardedSignals)
+    );
+} elseif ($unrecognizedStatuses !== [] && $dispatchableNow === 0) {
+    $stage = 'PULL_DISPATCH';
+    $rootCause = sprintf(
+        'Order(s) have unrecognized status token(s) [%s]. pull.php only dispatches QUEUED/retryable-DISPATCHED '
+            . 'orders and only treats %s as final, so these orders are neither dispatchable nor final — they are '
+            . 'permanently stuck.',
+        implode(', ', $unrecognizedStatuses),
+        implode(', ', MT5_FINAL_STATUS)
+    );
 } elseif ($dispatchableNow === 0 && $queuedNotDelivered === [] && $deliveredNotExecuted === []) {
     $stage = 'NONE';
     $rootCause = 'Every order in the queue has reached a final status. An empty pull.php response is correct here.';
-} elseif ($exactTerminalMismatch !== [] && $dispatchableNow === 0) {
+} elseif ($blockingTerminalMismatches !== [] && $dispatchableNow === 0) {
     $stage = 'TERMINAL_BINDING';
     $rootCause = sprintf(
         'Orders exist but are pinned to terminal(s) [%s] while this request polls as "%s". pull.php matches '
-            . 'terminal exactly and case-sensitively, so they are invisible to this EA.',
-        implode(', ', $exactTerminalMismatch),
+            . 'terminal with strict equality (case-sensitive), so they are invisible to this EA.',
+        implode(', ', $blockingTerminalMismatches),
         $terminal
     );
 } elseif (!$polled) {
