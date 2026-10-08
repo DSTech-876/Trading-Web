@@ -85,6 +85,7 @@
       this.threshold = Number.isFinite(options.threshold) ? options.threshold : THRESHOLD;
       this.sameCandleRule = SAME_CANDLE_RULES.indexOf(options.sameCandleRule) >= 0 ? options.sameCandleRule : 'sl_first';
       this.persist = options.persist !== false;
+      this.serverSync = options.serverSync !== undefined ? !!options.serverSync : this.persist;
       this.onChange = options.onChange || null;
       this.watches = new Map();
       this.records = [];
@@ -262,8 +263,44 @@
       this.records.push(rec);
       if (this.records.length > MAX_RECORDS) this.records.shift();
       this._save();
+      this._sync(rec);
       if (typeof this.onChange === 'function') { try { this.onChange(rec); } catch (e) { /* ignore */ } }
       return rec;
+    }
+
+    _getAuthToken() {
+      if (typeof ITGuruAuth !== 'undefined' && ITGuruAuth && typeof ITGuruAuth.getToken === 'function') {
+        return ITGuruAuth.getToken() || '';
+      }
+      try { return sessionStorage.getItem('itguru_auth_token') || ''; } catch (e) { return ''; }
+    }
+
+    /** Persist a completed record server-side (best effort; local copy is kept regardless). */
+    async _sync(rec) {
+      if (!this.serverSync || typeof fetch !== 'function') return null;
+      const token = this._getAuthToken();
+      if (!token) return null;
+      try {
+        const r = await fetch('/api/trades/post_sl_recovery', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify(rec)
+        });
+        return r.ok ? r.json() : null;
+      } catch (e) { return null; }
+    }
+
+    /** Fetch server-side per-strategy stats (all devices / sessions). */
+    async fetchServerStats() {
+      if (typeof fetch !== 'function') return [];
+      try {
+        const r = await fetch('/api/trades/post_sl_recovery', {
+          headers: { 'Authorization': 'Bearer ' + this._getAuthToken() }
+        });
+        if (!r.ok) return [];
+        const data = await r.json();
+        return Array.isArray(data.stats) ? data.stats : [];
+      } catch (e) { return []; }
     }
 
     /** Force-complete all in-flight watches (e.g. for tests or shutdown). */
