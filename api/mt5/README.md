@@ -342,3 +342,102 @@ operating this bridge:
   queue. Pin `TMPDIR`/`sys_temp_dir` to a shared, persistent path in that case.
 - The file is also subject to OS temp reaping. A reaped or truncated file is reported as
   `STATE_CORRUPT` rather than silently resetting the queue.
+
+---
+
+## 8) Signal ledger — `POST /api/mt5/signal_log.php`
+
+The signal engine runs **in the browser** (`indicator/indicator.js`). Before this endpoint existed, a
+signal that was generated and then discarded by one of the client-side risk filters left no
+server-side trace whatsoever, so `pull.php` returning `count: 0` was indistinguishable from "no
+signal ever fired". `executeAutoTrade()` and `submitMt5BridgeTrade()` now mirror two events here
+(fire-and-forget; a logging failure never blocks or alters execution, and nothing is sent while
+Execution Mode is `deriv`).
+
+**Headers**
+- `Authorization: ******
+
+**Request**
+```json
+{
+  "event": "SIGNAL_REJECTED",
+  "signalId": "sig_1710000000_12_frxEURUSD_breakout",
+  "symbol": "frxEURUSD",
+  "direction": "BUY",
+  "confidence": 0.72,
+  "source": "breakout",
+  "strategyName": "MyStrategy",
+  "entry": 1.085,
+  "sl": 1.083,
+  "tp": 1.089,
+  "reason": "confluence filter: dynamic confluence 2/4 (RANGING)"
+}
+```
+
+- `event` is `SIGNAL_CREATED` or `SIGNAL_REJECTED`. `reason` is required for `SIGNAL_REJECTED` and is
+  classified into an audited filter bucket (confluence / confidence / spread / ATR / cooldown /
+  duplicate protection / daily loss protection / account protection / session filter / …) by
+  `mt5ClassifyRejection()`.
+- Batch form: `{"entries": [ … ]}`.
+- `signalId` is sanitized to `[A-Za-z0-9_.:-]{1,80}` and is the join key between the signal ledger and
+  the order queue. `signal.php` accepts the same `signalId` on the order payload.
+
+**Response**
+```json
+{ "ok": true, "recorded": 1, "validationErrors": [] }
+```
+
+### Permanent lifecycle log
+
+Every stage now appends a bounded, structured record to the state file (`MT5_LIFECYCLE_EVENTS` in
+`api/mt5/common.php`):
+
+| Event | Written by |
+| --- | --- |
+| `SIGNAL_CREATED`, `SIGNAL_REJECTED` | `signal_log.php` (client filters) and `signal.php` (payload validation) |
+| `ORDER_CREATED`, `ORDER_QUEUED` | `signal.php` |
+| `PULL_REQUEST`, `ORDER_ASSIGNED`, `PULL_RESPONSE` | `pull.php` |
+| `ORDER_RECEIVED`, `ORDER_EXECUTED`, `ORDER_FAILED` | `status.php` (EA callbacks) |
+
+`ORDER_SEND_ATTEMPT` and the raw `TRADE_RETCODE` / description are terminal-side facts and stay in the
+EA's own CSV log (`ORDER_SEND_REQUEST` / `BROKER_RESPONSE` / `ORDER_REJECTED` in
+`ITGuruMt5Bridge.mq5`); the outcome reaches the server as `ORDER_EXECUTED` / `ORDER_FAILED` with the
+broker message attached.
+
+`pull.php` deliberately does **not** write a ledger entry per poll — at the EA's 2 s default interval
+that would evict every `SIGNAL_*`/`ORDER_*` record from the bounded ring within minutes. Instead it
+maintains per-terminal counters (`pullStats`: `firstPullAt`, `lastPullAt`, `pollCount`,
+`emptyPollCount`, `dispatchedCount`, `lastDispatchAt`) that prove the EA is polling, and only emits
+discrete `PULL_REQUEST`/`ORDER_ASSIGNED`/`PULL_RESPONSE` events when a poll actually dispatched work.
+
+---
+
+## 9) Full execution audit — `GET|POST /api/mt5/audit.php`
+
+One call that answers "why are trades not reaching MT5?" from the actual persisted state.
+
+**Auth**: the bridge key (header `X-MT5-BRIDGE-KEY`, or `bridge_key` query/body field) — same secret
+the EA uses. Never expose this endpoint unauthenticated; it dumps queue internals.
+
+```http
+GET /api/mt5/audit.php?bridge_key=<MT5_BRIDGE_KEY>&terminal=MT5-TERM-01
+```
+
+**Response sections**
+
+| Section | Contents |
+| --- | --- |
+| `rootCause` | `stage` (`SIGNAL_GENERATION`, `SIGNAL_FILTERS`, `TERMINAL_BINDING`, `PULL_DISPATCH`, `EA_POLLING`, `IN_FLIGHT`, `NONE`) + human-readable detail |
+| `storage` | The state-file path, and an explicit note that there is **no SQL** to inspect |
+| `signals` | `signal_id`, `symbol`, `direction`, `confidence`, `created_time`, `status`, `order_id`, plus how many were discarded |
+| `orderQueue` | `signal_id`, `order_id`, `status`, `terminal`, `symbol`, `volume`, entry/SL/TP, attempts, broker ticket |
+| `filters` | Rejection counts per filter bucket and a `signal_id` → `rejection_reason` row per discarded signal |
+| `pull` | The literal selection predicate, `recordsFound` vs `recordsReturnedIfPolledNow`, the status/terminal tokens actually present in the queue, unrecognized and **case-only** status/terminal mismatches, and the per-order skip reasons |
+| `bridge` | Per-order terminal assignment and any order pinned to a different terminal |
+| `derivValidation` | Per-order symbol/volume/SL/TP/order-type compliance; terminal-side facts (symbol existence, margin, permissions) are flagged as EA-reported |
+| `ea` | `pullStats` per terminal — proof the EA polled and what it was given |
+| `execution` | Per order: dispatched / received by EA / executed / failed, broker ticket and broker message |
+| `discrepancies` | `signalsWithoutOrders`, `ordersWithoutSignals`, `queuedNotDelivered`, `deliveredNotExecuted` |
+| `events` | The raw permanent lifecycle log |
+
+Regression coverage: `php tests/test_mt5_audit_ledger.php`.
