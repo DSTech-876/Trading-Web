@@ -110,7 +110,7 @@ function hintFor(symbol) {
 }
 
 const representativeSymbols = [
-  ['stpRNG', 'Step Index 100'],
+  ['stpRNG', 'Step Index'],
   ['stpRNG4', 'Step Index 400'],
   ['stpRNG5', 'Step Index 500'],
   ['R_10', 'Volatility 10 Index'],

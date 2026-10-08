@@ -747,6 +747,15 @@ bool ResolveBrokerSymbol(string requested, string brokerSymbolHint, string order
       LogEvent("WARN","SYMBOL_RESOLVE",orderId,"requested="+requested+" serverHint="+brokerSymbolHint+" not selectable");
    }
 
+   // Some brokers name Step Index 100 "Step Index 100" instead of plain "Step Index"
+   if(brokerSymbolHint=="Step Index" && SymbolSelect("Step Index 100",true))
+   {
+      LogEvent("INFO","SYMBOL_RESOLVE",orderId,"requested="+requested+" mapped=Step Index 100 method=stepIndex100Fallback");
+      SymbolResolveCachePut(requested, "Step Index 100");
+      resolved="Step Index 100";
+      return true;
+   }
+
    // 3. Manual alias map
    string alias = LookupSymbolAlias(requested);
    if(alias!="" && SymbolSelect(alias,true))
