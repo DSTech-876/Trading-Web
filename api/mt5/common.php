@@ -48,6 +48,12 @@ function mt5WithStateLock(callable $callback): mixed
     $raw = stream_get_contents($fh);
     $state = mt5DecodeState(is_string($raw) ? $raw : '', $path);
 
+    if (!empty($state['__corrupt'])) {
+        flock($fh, LOCK_UN);
+        fclose($fh);
+        throw new RuntimeException('Refusing to mutate MT5 bridge state: stored payload is corrupt');
+    }
+
     $result = $callback($state);
 
     $state['updatedAt'] = time();
@@ -88,14 +94,16 @@ function mt5DecodeState(string $raw, string $path): array
         if (is_array($decoded)) {
             $state = $decoded;
         } else {
-            @copy($path, $path . '.corrupt');
+            $preserved = @copy($path, $path . '.corrupt');
             mt5LogDiagnostic('state', [
                 'event' => 'STATE_CORRUPT',
                 'path' => $path,
                 'bytes' => strlen($raw),
                 'jsonError' => json_last_error_msg(),
-                'preservedCopy' => $path . '.corrupt',
+                'preservedCopy' => $preserved ? ($path . '.corrupt') : null,
+                'preservationSucceeded' => $preserved,
             ]);
+            $state['__corrupt'] = true;
         }
     }
     if (!isset($state['orders']) || !is_array($state['orders'])) $state['orders'] = [];
@@ -114,6 +122,49 @@ function mt5ReadState(): array
     }
     $raw = @file_get_contents($path);
     return mt5DecodeState(is_string($raw) ? $raw : '', $path);
+}
+
+/**
+ * Reads the bridge state under a shared lock and returns a watermark
+ * timestamp captured while that lock is still held, so the returned snapshot
+ * and watermark are ordered with any concurrent writer.
+ *
+ * `mt5WithStateLock()` writers hold an exclusive lock while they mutate
+ * `updatedAt`-stamped orders and flush the file. If a reader captures its own
+ * "now" before acquiring any lock (or reads the file without one at all), a
+ * writer can land in between the timestamp capture and the actual read —
+ * or even in the same second — making the returned watermark newer than the
+ * snapshot it is paired with. A later poll that filters on `since > that
+ * watermark` would then permanently skip the transition it raced with.
+ * Acquiring a shared lock first forces us to wait out any in-flight writer,
+ * and capturing the timestamp while still holding that lock guarantees no
+ * writer can sneak a state change in before we report our watermark.
+ *
+ * @return array{0: array<string,mixed>, 1: int} [$state, $watermark]
+ */
+function mt5ReadStateLockedWithWatermark(): array
+{
+    $path = mt5StoragePath();
+    $fh = fopen($path, 'c+');
+    if ($fh === false) {
+        throw new RuntimeException('Cannot open MT5 bridge storage file');
+    }
+    if (!flock($fh, LOCK_SH)) {
+        fclose($fh);
+        throw new RuntimeException('Cannot lock MT5 bridge storage file');
+    }
+
+    $raw = stream_get_contents($fh);
+    // Captured while the shared lock is held: no exclusive-lock writer can
+    // be mutating `updatedAt` concurrently, so this timestamp and the raw
+    // snapshot above are consistently ordered.
+    $watermark = max(0, time() - 1);
+
+    flock($fh, LOCK_UN);
+    fclose($fh);
+
+    $state = mt5DecodeState(is_string($raw) ? $raw : '', $path);
+    return [$state, $watermark];
 }
 
 /**
@@ -177,6 +228,81 @@ function mt5QueueCensus(array $orders, array $dispatchedIds, string $terminal, i
         'byTerminal' => $byTerminal,
         'notDispatched' => $skipped,
     ];
+}
+
+/**
+ * Collapses a `notDispatched` list into a bounded summary for logging: a
+ * capped sample of individual orders plus counts grouped by skip reason, so
+ * a queue with thousands of retained orders still produces a log line of
+ * roughly constant size instead of one entry per order.
+ *
+ * @param list<array<string,mixed>> $skipped
+ * @return array{sample: list<array<string,mixed>>, total: int, truncated: bool, byReason: array<string,int>}
+ */
+function mt5SummarizeNotDispatched(array $skipped, int $maxSample = 20): array
+{
+    $byReason = [];
+    foreach ($skipped as $row) {
+        $reason = (string) ($row['reason'] ?? 'unknown');
+        $byReason[$reason] = ($byReason[$reason] ?? 0) + 1;
+    }
+    return [
+        'sample' => array_slice($skipped, 0, $maxSample),
+        'total' => count($skipped),
+        'truncated' => count($skipped) > $maxSample,
+        'byReason' => $byReason,
+    ];
+}
+
+/**
+ * Gates pull.php's detailed diagnostic log so a steady-state queue does not
+ * produce a log line on every poll. The EA's default 2s poll interval would
+ * otherwise emit roughly 43,200 entries per terminal per day even when
+ * nothing changed between polls, with no pruning path for the resulting log
+ * file. A per-terminal signature (built from the event type, status/terminal
+ * breakdown, and skip-reason counts) is persisted between requests; a
+ * detailed log is only emitted when that signature changes or when
+ * `$heartbeatSecs` has elapsed since the last log, so operators still get a
+ * periodic "still alive" entry even in a fully idle steady state.
+ */
+function mt5ShouldLogPullEvent(string $terminal, string $signature, int $now, int $heartbeatSecs = 300): bool
+{
+    $path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR
+        . 'itguru_mt5_pull_log_state_' . sha1(__DIR__) . '.json';
+    $fh = fopen($path, 'c+');
+    if ($fh === false) {
+        return true;
+    }
+    if (!flock($fh, LOCK_EX)) {
+        fclose($fh);
+        return true;
+    }
+
+    $raw = stream_get_contents($fh);
+    $all = is_string($raw) && $raw !== '' ? json_decode($raw, true) : null;
+    if (!is_array($all)) $all = [];
+
+    $key = $terminal !== '' ? $terminal : '(unassigned)';
+    $prev = $all[$key] ?? null;
+    $changed = !is_array($prev) || (($prev['signature'] ?? null) !== $signature);
+    $stale = !is_array($prev) || ($now - (int) ($prev['loggedAt'] ?? 0)) >= $heartbeatSecs;
+    $shouldLog = $changed || $stale;
+
+    if ($shouldLog) {
+        $all[$key] = ['signature' => $signature, 'loggedAt' => $now];
+        $encoded = json_encode($all, JSON_UNESCAPED_SLASHES);
+        if ($encoded !== false) {
+            ftruncate($fh, 0);
+            rewind($fh);
+            fwrite($fh, $encoded);
+            fflush($fh);
+        }
+    }
+
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return $shouldLog;
 }
 
 /**

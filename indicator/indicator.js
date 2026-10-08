@@ -16624,8 +16624,22 @@ async function pollMt5BridgeStatus() {
       /* A status poll that keeps failing means MT5 orders never leave
          slot.activeTrades, which silently caps every symbol at
          maxConcurrentTrades and stops all further bridge dispatch. Surface it
-         instead of returning quietly. */
-      noteMt5StatusPollFailure(`HTTP ${resp.status}${data?.error ? ` — ${data.error}` : ""}`);
+         instead of returning quietly. Distinguish a non-OK HTTP status from a
+         200 whose body is unparseable or missing the expected shape — both
+         previously reported as plain "HTTP 200", which hid the real protocol
+         failure and made the diagnostic useless when the endpoint itself was
+         healthy but returned something unexpected. */
+      let reason;
+      if (!resp.ok) {
+        reason = `HTTP ${resp.status}${data?.error ? ` — ${data.error}` : ""}`;
+      } else if (!data) {
+        reason = `HTTP ${resp.status} but response body was not valid JSON`;
+      } else if (!data.ok) {
+        reason = `HTTP ${resp.status} ok:false${data.error ? ` — ${data.error}` : ""}`;
+      } else {
+        reason = `HTTP ${resp.status} ok:true but "orders" field is missing or not an array`;
+      }
+      noteMt5StatusPollFailure(reason);
       return;
     }
     mt5StatusPollFailures = 0;
