@@ -89,6 +89,7 @@
       this.onChange = options.onChange || null;
       this.watches = new Map();
       this.records = [];
+      this._lastAuthToken = this._getAuthToken();
       this._load();
     }
 
@@ -118,8 +119,9 @@
 
     _load() {
       if (!this.persist) return;
+      if (this._checkAuthChange()) this.records = [];
       try {
-        const raw = root.localStorage && root.localStorage.getItem(STORAGE_KEY);
+        const raw = root.localStorage && root.localStorage.getItem(this._getStorageKey());
         const arr = raw ? JSON.parse(raw) : [];
         if (Array.isArray(arr)) this.records = arr.slice(-MAX_RECORDS);
       } catch (e) { /* ignore corrupt storage */ }
@@ -127,7 +129,8 @@
 
     _save() {
       if (!this.persist) return;
-      try { root.localStorage && root.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.records.slice(-MAX_RECORDS))); }
+      if (this._checkAuthChange()) this.records = [];
+      try { root.localStorage && root.localStorage.setItem(this._getStorageKey(), JSON.stringify(this.records.slice(-MAX_RECORDS))); }
       catch (e) { /* storage unavailable */ }
     }
 
@@ -273,6 +276,27 @@
         return ITGuruAuth.getToken() || '';
       }
       try { return sessionStorage.getItem('itguru_auth_token') || ''; } catch (e) { return ''; }
+    }
+
+    _getStorageKey() {
+      const token = this._getAuthToken();
+      if (!token) return STORAGE_KEY + '_anon';
+      try {
+        const hash = Array.from(new TextEncoder().encode(token))
+          .reduce((h, c) => ((h << 5) - h) + c, 0)
+          .toString(36)
+          .substring(1, 9);
+        return STORAGE_KEY + '_' + hash;
+      } catch (e) { return STORAGE_KEY + '_unknown'; }
+    }
+
+    _checkAuthChange() {
+      const currentToken = this._getAuthToken();
+      if (currentToken !== this._lastAuthToken) {
+        this._lastAuthToken = currentToken;
+        return true;
+      }
+      return false;
     }
 
     /** Persist a completed record server-side (best effort; local copy is kept regardless). */

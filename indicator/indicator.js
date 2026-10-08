@@ -9331,11 +9331,11 @@ function sweepOppositeTradeTracking(candle) {
     if (!Array.isArray(history)) continue;
     for (const s of history) {
       if (!s || s.result !== "LOSS" || s._oppTracked) continue;
-      s._oppTracked = true;
-      if (_historicalProcessing) continue;
       if (baseline && recovery && Number.isFinite(Number(s._slHitEpoch))) {
         recovery.backfill(s, Number(s._slHitEpoch), candles, focusedPanelSymbol);
       }
+      s._oppTracked = true;
+      if (_historicalProcessing) continue;
       if (baseline) continue;
       const reason = String(s.terminal_reason || "STOP_LOSS").toUpperCase();
       if (reason.indexOf("STOP_LOSS") !== 0) continue;
