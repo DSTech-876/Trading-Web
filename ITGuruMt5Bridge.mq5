@@ -26,15 +26,15 @@ input long   InpMagic           = 26051701;
 input bool   InpOnlyChartSymbol = false;  // true = skip orders not matching current chart symbol
 
 input string Inp_RiskHeader     = "===== Risk Controls =====";  // (label)
-input double InpMaxLotSize      = 1.0;    // hard cap, overrides any server-supplied lot
-input int    InpMaxTradesPerSymbol = 3;   // max concurrent open positions+pending per symbol
+input double InpMaxLotSize      = 0.01;    // hard cap, overrides any server-supplied lot
+input int    InpMaxTradesPerSymbol = 4;   // max concurrent open positions+pending per symbol
 input double InpMaxTotalExposureLots = 5.0; // sum of volumes across all symbols/positions
 input bool   InpAllowHedging     = false; // false = reject new signal that conflicts with an opposite open position
 input double InpMaxSpreadPoints  = 30;    // reject if current spread exceeds this many points
 input int    InpMaxSlippagePoints= 20;    // deviation passed to OrderSend
 input int    InpMaxSignalAgeSecs = 90;    // reject signals older than this (staleness protection)
 input double InpMarginBufferPct  = 20.0;  // require this % extra free margin above computed requirement
-input double InpDailyLossLimitPct= 85.0;   // halt new trades if daily realized loss exceeds this % of day-start equity
+input double InpDailyLossLimitPct= 80.0;   // halt new trades if daily realized loss exceeds this % of day-start equity
 input bool   InpUseSessionFilter = false; // restrict trading to a server-time hour window
 input int    InpSessionStartHour = 0;     // 0-23, inclusive
 input int    InpSessionEndHour   = 23;    // 0-23, inclusive
