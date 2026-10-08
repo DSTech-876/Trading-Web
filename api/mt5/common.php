@@ -108,6 +108,8 @@ function mt5DecodeState(string $raw, string $path): array
     }
     if (!isset($state['orders']) || !is_array($state['orders'])) $state['orders'] = [];
     if (!isset($state['idempotency']) || !is_array($state['idempotency'])) $state['idempotency'] = [];
+    if (!isset($state['signals']) || !is_array($state['signals'])) $state['signals'] = [];
+    if (!isset($state['events']) || !is_array($state['events'])) $state['events'] = [];
     return $state;
 }
 
@@ -118,7 +120,7 @@ function mt5ReadState(): array
 {
     $path = mt5StoragePath();
     if (!is_file($path)) {
-        return ['orders' => [], 'idempotency' => []];
+        return ['orders' => [], 'idempotency' => [], 'signals' => [], 'events' => []];
     }
     $raw = @file_get_contents($path);
     return mt5DecodeState(is_string($raw) ? $raw : '', $path);
@@ -635,6 +637,14 @@ function mt5NormalizeSignalPayload(array $body): array
     $source = trim((string) ($body['source'] ?? 'breakout'));
     $strategyName = trim((string) ($body['strategyName'] ?? ''));
     $idempotencyKey = trim((string) ($body['idempotencyKey'] ?? ''));
+    // Correlation id minted by the signal engine when the signal was created
+    // (see logMt5SignalEvent() in indicator/indicator.js). Carrying it onto
+    // the order is what makes "signals without orders" / "orders without
+    // signals" answerable in audit.php instead of guesswork.
+    $signalId = mt5SanitizeSignalId((string) ($body['signalId'] ?? ''));
+    $confidence = isset($body['confidence']) && is_numeric($body['confidence'])
+        ? (float) $body['confidence']
+        : null;
 
     // Client may pass an explicit brokerSymbolHint; otherwise fall back to the
     // admin-configured MT5_SYMBOL_MAP so the EA gets an automatic resolution
@@ -660,6 +670,8 @@ function mt5NormalizeSignalPayload(array $body): array
         'source' => $source,
         'strategyName' => $strategyName,
         'idempotencyKey' => $idempotencyKey,
+        'signalId' => $signalId,
+        'confidence' => $confidence,
     ];
 }
 
@@ -689,6 +701,132 @@ function mt5PublicOrder(array $order): array
         'lastStatusTerminal' => $order['lastStatusTerminal'] ?? null,
         'createdAt' => $order['createdAt'] ?? null,
         'updatedAt' => $order['updatedAt'] ?? null,
+        'signalId' => ($order['signalId'] ?? '') !== '' ? $order['signalId'] : null,
     ];
+}
+
+/* ===================================================================== *
+ * Signal + lifecycle ledger
+ * ---------------------------------------------------------------------
+ * The MT5 bridge has no database table: queue state is a single JSON file
+ * (mt5StoragePath()). Before this ledger existed, the only record that a
+ * signal had ever been *considered* lived in the browser's in-page log —
+ * so when pull.php returned `count: 0` there was no server-side evidence
+ * to distinguish "no signal fired", "signal fired but a client-side risk
+ * filter rejected it", and "order was created but pinned to another
+ * terminal". Every stage of the pipeline now appends a bounded, structured
+ * record here, and audit.php renders them as the end-to-end report.
+ * ===================================================================== */
+
+/** Hard caps so the ledger can never grow the state file without bound. */
+const MT5_SIGNAL_LOG_MAX = 500;
+const MT5_EVENT_LOG_MAX = 1000;
+
+/** Canonical lifecycle event names recorded in $state['events']. */
+const MT5_LIFECYCLE_EVENTS = [
+    'SIGNAL_CREATED',
+    'SIGNAL_REJECTED',
+    'ORDER_CREATED',
+    'ORDER_QUEUED',
+    'ORDER_ASSIGNED',
+    'PULL_REQUEST',
+    'PULL_RESPONSE',
+    'ORDER_RECEIVED',
+    'ORDER_SEND_ATTEMPT',
+    'ORDER_EXECUTED',
+    'ORDER_FAILED',
+];
+
+/**
+ * Signal ids are used as array keys in the state file and echoed back in
+ * audit responses, so constrain them to a safe, bounded character set.
+ */
+function mt5SanitizeSignalId(string $raw): string
+{
+    $clean = preg_replace('/[^A-Za-z0-9_.:-]/', '', trim($raw)) ?? '';
+    return substr($clean, 0, 80);
+}
+
+/**
+ * Appends a lifecycle event to the in-state ring buffer. Must be called from
+ * inside mt5WithStateLock() so the append is serialized with queue mutations.
+ *
+ * @param array<string,mixed> $state
+ * @param array<string,mixed> $context
+ */
+function mt5RecordEvent(array &$state, string $event, array $context = [], ?int $now = null): void
+{
+    if (!isset($state['events']) || !is_array($state['events'])) $state['events'] = [];
+    $state['events'][] = [
+        'event' => $event,
+        'ts' => $now ?? time(),
+    ] + $context;
+    $overflow = count($state['events']) - MT5_EVENT_LOG_MAX;
+    if ($overflow > 0) {
+        $state['events'] = array_slice($state['events'], $overflow);
+    }
+}
+
+/**
+ * Records (or updates) a signal in the signal ledger. Must be called from
+ * inside mt5WithStateLock().
+ *
+ * @param array<string,mixed> $state
+ * @param array<string,mixed> $signal
+ */
+function mt5RecordSignal(array &$state, string $signalId, array $signal): void
+{
+    if ($signalId === '') return;
+    if (!isset($state['signals']) || !is_array($state['signals'])) $state['signals'] = [];
+
+    $existing = is_array($state['signals'][$signalId] ?? null) ? $state['signals'][$signalId] : [];
+    // array_filter drops nulls so a later partial update (e.g. the order link)
+    // never erases fields captured at signal-creation time.
+    $state['signals'][$signalId] = array_merge(
+        $existing,
+        array_filter($signal, static fn($v): bool => $v !== null)
+    );
+
+    $overflow = count($state['signals']) - MT5_SIGNAL_LOG_MAX;
+    if ($overflow > 0) {
+        $state['signals'] = array_slice($state['signals'], $overflow, null, true);
+    }
+}
+
+/**
+ * Normalizes a free-text client rejection reason into one of the audited
+ * filter buckets so rejections can be counted per filter, not per message.
+ */
+function mt5ClassifyRejection(string $reason): string
+{
+    $r = strtolower($reason);
+    $map = [
+        'confluence' => 'confluence filter',
+        'confidence' => 'confidence filter',
+        'spread' => 'spread filter',
+        'atr' => 'ATR filter',
+        'cooldown' => 'cooldown filter',
+        'duplicate' => 'duplicate protection',
+        'daily loss' => 'daily loss protection',
+        'session' => 'session filter',
+        'hedging' => 'hedging protection',
+        'opposing' => 'hedging protection',
+        'max concurrent' => 'max concurrent trades',
+        'frequency' => 'trade frequency cap',
+        'regime' => 'regime gating',
+        'paused' => 'strategy pause',
+        'exposure' => 'correlated exposure',
+        'c-setup' => 'weighted confluence tier',
+        'sl/tp' => 'SL/TP validation',
+        'entry/sl/tp' => 'SL/TP validation',
+        'risk config' => 'account protection',
+        'not authorized' => 'account protection',
+        'log in' => 'account protection',
+        'session limit' => 'account protection',
+    ];
+    foreach ($map as $needle => $bucket) {
+        if (str_contains($r, $needle)) return $bucket;
+    }
+    return 'other';
 }
 
