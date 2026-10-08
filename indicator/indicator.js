@@ -29403,6 +29403,10 @@ function createPanelState(symbol) {
     atrValue: 0,
     atrValues: [],
     rsiValues: [],
+    macdLine: [], macdSignal: [], macdHistogram: [],
+    bbUpper: [], bbLower: [], bbMiddle: [], bbWidth: [],
+    adxValue: 0, adxDiPlus: 0, adxDiMinus: 0,
+    stochK: [], stochD: [],
     trailingSL: null,
     partialTpHit: false,
     teslaT1Hit: false,
@@ -29510,18 +29514,18 @@ function activatePanel(p) {
   atrValue       = p.atrValue;
   atrValues      = p.atrValues;
   rsiValues      = p.rsiValues;
-  macdLine       = p.macdLine;
-  macdSignal     = p.macdSignal;
-  macdHistogram  = p.macdHistogram;
-  bbUpper        = p.bbUpper;
-  bbLower        = p.bbLower;
-  bbMiddle       = p.bbMiddle;
-  bbWidth        = p.bbWidth;
-  adxValue       = p.adxValue;
-  adxDiPlus      = p.adxDiPlus;
-  adxDiMinus     = p.adxDiMinus;
-  stochK         = p.stochK;
-  stochD         = p.stochD;
+  macdLine       = p.macdLine || [];
+  macdSignal     = p.macdSignal || [];
+  macdHistogram  = p.macdHistogram || [];
+  bbUpper        = p.bbUpper || [];
+  bbLower        = p.bbLower || [];
+  bbMiddle       = p.bbMiddle || [];
+  bbWidth        = p.bbWidth || [];
+  adxValue       = p.adxValue || 0;
+  adxDiPlus      = p.adxDiPlus || 0;
+  adxDiMinus     = p.adxDiMinus || 0;
+  stochK         = p.stochK || [];
+  stochD         = p.stochD || [];
   emaMTF         = p.emaMTF || [];
   vwapValues     = p.vwapValues || [];
   retestCount    = p.retestCount || 0;
