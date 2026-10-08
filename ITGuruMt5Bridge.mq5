@@ -140,6 +140,10 @@ string JsonEscape(string s)
    StringReplace(s, "\r", "\\r");
    StringReplace(s, "\n", "\\n");
    StringReplace(s, "\t", "\\t");
+   // Remaining control characters (< 0x20) are illegal raw in JSON strings
+   // ("Control character error"); replace them with spaces.
+   for(int c=1;c<32;c++)
+      StringReplace(s, ShortToString((ushort)c), " ");
    return s;
 }
 
