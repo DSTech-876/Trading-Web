@@ -9324,6 +9324,7 @@ function sweepOppositeTradeTracking(candle) {
     orderblockHistory, candleInterpHistory, po3_4hHistory, breakerBlockHistory,
     oteGoldenPocketHistory, orbHistory, crtTbsHistory, liveScalpHistory
   ];
+  const recovery = typeof window !== "undefined" ? window.postSLRecoveryAnalyzer : null;
   const baseline = !_oppTrackerBaselined;
   _oppTrackerBaselined = true;
   for (const history of histories) {
@@ -9335,9 +9336,19 @@ function sweepOppositeTradeTracking(candle) {
       const reason = String(s.terminal_reason || "STOP_LOSS").toUpperCase();
       if (reason.indexOf("STOP_LOSS") !== 0) continue;
       tracker.register(s, Number(candle.epoch), candles);
+      if (recovery) recovery.register(s, Number(candle.epoch), candles);
     }
   }
   tracker.onCandle(candle, focusedPanelSymbol);
+  if (recovery) {
+    recovery.onCandle(candle, focusedPanelSymbol);
+    if (!recovery.onChange) {
+      recovery.onChange = () => {
+        recovery.renderDashboard(document.getElementById("tradeRecoveryAnalytics"));
+        recovery.getAlerts().forEach(a => addLog(`📊 ${a}`));
+      };
+    }
+  }
 }
 
 /**
