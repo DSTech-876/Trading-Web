@@ -18,7 +18,7 @@
 //================================= Inputs ===================================
 
 input string InpBaseUrl         = "https://trading.dsitservicesja.com"; // no trailing slash
-input string InpBridgeKey       = "";    // REQUIRED: set a strong secret, matches server MT5_BRIDGE_KEY. Never commit real keys.
+input string InpBridgeKey       = "4be5ae08c7d9a41d4fdc9d87a9280e4f1dda3468dbc04d3d76969f3c2e4dfa79";    // REQUIRED: set a strong secret, matches server MT5_BRIDGE_KEY. Never commit real keys.
 input string InpTerminalId      = "MT5-TERM-01";
 input int    InpPollSeconds     = 2;      // base polling interval
 input int    InpHttpTimeoutMs   = 15000;
