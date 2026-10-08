@@ -19,6 +19,11 @@ declare(strict_types=1);
  *   php tests/test_mt5_audit_ledger.php
  */
 
+// MT5_SYMBOL_MAP must be in place *before* common.php's mt5SymbolMap()
+// caches it on first use, so a mapped symbol's override and an unmapped
+// symbol's client-hint fallback can both be asserted below.
+putenv('MT5_SYMBOL_MAP=' . json_encode(['frxEURUSD' => 'Euro vs US Dollar']));
+
 require_once __DIR__ . '/../api/mt5/common.php';
 
 $failures = 0;
@@ -202,6 +207,32 @@ $normalized = mt5NormalizeSignalPayload([
 ]);
 check('signalId is normalized onto the order payload', $normalized['signalId'], 'sig_abc123');
 check('confidence is carried through', $normalized['confidence'], 0.72);
+
+/* ── brokerSymbolHint precedence: MT5_SYMBOL_MAP vs client hint ─────── */
+check(
+    'MT5_SYMBOL_MAP overrides a conflicting client-supplied hint',
+    mt5NormalizeSignalPayload([
+        'symbol' => 'frxEURUSD',
+        'dir' => 'BUY',
+        'entry' => 1.0850,
+        'sl' => 1.0830,
+        'tp' => 1.0890,
+        'brokerSymbolHint' => 'Client Supplied Hint',
+    ])['brokerSymbolHint'],
+    'Euro vs US Dollar'
+);
+check(
+    'an unmapped symbol retains the client-supplied hint',
+    mt5NormalizeSignalPayload([
+        'symbol' => 'frxGBPUSD',
+        'dir' => 'BUY',
+        'entry' => 1.2650,
+        'sl' => 1.2630,
+        'tp' => 1.2690,
+        'brokerSymbolHint' => 'Client Supplied Hint',
+    ])['brokerSymbolHint'],
+    'Client Supplied Hint'
+);
 
 /* ── Signal status never regresses on an out-of-order SIGNAL_CREATED ─── */
 check(
