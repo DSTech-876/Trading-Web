@@ -623,6 +623,8 @@ function resolveFeedSymbol(sym) {
  */
 const BROKER_SYMBOL_HINTS = {
   ...STEP_INDEX_LABELS,
+  /* Deriv MT5 lists Step Index 100 as plain "Step Index" (no "100" suffix) */
+  "stpRNG": "Step Index",
   "R_10": "Volatility 10 Index",
   "R_25": "Volatility 25 Index",
   "R_50": "Volatility 50 Index",
