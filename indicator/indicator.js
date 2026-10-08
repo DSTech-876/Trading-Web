@@ -9310,17 +9310,19 @@ function processCustomStrategies() {
  * and feed live candles to the tracker. Losses already present before the first
  * sweep (restored history) are baselined and not re-analysed.
  */
+let _oppTracker = null;        /* per-panel tracker instance */
 let _oppTrackerBaselined = false;
+
 function sweepOppositeTradeTracking(candle) {
-  const tracker = typeof window !== "undefined" ? window.oppositeTradeTracker : null;
+  const tracker = _oppTracker || (typeof window !== "undefined" ? window.oppositeTradeTracker : null);
   if (!tracker || !candle) return;
   const histories = [
     signalHistory,
     liquiditySweepHistory, stopLossHuntHistory, failedPinBarHistory,
-    fibScalpHistory, po3History, gridScalperMAHistory, fvgStratHistory,
+    fibScalpHistory, po3History, gridScalperMAHistory, gridScalperV2History, fvgStratHistory,
     mtfTopDownHistory, nyOpenRangeHistory, sessionRangeHistory, tiktokHistory,
     orderblockHistory, candleInterpHistory, po3_4hHistory, breakerBlockHistory,
-    oteGoldenPocketHistory, orbHistory, crtTbsHistory
+    oteGoldenPocketHistory, orbHistory, crtTbsHistory, liveScalpHistory
   ];
   const baseline = !_oppTrackerBaselined;
   _oppTrackerBaselined = true;
@@ -9335,7 +9337,7 @@ function sweepOppositeTradeTracking(candle) {
       tracker.register(s, Number(candle.epoch), candles);
     }
   }
-  tracker.onCandle(candle);
+  tracker.onCandle(candle, focusedPanelSymbol);
 }
 
 /**
@@ -29550,6 +29552,8 @@ function activatePanel(p) {
   liveScalpHistory  = p.liveScalpHistory;
   lastScalpCandleIdx = p.lastScalpCandleIdx;
   ws             = p.ws;
+  _oppTracker    = p._oppTracker || (typeof OppositeTradeTracker !== 'undefined' ? new OppositeTradeTracker() : null);
+  _oppTrackerBaselined = p._oppTrackerBaselined || false;
 
   /* Custom strategy histories (per-panel isolation) */
   liquiditySweepHistory = p.liquiditySweepHistory || [];
@@ -29729,6 +29733,8 @@ function savePanel(p) {
   p.liveScalpHistory  = liveScalpHistory;
   p.lastScalpCandleIdx = lastScalpCandleIdx;
   p.ws             = ws;
+  p._oppTracker    = _oppTracker;
+  p._oppTrackerBaselined = _oppTrackerBaselined;
 
   /* Custom strategy histories (per-panel isolation) */
   p.liquiditySweepHistory = liquiditySweepHistory;

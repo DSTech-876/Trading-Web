@@ -34,7 +34,7 @@ try {
     if ($method === 'GET') {
         $strategy = isset($_GET['strategy']) ? (string) $_GET['strategy'] : null;
         $advice = [];
-        foreach (OppositeTradeService::strategyStats($pdo) as $s) {
+        foreach (OppositeTradeService::strategyStats($pdo, $userId) as $s) {
             if ($strategy !== null && $s['strategy'] !== $strategy) {
                 continue;
             }
@@ -55,6 +55,9 @@ try {
         if (!isset($in[$f]) || $in[$f] === '') {
             jsonResponse(['error' => "Missing required field: $f"], 400);
         }
+    }
+    if (ottNum($in['entry']) === null || ottNum($in['sl']) === null || ottNum($in['tp']) === null) {
+        jsonResponse(['error' => 'Price fields (entry, sl, tp) must be numeric'], 400);
     }
     if (!in_array($in['direction'], ['BULL', 'BEAR'], true)) {
         jsonResponse(['error' => 'Invalid direction'], 400);
@@ -96,17 +99,17 @@ try {
             status, classification
         ) VALUES (?,?,?,?,?, ?,?,?,?,?,?, ?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?)
         ON DUPLICATE KEY UPDATE
-            opposite_result = VALUES(opposite_result),
-            opposite_hit_tp = VALUES(opposite_hit_tp),
-            opposite_hit_sl = VALUES(opposite_hit_sl),
-            opposite_mfe = VALUES(opposite_mfe),
-            opposite_mae = VALUES(opposite_mae),
-            opposite_time_to_tp_min = VALUES(opposite_time_to_tp_min),
-            opposite_time_to_sl_min = VALUES(opposite_time_to_sl_min),
-            eventual_original_tp = VALUES(eventual_original_tp),
-            minutes_after_sl = VALUES(minutes_after_sl),
-            pips_beyond_tp = VALUES(pips_beyond_tp),
-            reversal_ratio = VALUES(reversal_ratio),
+            opposite_result = IF(status != 'COMPLETE', VALUES(opposite_result), opposite_result),
+            opposite_hit_tp = IF(status != 'COMPLETE', VALUES(opposite_hit_tp), opposite_hit_tp),
+            opposite_hit_sl = IF(status != 'COMPLETE', VALUES(opposite_hit_sl), opposite_hit_sl),
+            opposite_mfe = IF(status != 'COMPLETE', VALUES(opposite_mfe), opposite_mfe),
+            opposite_mae = IF(status != 'COMPLETE', VALUES(opposite_mae), opposite_mae),
+            opposite_time_to_tp_min = IF(status != 'COMPLETE', VALUES(opposite_time_to_tp_min), opposite_time_to_tp_min),
+            opposite_time_to_sl_min = IF(status != 'COMPLETE', VALUES(opposite_time_to_sl_min), opposite_time_to_sl_min),
+            eventual_original_tp = IF(status != 'COMPLETE', VALUES(eventual_original_tp), eventual_original_tp),
+            minutes_after_sl = IF(status != 'COMPLETE', VALUES(minutes_after_sl), minutes_after_sl),
+            pips_beyond_tp = IF(status != 'COMPLETE', VALUES(pips_beyond_tp), pips_beyond_tp),
+            reversal_ratio = IF(status != 'COMPLETE', VALUES(reversal_ratio), reversal_ratio),
             status = IF(status = 'COMPLETE', status, VALUES(status)),
             classification = IF(status = 'COMPLETE', classification, VALUES(classification))"
     );

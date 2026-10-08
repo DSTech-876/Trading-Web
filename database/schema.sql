@@ -1297,6 +1297,7 @@ CREATE TABLE IF NOT EXISTS admin_notifications_center (
     is_read         TINYINT(1) NOT NULL DEFAULT 0,
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     
+    UNIQUE KEY uq_anc_source (source_entity, source_id),
     INDEX idx_anc_type (notification_type),
     INDEX idx_anc_category (category),
     INDEX idx_anc_severity (severity),
