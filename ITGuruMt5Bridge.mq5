@@ -1588,6 +1588,22 @@ void PollAndExecute()
                "server-configured daily loss limit changed: "+DoubleToString(g_serverDailyLossLimitPct,2)+
                "% -> "+DoubleToString(newServerDailyLossLimitPct,2)+"%");
       g_serverDailyLossLimitPct = newServerDailyLossLimitPct;
+
+      // A halt latched under a previous (e.g. default 5%) limit must not
+      // persist once the limit is raised above the actual loss.
+      double eqNow = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(g_dailyLossHalted && g_dayStartEquity>0 && eqNow>0)
+      {
+         double lossNow = (g_dayStartEquity - eqNow) / g_dayStartEquity * 100.0;
+         if(lossNow < newServerDailyLossLimitPct)
+         {
+            g_dailyLossHalted = false;
+            RecomputeHaltState();
+            SaveDailyState();
+            LogEvent("INFO","DAILY_HALT_CLEARED","","limit raised to "+DoubleToString(newServerDailyLossLimitPct,2)+
+                     "%, loss%="+DoubleToString(lossNow,2));
+         }
+      }
    }
 
    bool serverHalted = JsonGetBool(resp,"halted",false);
