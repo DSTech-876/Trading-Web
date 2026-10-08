@@ -1410,3 +1410,51 @@ CREATE TABLE IF NOT EXISTS opposite_trade_tracking (
     INDEX idx_ott_class (classification),
     INDEX idx_ott_close (close_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ──────────────────────────────────────────────
+-- Post-Stop-Loss Recovery Analyzer
+-- One row per stop-loss trade with three parallel scenarios:
+--   A = original trade continues, B = opposite trade, C = confirmed re-entry.
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS post_sl_recovery (
+    id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id               INT UNSIGNED NOT NULL,
+    trade_id              VARCHAR(100) NOT NULL,
+    signal_id             VARCHAR(100) DEFAULT NULL,
+    strategy              VARCHAR(80)  NOT NULL,
+    symbol                VARCHAR(40)  NOT NULL,
+    direction             ENUM('BULL','BEAR') NOT NULL,
+    entry_price           DECIMAL(20,8) NOT NULL,
+    sl_price              DECIMAL(20,8) NOT NULL,
+    tp_price              DECIMAL(20,8) NOT NULL,
+    lot_size              DECIMAL(12,4) DEFAULT NULL,
+    sl_hit_time           DATETIME     NOT NULL,
+    confirm_mode          VARCHAR(30)  DEFAULT NULL,
+
+    a_eventual_tp_reached TINYINT(1) NOT NULL DEFAULT 0,
+    a_minutes_to_tp       DECIMAL(12,2) DEFAULT NULL,
+    a_max_favorable_move  DECIMAL(20,8) DEFAULT NULL,
+    a_distance_beyond_tp  DECIMAL(20,8) DEFAULT NULL,
+
+    b_entry_time          DATETIME DEFAULT NULL,
+    b_entry_price         DECIMAL(20,8) DEFAULT NULL,
+    b_tp_hit              TINYINT(1) NOT NULL DEFAULT 0,
+    b_sl_hit              TINYINT(1) NOT NULL DEFAULT 0,
+    b_profit_potential    DECIMAL(20,8) DEFAULT NULL,
+    b_time_to_tp          DECIMAL(12,2) DEFAULT NULL,
+
+    c_confirmation_time   DATETIME DEFAULT NULL,
+    c_confirmation_price  DECIMAL(20,8) DEFAULT NULL,
+    c_tp_hit              TINYINT(1) NOT NULL DEFAULT 0,
+    c_sl_hit              TINYINT(1) NOT NULL DEFAULT 0,
+    c_profit_potential    DECIMAL(20,8) DEFAULT NULL,
+    c_time_to_tp          DECIMAL(12,2) DEFAULT NULL,
+
+    classification        ENUM('EARLY_ENTRY','WRONG_DIRECTION','EARLY_ENTRY_REENTRY_SUCCESS','HIGH_VOLATILITY_STOP','VALID_LOSS','MISSED_REVERSAL') NOT NULL,
+    created_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_psr_user_trade (user_id, trade_id),
+    INDEX idx_psr_strategy (user_id, strategy),
+    INDEX idx_psr_class (classification),
+    INDEX idx_psr_time (sl_hit_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

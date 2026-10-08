@@ -33,7 +33,7 @@ RewriteRule ^api/adaptive/(bootstrap|metrics|profiles|qualify|trades)$ api/adapt
 # ── Trades API URL rewriting ──
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^api/trades/(log_outcome|check_notification|opposite_tracking)$ api/trades/$1.php [L,QSA]
+RewriteRule ^api/trades/(log_outcome|check_notification|opposite_tracking|post_sl_recovery)$ api/trades/$1.php [L,QSA]
 
 # ── Admin API URL rewriting ──
 RewriteCond %{REQUEST_FILENAME} !-f
@@ -61,7 +61,7 @@ RewriteRule ^api/notification_preferences$ api/notification_preferences.php [L,Q
 # ── Trade management API URL rewriting ──
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^api/trades/(log_outcome|check_notification|signal_history)$ api/trades/$1.php [L,QSA]
+RewriteRule ^api/trades/(log_outcome|check_notification|signal_history|opposite_tracking|post_sl_recovery)$ api/trades/$1.php [L,QSA]
 
 # ── Security headers ──
 <IfModule mod_headers.c>
