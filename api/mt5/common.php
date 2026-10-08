@@ -646,12 +646,16 @@ function mt5NormalizeSignalPayload(array $body): array
         ? (float) $body['confidence']
         : null;
 
-    // Client may pass an explicit brokerSymbolHint; otherwise fall back to the
-    // admin-configured MT5_SYMBOL_MAP so the EA gets an automatic resolution
-    // candidate for shorthand/TradingView instrument codes (e.g. "stpRNG5").
-    $brokerSymbolHint = trim((string) ($body['brokerSymbolHint'] ?? ''));
+    // The admin-configured MT5_SYMBOL_MAP (if set) always wins, since it's an
+    // explicit per-broker override. Otherwise fall back to whatever hint the
+    // client supplied (indicator/indicator.js's BROKER_SYMBOL_HINTS sends a
+    // sane default MarketWatch name guess for synthetic indices, e.g.
+    // "stpRNG5" -> "Step Index 500") so the EA gets an automatic resolution
+    // candidate for shorthand/TradingView instrument codes without requiring
+    // any server configuration out of the box.
+    $brokerSymbolHint = mt5ResolveBrokerSymbolHint($symbol) ?? '';
     if ($brokerSymbolHint === '') {
-        $brokerSymbolHint = mt5ResolveBrokerSymbolHint($symbol) ?? '';
+        $brokerSymbolHint = trim((string) ($body['brokerSymbolHint'] ?? ''));
     }
 
     return [

@@ -279,14 +279,18 @@ server. Never commit a real bridge key into source control.
   `api/config.php`) additionally logs the raw body, `json_last_error()` reason, and a hex dump of the
   trailing bytes whenever a request fails to parse as JSON — the quickest way to catch stray bytes
   (e.g. a trailing NUL) in a non-PHP client's POST body.
-- **Automatic symbol resolution** — `MT5_SYMBOL_MAP` (server `.env`, JSON object mapping an internal/
-  TradingView instrument code to the broker's actual MarketWatch name, e.g.
-  `{"stpRNG5":"Step Index 500"}`) is surfaced to the EA as `brokerSymbolHint` on every order
-  (`signal.php` response, `pull.php` queue, and `order_status.php`). `ITGuruMt5Bridge.mq5`'s
-  `ResolveBrokerSymbol()` tries, in order: exact match → `brokerSymbolHint` → its own
-  `InpSymbolAliasMap` input → `InpSymbolSuffixCandidates` → a case/punctuation-insensitive scan of
-  every symbol the terminal knows about — logging each attempt (`SYMBOL_RESOLVE` /
-  `SYMBOL_RESOLVE_FAIL` events) and caching the result per orderId's symbol code for the EA session.
+- **Automatic symbol resolution** — `indicator/indicator.js`'s `BROKER_SYMBOL_HINTS` map already sends
+  a default `brokerSymbolHint` for every synthetic index (e.g. `"stpRNG5"` → `"Step Index 500"`) on
+  every push, so trades resolve out of the box without any server config. `MT5_SYMBOL_MAP` (server
+  `.env`, JSON object mapping an internal/TradingView instrument code to the broker's actual
+  MarketWatch name, e.g. `{"stpRNG5":"Step Index 500"}`) is only needed to **override** that default
+  for brokers using non-standard names, and takes precedence over the client-supplied hint when set.
+  Either way the result is surfaced to the EA as `brokerSymbolHint` on every order (`signal.php`
+  response, `pull.php` queue, and `order_status.php`). `ITGuruMt5Bridge.mq5`'s `ResolveBrokerSymbol()`
+  tries, in order: exact match → `brokerSymbolHint` → its own `InpSymbolAliasMap` input →
+  `InpSymbolSuffixCandidates` → a case/punctuation-insensitive scan of every symbol the terminal knows
+  about — logging each attempt (`SYMBOL_RESOLVE` / `SYMBOL_RESOLVE_FAIL` events) and caching the
+  result per orderId's symbol code for the EA session.
 
 ---
 
