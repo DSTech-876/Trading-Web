@@ -88,6 +88,14 @@ $now = time();
 $recorded = mt5WithStateLock(function (array &$state) use ($valid, $userId, $now): int {
     foreach ($valid as $entry) {
         $isRejection = $entry['event'] === 'SIGNAL_REJECTED';
+        // SIGNAL_CREATED and SIGNAL_REJECTED are sent as independent
+        // fire-and-forget requests and can therefore acquire the state lock
+        // out of order. A late SIGNAL_CREATED must never regress a signal
+        // that has since moved past ACCEPTED (REJECTED, or ORDERED once
+        // signal.php created an order), or the audit would lose the
+        // rejection and report the wrong root cause.
+        $existingStatus = $state['signals'][$entry['signalId']]['status'] ?? null;
+        $status = mt5NextSignalStatus($existingStatus, $isRejection);
         mt5RecordSignal($state, $entry['signalId'], [
             'signalId' => $entry['signalId'],
             'userId' => $userId,
@@ -102,7 +110,7 @@ $recorded = mt5WithStateLock(function (array &$state) use ($valid, $userId, $now
             // createdTime is only stamped once; a later rejection for the same
             // signal must not overwrite when the signal was generated.
             'createdTime' => $state['signals'][$entry['signalId']]['createdTime'] ?? $now,
-            'status' => $isRejection ? 'REJECTED' : 'ACCEPTED',
+            'status' => $status,
             'rejectionReason' => $isRejection ? $entry['reason'] : null,
             'rejectionFilter' => $isRejection ? $entry['filter'] : null,
         ]);
