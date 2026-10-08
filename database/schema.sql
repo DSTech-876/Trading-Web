@@ -1363,3 +1363,49 @@ CREATE TABLE IF NOT EXISTS risk_settings (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 INSERT IGNORE INTO risk_settings (id, daily_loss_limit_pct) VALUES (1, 5.00);
+
+-- ──────────────────────────────────────────────
+-- Opposite Trade Tracker & Recovery Analysis
+-- One row per stop-loss trade. status = TRACKING while the virtual opposite
+-- trade / post-SL recovery are monitored, COMPLETE once classified.
+-- ──────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS opposite_trade_tracking (
+    id                    BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id               INT UNSIGNED NOT NULL,
+    trade_id              VARCHAR(100) NOT NULL,
+    signal_id             VARCHAR(100) DEFAULT NULL,
+    strategy              VARCHAR(80)  NOT NULL,
+    symbol                VARCHAR(40)  NOT NULL,
+    original_direction    ENUM('BULL','BEAR') NOT NULL,
+    original_entry        DECIMAL(20,8) NOT NULL,
+    original_result       VARCHAR(20)  NOT NULL DEFAULT 'LOSS',
+    original_sl           DECIMAL(20,8) NOT NULL,
+    original_tp           DECIMAL(20,8) NOT NULL,
+    lot_size              DECIMAL(12,4) DEFAULT NULL,
+    close_reason          VARCHAR(40)  NOT NULL DEFAULT 'STOP_LOSS',
+    close_time            DATETIME     NOT NULL,
+
+    opposite_direction    ENUM('BULL','BEAR') NOT NULL,
+    opposite_result       ENUM('WIN','LOSS','NONE') NOT NULL DEFAULT 'NONE',
+    opposite_hit_tp       TINYINT(1) NOT NULL DEFAULT 0,
+    opposite_hit_sl       TINYINT(1) NOT NULL DEFAULT 0,
+    opposite_mfe          DECIMAL(20,8) DEFAULT NULL,
+    opposite_mae          DECIMAL(20,8) DEFAULT NULL,
+    opposite_time_to_tp_min DECIMAL(12,2) DEFAULT NULL,
+    opposite_time_to_sl_min DECIMAL(12,2) DEFAULT NULL,
+
+    eventual_original_tp  TINYINT(1) NOT NULL DEFAULT 0,
+    minutes_after_sl      DECIMAL(12,2) DEFAULT NULL,
+    pips_beyond_tp        DECIMAL(20,8) DEFAULT NULL,
+    reversal_ratio        DECIMAL(8,4) DEFAULT NULL,
+
+    status                ENUM('TRACKING','COMPLETE') NOT NULL DEFAULT 'TRACKING',
+    classification        ENUM('EARLY_ENTRY','WRONG_DIRECTION','HIGH_VOLATILITY_STOP','VALID_LOSS','MISSED_REVERSAL') DEFAULT NULL,
+    created_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_ott_user_trade (user_id, trade_id),
+    INDEX idx_ott_strategy (strategy, status),
+    INDEX idx_ott_class (classification),
+    INDEX idx_ott_close (close_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

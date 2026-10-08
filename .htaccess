@@ -30,13 +30,18 @@ RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^api/adaptive/(bootstrap|metrics|profiles|qualify|trades)$ api/adaptive/$1.php [L,QSA]
 
+# ── Trades API URL rewriting ──
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api/trades/(log_outcome|check_notification|opposite_tracking)$ api/trades/$1.php [L,QSA]
+
 # ── Admin API URL rewriting ──
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^api/admin/layouts/(.+)$ api/admin/layouts.php?path=$1 [L,QSA]
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^api/admin/(users|user|strategies|strategy_access|auth_guard|telegram|profiles|adaptive|notification_preferences|notifications|telegram_delivery_log|dashboard|preferences|audit_trail|impersonate|notifications_center|search|users_management|strategy_stats|adaptive_intelligence|logs|telegram_queue|performance|layouts|optimize-db|schema_validation|risk_settings)$ api/admin/$1.php [L,QSA]
+RewriteRule ^api/admin/(users|user|strategies|strategy_access|auth_guard|telegram|profiles|adaptive|notification_preferences|notifications|telegram_delivery_log|dashboard|preferences|audit_trail|impersonate|notifications_center|search|users_management|strategy_stats|adaptive_intelligence|logs|telegram_queue|performance|layouts|optimize-db|schema_validation|risk_settings|opposite_trade_analytics)$ api/admin/$1.php [L,QSA]
 
 # ── Telegram API URL rewriting (extensionless PHP) ──
 RewriteCond %{REQUEST_FILENAME} !-f
