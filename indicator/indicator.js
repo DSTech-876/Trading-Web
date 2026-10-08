@@ -16614,6 +16614,14 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
     if (currentPrice == null || !Number.isFinite(currentPrice) || currentPrice <= 0) {
       return side === "BUY" ? "BUY_MARKET" : "SELL_MARKET";
     }
+    /* Fast-ticking symbols (volatility indices, 1s) move past the signal entry
+       before the order is dispatched; treat entries within a small tolerance of
+       the live price as market orders so they fill instead of queuing as pending. */
+    const atrRef = Number(getAtrReference());
+    const marketTol = Math.max(Number.isFinite(atrRef) && atrRef > 0 ? atrRef * 0.25 : 0, currentPrice * 0.0002);
+    if (Number.isFinite(Number(signal.entry)) && Math.abs(signal.entry - currentPrice) <= marketTol) {
+      return side === "BUY" ? "BUY_MARKET" : "SELL_MARKET";
+    }
     if (side === "BUY") {
       if (signal.entry > currentPrice) return "BUY_STOP";
       if (signal.entry < currentPrice) return "BUY_LIMIT";
