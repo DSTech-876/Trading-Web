@@ -16293,21 +16293,8 @@ function recordTradeFrequency(symbol, strategyName) {
 }
 
 function getStrategyAllowedRegimes(strategyName) {
-  const map = {
-    liquiditySweep: ["RANGING", "TRANSITIONING"],
-    sessionRange:   ["RANGING", "TRANSITIONING"],
-    nyOpenRange:    ["TRANSITIONING", "RANGING"],
-    fvgStrat:       ["TRENDING", "TRANSITIONING"],
-    mtfTopDown:     ["TRENDING", "TRANSITIONING"],
-    orderblock:     ["TRENDING", "TRANSITIONING"],
-    po3:            ["TRENDING", "TRANSITIONING"],
-    fibScalp:       ["TRANSITIONING", "TRENDING"],
-    stopLossHunt:   ["TRANSITIONING", "RANGING"],
-    failedPinBar:   ["TRANSITIONING", "RANGING"],
-    gridScalperMA:  ["TRENDING", "TRANSITIONING"],
-    tiktok:         ["TRENDING", "TRANSITIONING"]
-  };
-  return map[strategyName] || ["TRENDING", "TRANSITIONING", "RANGING"];
+  // Regime gating disabled: all strategies may auto-trade in every regime.
+  return ["TRENDING", "TRANSITIONING", "RANGING"];
 }
 
 function isStrategyTemporarilyPaused(strategyName, regime) {
