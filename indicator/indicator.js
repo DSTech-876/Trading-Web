@@ -608,6 +608,64 @@ function resolveFeedSymbol(sym) {
   return resolved;
 }
 
+/**
+ * Deriv/TradingView shorthand synthetic-index codes (e.g. "stpRNG4") almost
+ * never match the MarketWatch symbol name a broker's MT5 bridge actually
+ * lists (e.g. "Step Index 400"). Without a hint, ITGuruMt5Bridge.mq5's
+ * ResolveBrokerSymbol() exact-match attempt fails and every such signal gets
+ * rejected with "Symbol not found/selectable" unless an admin has manually
+ * configured the MT5_SYMBOL_MAP env var for every single synthetic code.
+ *
+ * This map supplies a sane default `brokerSymbolHint` (Deriv's own published
+ * display names, see developers.deriv.com) for every synthetic index so
+ * trades resolve out of the box; admin-configured MT5_SYMBOL_MAP entries
+ * still take precedence server-side for brokers using non-standard names.
+ */
+const BROKER_SYMBOL_HINTS = {
+  ...STEP_INDEX_LABELS,
+  "R_10": "Volatility 10 Index",
+  "R_25": "Volatility 25 Index",
+  "R_50": "Volatility 50 Index",
+  "R_75": "Volatility 75 Index",
+  "R_100": "Volatility 100 Index",
+  "1HZ10V": "Volatility 10 (1s) Index",
+  "1HZ15V": "Volatility 15 (1s) Index",
+  "1HZ25V": "Volatility 25 (1s) Index",
+  "1HZ30V": "Volatility 30 (1s) Index",
+  "1HZ50V": "Volatility 50 (1s) Index",
+  "1HZ75V": "Volatility 75 (1s) Index",
+  "1HZ90V": "Volatility 90 (1s) Index",
+  "1HZ100V": "Volatility 100 (1s) Index",
+  "1HZ150V": "Volatility 150 (1s) Index",
+  "1HZ200V": "Volatility 200 (1s) Index",
+  "1HZ250V": "Volatility 250 (1s) Index",
+  "1HZ300V": "Volatility 300 (1s) Index",
+  "BOOM300N": "Boom 300 Index",
+  "BOOM500": "Boom 500 Index",
+  "BOOM600": "Boom 600 Index",
+  "BOOM900": "Boom 900 Index",
+  "BOOM1000": "Boom 1000 Index",
+  "CRASH300N": "Crash 300 Index",
+  "CRASH500": "Crash 500 Index",
+  "CRASH600": "Crash 600 Index",
+  "CRASH900": "Crash 900 Index",
+  "CRASH1000": "Crash 1000 Index",
+  "JD10": "Jump 10 Index",
+  "JD25": "Jump 25 Index",
+  "JD50": "Jump 50 Index",
+  "JD75": "Jump 75 Index",
+  "JD100": "Jump 100 Index",
+  "RDBULL": "Bull Market Index",
+  "RDBEAR": "Bear Market Index"
+};
+
+/** Returns the default broker MarketWatch symbol hint for a synthetic index
+ *  code, or null when the symbol has no known alternate broker naming
+ *  (e.g. forex/commodities, where the raw code is already broker-standard). */
+function getBrokerSymbolHint(sym) {
+  return BROKER_SYMBOL_HINTS[sym] || null;
+}
+
 /* ================= CREDENTIAL ENCRYPTION ================= */
 /**
  * #13: AES-GCM credential storage using the Web Crypto API.
@@ -16518,6 +16576,12 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
 
   return {
     symbol,
+    /* Default broker MarketWatch name guess for synthetic indices (e.g.
+       "stpRNG4" -> "Step Index 400") so ITGuruMt5Bridge.mq5 can resolve the
+       symbol even when MT5_SYMBOL_MAP hasn't been configured server-side.
+       api/mt5/common.php still lets an admin-configured MT5_SYMBOL_MAP
+       override this default per broker. */
+    brokerSymbolHint: getBrokerSymbolHint(symbol),
     dir: side,
     /* Correlation id so api/mt5/audit.php can join this order back to the
        signal that produced it (signals-without-orders / orders-without-
