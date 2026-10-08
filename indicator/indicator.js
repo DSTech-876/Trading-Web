@@ -9332,7 +9332,11 @@ function sweepOppositeTradeTracking(candle) {
     for (const s of history) {
       if (!s || s.result !== "LOSS" || s._oppTracked) continue;
       s._oppTracked = true;
-      if (baseline || _historicalProcessing) continue;
+      if (_historicalProcessing) continue;
+      if (baseline && recovery && Number.isFinite(Number(s._slHitEpoch))) {
+        recovery.backfill(s, Number(s._slHitEpoch), candles, focusedPanelSymbol);
+      }
+      if (baseline) continue;
       const reason = String(s.terminal_reason || "STOP_LOSS").toUpperCase();
       if (reason.indexOf("STOP_LOSS") !== 0) continue;
       tracker.register(s, Number(candle.epoch), candles);

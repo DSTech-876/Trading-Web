@@ -31,3 +31,13 @@ a.register(trade, 1000, []);
 a.onCandle(mk(1060, 98, 98.2, 97.8, 98), 'X');
 assert.strictEqual(a.records[0].classification, 'VALID_LOSS');
 console.log('post-SL recovery tests passed');
+
+/* same-candle rule + backfill */
+const both = mk(1060, 98.5, 105, 97.5, 104.5);
+let b = new PostSLRecoveryAnalyzer({ persist: false, windowCandles: 1 });
+b.backfill(trade, 1000, [mk(900, 100, 100, 99, 99), both], 'X');
+assert.strictEqual(b.records[0].scenarioA.eventual_tp_reached, true);
+b = new PostSLRecoveryAnalyzer({ persist: false, windowCandles: 1, sameCandleRule: 'tp_first' });
+b.backfill(trade, 1000, [both], 'X');
+assert.strictEqual(b.records[0].scenarioB.sl_hit, true);
+console.log('rules ok');

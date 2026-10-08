@@ -19,6 +19,10 @@
   const HISTORY_CANDLES = 30;
   const MAX_RECORDS = 500;
   const THRESHOLD = 60; /* % above which a recommendation / alert triggers */
+  /* How to resolve a candle that touches both SL and TP:
+     sl_first (pessimistic), tp_first (optimistic), candle_shape (bullish candle
+     assumed low-first, bearish high-first) */
+  const SAME_CANDLE_RULES = ['sl_first', 'tp_first', 'candle_shape'];
   const STORAGE_KEY = 'itguru_post_sl_recovery_v1';
   const CONFIRM_MODES = ['candle_close', 'break_prev_extreme', 'trend', 'momentum', 'ma_alignment'];
   const CLASSES = ['EARLY_ENTRY', 'WRONG_DIRECTION', 'EARLY_ENTRY_REENTRY_SUCCESS',
@@ -79,11 +83,32 @@
       this.windowCandles = options.windowCandles || WINDOW_CANDLES;
       this.confirmMode = CONFIRM_MODES.indexOf(options.confirmMode) >= 0 ? options.confirmMode : 'candle_close';
       this.threshold = Number.isFinite(options.threshold) ? options.threshold : THRESHOLD;
+      this.sameCandleRule = SAME_CANDLE_RULES.indexOf(options.sameCandleRule) >= 0 ? options.sameCandleRule : 'sl_first';
       this.persist = options.persist !== false;
       this.onChange = options.onChange || null;
       this.watches = new Map();
       this.records = [];
       this._load();
+    }
+
+    setSameCandleRule(rule) {
+      if (SAME_CANDLE_RULES.indexOf(rule) >= 0) this.sameCandleRule = rule;
+    }
+
+    setWindowCandles(n) {
+      n = Math.floor(Number(n));
+      if (n >= 1 && n <= 5000) this.windowCandles = n;
+    }
+
+    /** Register a historical loss and replay already-known candles after its SL. */
+    backfill(trade, closeEpoch, allCandles, symbol) {
+      const w = this.register(trade, closeEpoch, allCandles);
+      if (!w || !Array.isArray(allCandles)) return w;
+      for (const c of allCandles) {
+        if (w.done || !c || !(Number(c.epoch) > Number(closeEpoch))) continue;
+        this.onCandle(c, symbol);
+      }
+      return w;
     }
 
     setConfirmMode(mode) {
@@ -189,7 +214,15 @@
       s.profit_potential = Math.max(s.profit_potential, Math.max(0, fav));
       const slHit = bull ? c.low <= s.sl : c.high >= s.sl;
       const tpHit = bull ? c.high >= s.tp : c.low <= s.tp;
-      if (slHit) { s.sl_hit = true; s.done = true; }
+      let slFirst = true;
+      if (slHit && tpHit) {
+        if (this.sameCandleRule === 'tp_first') slFirst = false;
+        else if (this.sameCandleRule === 'candle_shape') {
+          const candleBull = Number(c.close) >= Number(c.open);
+          slFirst = bull ? candleBull : !candleBull;
+        }
+      }
+      if (slHit && slFirst) { s.sl_hit = true; s.done = true; }
       else if (tpHit) {
         s.tp_hit = true; s.done = true;
         s.time_to_tp = Math.max(0, (Number(c.epoch) - entryTime) / 60);
@@ -326,5 +359,5 @@
   PostSLRecoveryAnalyzer.CLASSES = CLASSES;
   root.PostSLRecoveryAnalyzer = PostSLRecoveryAnalyzer;
   if (typeof window !== 'undefined' && !root.postSLRecoveryAnalyzer) root.postSLRecoveryAnalyzer = new PostSLRecoveryAnalyzer();
-  if (typeof module !== 'undefined' && module.exports) module.exports = { PostSLRecoveryAnalyzer, classify, isConfirmed, CONFIRM_MODES };
+  if (typeof module !== 'undefined' && module.exports) module.exports = { PostSLRecoveryAnalyzer, SAME_CANDLE_RULES, classify, isConfirmed, CONFIRM_MODES };
 })(typeof window !== 'undefined' ? window : globalThis);
