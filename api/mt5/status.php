@@ -135,6 +135,29 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
             'from' => $fromStatus,
             'to' => $u['status'],
         ];
+
+        /* Map the EA's status callback onto the canonical audit lifecycle so
+         * audit.php can answer "delivered but not executed" without parsing
+         * free-text history. DISPATCHED->RECEIVED proves the payload reached
+         * the EA; FILLED proves OrderSend() succeeded; REJECTED/CANCELLED/
+         * EXPIRED proves it failed and carries the broker retcode message. */
+        $ledgerEvent = match ($u['status']) {
+            'RECEIVED' => 'ORDER_RECEIVED',
+            'FILLED' => 'ORDER_EXECUTED',
+            'REJECTED', 'CANCELLED', 'EXPIRED' => 'ORDER_FAILED',
+            default => null,
+        };
+        if ($ledgerEvent !== null) {
+            mt5RecordEvent($state, $ledgerEvent, [
+                'signalId' => ($order['signalId'] ?? '') !== '' ? $order['signalId'] : null,
+                'orderId' => $orderId,
+                'symbol' => $order['symbol'] ?? null,
+                'terminal' => $u['terminal'] ?? null,
+                'status' => $u['status'],
+                'brokerTicket' => $order['brokerTicket'] ?? null,
+                'reason' => $u['message'],
+            ], $now);
+        }
         $applied++;
         unset($order);
     }

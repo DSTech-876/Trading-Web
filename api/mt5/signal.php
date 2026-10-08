@@ -19,8 +19,38 @@ $rawBody = file_get_contents('php://input');
 try {
     $normalized = mt5NormalizeSignalPayload($body);
 } catch (\Throwable $e) {
+    // Server-side rejection record: without this, a payload that fails
+    // normalization (bad SL/TP side, stop distance below broker minimum,
+    // entry inside the freeze level, …) left no trace beyond a 422 the
+    // browser swallowed, and the signal silently vanished from the audit.
+    $rejectedSignalId = mt5SanitizeSignalId((string) ($body['signalId'] ?? ''));
+    if ($rejectedSignalId !== '') {
+        try {
+            mt5WithStateLock(function (array &$state) use ($rejectedSignalId, $body, $e, $userId): void {
+                $now = time();
+                mt5RecordSignal($state, $rejectedSignalId, [
+                    'signalId' => $rejectedSignalId,
+                    'userId' => $userId,
+                    'symbol' => substr(trim((string) ($body['symbol'] ?? '')), 0, 40) ?: null,
+                    'createdTime' => $state['signals'][$rejectedSignalId]['createdTime'] ?? $now,
+                    'status' => 'REJECTED',
+                    'rejectionReason' => $e->getMessage(),
+                    'rejectionFilter' => 'server payload validation',
+                ]);
+                mt5RecordEvent($state, 'SIGNAL_REJECTED', [
+                    'signalId' => $rejectedSignalId,
+                    'symbol' => substr(trim((string) ($body['symbol'] ?? '')), 0, 40) ?: null,
+                    'reason' => $e->getMessage(),
+                    'filter' => 'server payload validation',
+                ], $now);
+            });
+        } catch (\Throwable $ignored) {
+            // Never let ledger bookkeeping mask the original 422.
+        }
+    }
     mt5LogDiagnostic('signal.php', [
         'event' => 'VALIDATION_ERROR',
+        'signalId' => $rejectedSignalId !== '' ? $rejectedSignalId : null,
         'rawBody' => $rawBody,
         'error' => $e->getMessage(),
     ]);
@@ -44,17 +74,26 @@ if ($incomingKey === '') {
 }
 
 $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $incomingKey): array {
+    $now = time();
+    $signalId = (string) $normalized['signalId'];
     $existingOrderId = $state['idempotency'][$incomingKey] ?? null;
     if (is_string($existingOrderId) && isset($state['orders'][$existingOrderId])) {
         $existing = $state['orders'][$existingOrderId];
+        mt5RecordEvent($state, 'ORDER_CREATED', [
+            'signalId' => $signalId !== '' ? $signalId : null,
+            'orderId' => $existingOrderId,
+            'symbol' => $normalized['symbol'],
+            'duplicate' => true,
+            'reason' => 'duplicate protection: idempotency key already mapped to an order',
+        ], $now);
         return ['duplicate' => true, 'order' => $existing, 'queueDepth' => count($state['orders'])];
     }
 
     $orderId = 'mt5_' . gmdate('YmdHis') . '_' . bin2hex(random_bytes(4));
-    $now = time();
     $order = [
         'orderId' => $orderId,
         'userId' => $userId,
+        'signalId' => $signalId,
         'status' => 'QUEUED',
         'symbol' => $normalized['symbol'],
         'brokerSymbolHint' => $normalized['brokerSymbolHint'],
@@ -84,6 +123,37 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
     $state['orders'][$orderId] = $order;
     $state['idempotency'][$incomingKey] = $orderId;
 
+    if ($signalId !== '') {
+        mt5RecordSignal($state, $signalId, [
+            'signalId' => $signalId,
+            'userId' => $userId,
+            'symbol' => $normalized['symbol'],
+            'direction' => $normalized['side'],
+            'confidence' => $normalized['confidence'],
+            'source' => $normalized['source'],
+            'strategyName' => $normalized['strategyName'] !== '' ? $normalized['strategyName'] : null,
+            'entry' => $normalized['entry'],
+            'sl' => $normalized['sl'],
+            'tp' => $normalized['tp'],
+            'createdTime' => $state['signals'][$signalId]['createdTime'] ?? $now,
+            'status' => 'ORDERED',
+            'orderId' => $orderId,
+        ]);
+    }
+
+    $eventCtx = [
+        'signalId' => $signalId !== '' ? $signalId : null,
+        'orderId' => $orderId,
+        'symbol' => $normalized['symbol'],
+        'direction' => $normalized['side'],
+        'lot' => $normalized['lot'],
+        // Orders are created with no terminal binding; pull.php assigns the
+        // terminal on first dispatch.
+        'terminal' => null,
+    ];
+    mt5RecordEvent($state, 'ORDER_CREATED', $eventCtx, $now);
+    mt5RecordEvent($state, 'ORDER_QUEUED', $eventCtx + ['status' => 'QUEUED'], $now);
+
     return ['duplicate' => false, 'order' => $order, 'queueDepth' => count($state['orders'])];
 });
 
@@ -91,7 +161,8 @@ $publicOrder = mt5PublicOrder($result['order']);
 
 mt5LogDiagnostic('signal.php', [
     'event' => $result['duplicate'] ? 'ORDER_DUPLICATE' : 'ORDER_QUEUED',
-    'signalId' => $publicOrder['orderId'],
+    'signalId' => $normalized['signalId'] !== '' ? $normalized['signalId'] : null,
+    'orderId' => $publicOrder['orderId'],
     'duplicate' => (bool) $result['duplicate'],
     'userId' => $userId,
     'symbol' => $normalized['symbol'],

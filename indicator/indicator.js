@@ -2699,6 +2699,10 @@ let maxConcurrentTrades      = DEFAULT_MAX_CONCURRENT_TRADES; /* max simultaneou
 let autoTradeExecutionMode   = "deriv"; /* "deriv" | "mt5" */
 let mt5SignalApiUrl          = "/api/mt5/signal.php";
 let mt5StatusApiUrl          = "/api/mt5/order_status.php";
+/* Server-side signal lifecycle ledger. Without it, a signal that a risk
+   filter discards leaves no trace outside this page's log, which is why an
+   empty pull.php queue was previously unexplainable from the server. */
+const MT5_SIGNAL_LOG_API_URL = "/api/mt5/signal_log.php";
 let mt5MinStopPoints         = 0;
 let mt5FreezePoints          = 0;
 let mt5LotStep               = 0.01;
@@ -16413,6 +16417,53 @@ function mt5BridgeHeaders(extra = {}) {
   return h;
 }
 
+/* ── MT5 signal audit trail ──────────────────────────────────────────────
+   The signal engine lives entirely in this page, so every gate in
+   executeAutoTrade() that drops a signal used to be invisible to the server.
+   These helpers mint a stable signal id and mirror SIGNAL_CREATED /
+   SIGNAL_REJECTED to /api/mt5/signal_log.php, so /api/mt5/audit.php can
+   report exactly which filter discarded which signal and which signals did
+   reach the order queue. Fire-and-forget: a logging failure must never block
+   or alter trade execution. */
+let _mt5SignalSeq = 0;
+
+function mt5MintSignalId(signal, symbol) {
+  _mt5SignalSeq = (_mt5SignalSeq + 1) % 1000000;
+  const src = (signal && signal.source) || "breakout";
+  return `sig_${Date.now()}_${_mt5SignalSeq}_${String(symbol || "NA")}_${src}`
+    .replace(/[^A-Za-z0-9_.:-]/g, "")
+    .slice(0, 80);
+}
+
+function logMt5SignalEvent(event, ctx) {
+  /* Only instrument the MT5 path — in Deriv mode no MT5 order is expected,
+     so recording rejections there would be pure noise. */
+  if (autoTradeExecutionMode !== "mt5") return;
+  if (!MT5_SIGNAL_LOG_API_URL) return;
+  if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) return;
+  try {
+    fetch(MT5_SIGNAL_LOG_API_URL, {
+      method: "POST",
+      headers: mt5BridgeHeaders(),
+      body: JSON.stringify(Object.assign({ event }, ctx))
+    }).catch(() => {});
+  } catch { /* never let audit logging break execution */ }
+}
+
+function mt5SignalAuditContext(signalId, signal, symbol) {
+  return {
+    signalId,
+    symbol,
+    direction: signal && signal.dir === "BEAR" ? "SELL" : "BUY",
+    confidence: signal && Number.isFinite(Number(signal.confidence)) ? Number(signal.confidence) : null,
+    source: (signal && signal.source) || null,
+    strategyName: (signal && signal.strategyName) || null,
+    entry: signal && Number.isFinite(Number(signal.entry)) ? Number(signal.entry) : null,
+    sl: signal && Number.isFinite(Number(signal.sl)) ? Number(signal.sl) : null,
+    tp: signal && Number.isFinite(Number(signal.tp)) ? Number(signal.tp) : null
+  };
+}
+
 /** Fetch the admin-configured daily loss limit % from the server, overriding
  *  AUTO_TRADE_DAILY_LOSS_CAP_PCT_DEFAULT. Silently keeps the default on any
  *  failure (not logged in, offline, server error) so this never blocks or
@@ -16437,7 +16488,7 @@ async function fetchRiskConfig() {
   finally { riskConfigInitialRequestSettled = true; }
 }
 
-function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake) {
+function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake, signalId) {
   const currentPrice = candles.length > 0 ? Number(candles[candles.length - 1]?.close || candles[candles.length - 1]?.c || 0) : null;
   const side = effectiveDir === "BULL" ? "BUY" : "SELL";
   const orderType = (() => {
@@ -16468,6 +16519,11 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
   return {
     symbol,
     dir: side,
+    /* Correlation id so api/mt5/audit.php can join this order back to the
+       signal that produced it (signals-without-orders / orders-without-
+       signals discrepancy reporting). */
+    signalId: signalId || null,
+    confidence: Number.isFinite(Number(signal.confidence)) ? Number(signal.confidence) : null,
     entry: signal.entry,
     sl: tradeSl,
     tp: tradeTp,
@@ -16508,10 +16564,14 @@ function resolveMt5HistoryResult(status) {
 }
 
 function submitMt5BridgeTrade({
-  signal, effectiveDir, tradeSl, tradeTp, symbol, slot, regime, stake, contractType, label
+  signal, effectiveDir, tradeSl, tradeTp, symbol, slot, regime, stake, contractType, label, signalId
 }) {
+  const auditCtx = mt5SignalAuditContext(signalId, signal, symbol);
+  const rejectSignal = (reason) => { logMt5SignalEvent("SIGNAL_REJECTED", Object.assign({ reason }, auditCtx)); };
+
   if (!mt5SignalApiUrl) {
     addLog("⚠ MT5 bridge skipped — Signal API URL is empty");
+    rejectSignal("account protection: MT5 Signal API URL is empty");
     return;
   }
   if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) {
@@ -16548,16 +16608,18 @@ function submitMt5BridgeTrade({
       !Number.isFinite(slNum) || slNum <= 0 ||
       !Number.isFinite(tpNum) || tpNum <= 0) {
     addLog(`⚠ MT5 bridge skipped — ${label} signal is missing a valid entry/SL/TP (entry=${signal.entry}, sl=${tradeSl}, tp=${tradeTp})`);
+    rejectSignal(`entry/SL/TP missing or invalid (entry=${signal.entry}, sl=${tradeSl}, tp=${tradeTp})`);
     return;
   }
   const slOk = effectiveDir === "BULL" ? slNum < entryNum : slNum > entryNum;
   const tpOk = effectiveDir === "BULL" ? tpNum > entryNum : tpNum < entryNum;
   if (!slOk || !tpOk) {
     addLog(`⚠ MT5 bridge skipped — ${label} SL/TP on wrong side of entry for ${effectiveDir} (entry=${entryNum}, sl=${slNum}, tp=${tpNum})`);
+    rejectSignal(`SL/TP on wrong side of entry for ${effectiveDir} (entry=${entryNum}, sl=${slNum}, tp=${tpNum})`);
     return;
   }
 
-  const payload = buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake);
+  const payload = buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake, signalId);
   const headers = mt5BridgeHeaders({ "X-Idempotency-Key": payload.idempotencyKey });
   const oppositeTag = (effectiveDir !== signal.dir) ? " [OPPOSITE]" : "";
   addLog(`🤖 ${label} MT5 bridge: ${payload.orderType} ${symbol} lot ${fmt(payload.lot, 2)}${oppositeTag}` + (maxConcurrentTrades > 1 ? ` [${slot.activeTrades.length + 1}/${maxConcurrentTrades}]` : ""));
@@ -16598,6 +16660,9 @@ function submitMt5BridgeTrade({
     mt5LastStatusSyncTs = 0;
   }).catch((err) => {
     addLog(`⚠ MT5 bridge submit failed: ${err.message || err}`);
+    /* The order never reached the queue — record it so audit.php reports the
+       signal as discarded at transport level rather than silently missing. */
+    rejectSignal(`signal.php dispatch failed: ${err.message || err}`);
   });
 }
 
@@ -16807,9 +16872,19 @@ function rebuildWalkForwardProfilesFromHistory() {
 }
 
 function executeAutoTrade(signal, _capturedWs) {
+  /* Mint the audit correlation id before the first gate so that every
+     rejection below — including the earliest halt/risk-config gates — is
+     attributable to a concrete signal in /api/mt5/audit.php. */
+  const auditSymbol = (signal && signal.symbol) || getActiveSymbol();
+  const auditSignalId = mt5MintSignalId(signal, auditSymbol);
+  const auditCtx = mt5SignalAuditContext(auditSignalId, signal, auditSymbol);
+  logMt5SignalEvent("SIGNAL_CREATED", auditCtx);
+  const rejectSignal = (reason) => { logMt5SignalEvent("SIGNAL_REJECTED", Object.assign({ reason }, auditCtx)); };
+
   /* Block if session TP/SL has been hit */
   if (autoTradeHalted) {
     addLog("⛔ Auto-trade blocked — session limit hit (reset session to resume)");
+    rejectSignal(`session limit hit`);
     return;
   }
 
@@ -16820,11 +16895,13 @@ function executeAutoTrade(signal, _capturedWs) {
    * blocks again — later fetches (e.g. after login) only refine the cap value. */
   if (!riskConfigInitialRequestSettled) {
     addLog("⏳ Auto-trade skipped — waiting for risk config to load");
+    rejectSignal(`risk config not loaded`);
     return;
   }
 
   if (!signal || !signal.dir || (signal.dir !== "BULL" && signal.dir !== "BEAR")) {
     addLog("⚠ Auto-trade skipped — invalid signal direction");
+    rejectSignal(`invalid signal direction`);
     return;
   }
 
@@ -16836,10 +16913,12 @@ function executeAutoTrade(signal, _capturedWs) {
   if (autoTradeExecutionMode !== "mt5") {
     if (!tradeWs || tradeWs.readyState !== WebSocket.OPEN) {
       addLog("⚠ Auto-trade skipped — auth WebSocket not connected (set Deriv token in Settings)");
+      rejectSignal(`auth WebSocket not connected`);
       return;
     }
     if (!authorized) {
       addLog("⚠ Auto-trade skipped — not authorized (set Deriv token in Settings)");
+      rejectSignal(`not authorized`);
       return;
     }
   }
@@ -16853,6 +16932,7 @@ function executeAutoTrade(signal, _capturedWs) {
     if (dailyDropPct >= AUTO_TRADE_DAILY_LOSS_CAP_PCT) {
       autoTradeHalted = true;
       addLog(`🛑 Auto-trade blocked — daily loss cap reached (${fmt(dailyDropPct,1)}%).`);
+      rejectSignal(`daily loss protection: daily loss cap reached`);
       return;
     }
   }
@@ -16862,6 +16942,7 @@ function executeAutoTrade(signal, _capturedWs) {
     const leftSec = Math.ceil((cooldownUntil - Date.now()) / 1000);
     addLog(`⚠ Auto-trade skipped — cooldown active on ${symbol} (${leftSec}s left)`);
     logSignalEngineDebug("SYMBOL_LOCKED", { symbol, reason: "cooldown_after_loss", cooldownUntil, leftSec });
+    rejectSignal(`cooldown filter: symbol cooldown active`);
     return;
   } else if (symbolCooldownUntil.has(symbol)) {
     logSignalEngineDebug("SYMBOL_UNLOCKED", { symbol, reason: "cooldown_expired", cooldownUntil });
@@ -16871,6 +16952,7 @@ function executeAutoTrade(signal, _capturedWs) {
   const freq = canPlaceByFrequency(symbol, signal.strategyName || null);
   if (!freq.ok) {
     addLog(`⚠ Auto-trade skipped — ${freq.reason}`);
+    rejectSignal(`trade frequency cap: ${freq.reason}`);
     return;
   }
 
@@ -16878,10 +16960,12 @@ function executeAutoTrade(signal, _capturedWs) {
     const allowed = getStrategyAllowedRegimes(signal.strategyName);
     if (!allowed.includes(regime)) {
       addLog(`⚠ Auto-trade skipped — ${signal.strategyName} gated in ${regime} regime`);
+      rejectSignal(`regime gating: ${signal.strategyName} gated in ${regime} regime`);
       return;
     }
     if (isStrategyTemporarilyPaused(signal.strategyName, regime)) {
       addLog(`⚠ Auto-trade skipped — ${signal.strategyName} temporarily paused in ${regime}`);
+      rejectSignal(`strategy paused: ${signal.strategyName} in ${regime}`);
       return;
     }
   }
@@ -16891,6 +16975,7 @@ function executeAutoTrade(signal, _capturedWs) {
      strategies keep RANGING via getStrategyAllowedRegimes). */
   if (signal.source === "breakout" && regime === "RANGING") {
     addLog("⚠ Auto-trade skipped — breakout signals are routed out of RANGING regime");
+    rejectSignal(`regime gating: breakout routed out of RANGING`);
     return;
   }
 
@@ -16898,12 +16983,14 @@ function executeAutoTrade(signal, _capturedWs) {
   const activeCount = slot.activeTrades.length;
   if (activeCount >= maxConcurrentTrades) {
     addLog(`⚠ Auto-trade skipped — max concurrent trades (${maxConcurrentTrades}) reached for ${symbol} (${activeCount} active)`);
+    rejectSignal(`max concurrent trades reached for ${symbol}`);
     return;
   }
 
   /* Block if a multiplier fetch is in progress for this symbol */
   if (autoTradeExecutionMode !== "mt5" && slot.fetchingMultiplier) {
     addLog(`⚠ Auto-trade skipped — fetching multiplier data for ${symbol}`);
+    rejectSignal(`multiplier fetch in progress`);
     return;
   }
 
@@ -16927,6 +17014,7 @@ function executeAutoTrade(signal, _capturedWs) {
     const hasOpposing = slot.activeTrades.some(t => t.contractType === opposingContractType);
     if (hasOpposing) {
       addLog(`⚠ Auto-trade skipped — opposing ${effectiveDir === "BULL" ? "BEAR" : "BULL"} trade already active on ${symbol}. Close it first to avoid hedging.`);
+      rejectSignal(`hedging protection: opposing trade already active on ${symbol}`);
       return;
     }
   }
@@ -16948,6 +17036,7 @@ function executeAutoTrade(signal, _capturedWs) {
       const confGate = checkConfluenceGate(effectiveDir, signal.entry, gateIdx);
       if (!confGate.pass) {
         addLog(`⚠ Auto-trade skipped — ${confGate.reason}`);
+        rejectSignal(`confluence filter: ${confGate.reason}`);
         return;
       }
     } else {
@@ -16955,12 +17044,14 @@ function executeAutoTrade(signal, _capturedWs) {
       const confScore = computeConfluenceScore(effectiveDir, signal.entry, gateIdx);
       if (confScore < dynamicConfMin) {
         addLog(`⚠ Auto-trade skipped — dynamic confluence ${confScore}/${dynamicConfMin} (${regime})`);
+        rejectSignal(`confidence filter: dynamic confluence ${confScore}/${dynamicConfMin} (${regime})`);
         return;
       }
     }
   }
   if (signal.source === "breakout" && requiresStrongBreakoutNow(symbol, getCurrentGranularitySec(), regime) && !(breakout && breakout.strong)) {
     addLog(`⚠ Auto-trade skipped — weak breakout blocked in ${regime} regime`);
+    rejectSignal(`confidence filter: weak breakout blocked in ${regime} regime`);
     return;
   }
 
@@ -16972,6 +17063,7 @@ function executeAutoTrade(signal, _capturedWs) {
   const corr = checkCorrelatedExposure(symbol, effectiveDir);
   if (!corr.ok) {
     addLog(`⚠ Auto-trade skipped — ${corr.reason}`);
+    rejectSignal(`correlated exposure: ${corr.reason}`);
     return;
   }
 
@@ -16984,6 +17076,7 @@ function executeAutoTrade(signal, _capturedWs) {
     const tier = getWeightedConfluenceTier(tierFactors);
     if (tier.tier === "C") {
       addLog(`⚠ Auto-trade skipped — C-setup (weighted confluence ${(tier.score * 100).toFixed(0)}% over ${tier.ratedCount} rated factors)`);
+      rejectSignal(`weighted confluence tier: C-setup (${(tier.score * 100).toFixed(0)}%)`);
       return;
     }
     if (tier.sizeMult < 1) {
@@ -17004,6 +17097,7 @@ function executeAutoTrade(signal, _capturedWs) {
     stake = Math.max(mt5MinLot, Math.min(mt5MaxLot, stake));
     submitMt5BridgeTrade({
       signal,
+      signalId: auditSignalId,
       effectiveDir,
       tradeSl,
       tradeTp,

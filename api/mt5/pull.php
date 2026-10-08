@@ -34,6 +34,7 @@ $census = ['totalOrders' => 0, 'byStatus' => [], 'byTerminal' => [], 'notDispatc
 // in-flight orders are left untouched so status callbacks still work.
 $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now, &$census): array {
     $out = [];
+    $assigned = [];
     foreach ($state['orders'] as &$order) {
         if (count($out) >= $limit) break;
         $status = (string) ($order['status'] ?? '');
@@ -56,10 +57,54 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
         if ($terminal !== '') $order['terminal'] = $terminal;
         if (!isset($order['history']) || !is_array($order['history'])) $order['history'] = [];
         $order['history'][] = ['status' => 'DISPATCHED', 'ts' => $now, 'message' => 'Dispatched to EA'];
+        $assigned[] = [
+            'signalId' => ($order['signalId'] ?? '') !== '' ? $order['signalId'] : null,
+            'orderId' => (string) ($order['orderId'] ?? ''),
+            'symbol' => $order['symbol'] ?? null,
+            'lot' => $order['lot'] ?? null,
+            'terminal' => $terminal !== '' ? $terminal : null,
+            'status' => 'DISPATCHED',
+        ];
 
         $out[] = $order;
     }
     unset($order);
+
+    // Per-terminal poll counters, updated on EVERY poll. These are what prove
+    // "the EA is reaching pull.php" without writing a ledger entry per poll:
+    // at the EA's 2s default interval that would evict every SIGNAL_*/ORDER_*
+    // record from the bounded event ring within minutes, destroying the very
+    // audit trail this ledger exists for. Discrete PULL_REQUEST/PULL_RESPONSE/
+    // ORDER_ASSIGNED events are therefore only recorded when a poll actually
+    // dispatched something.
+    $terminalKey = $terminal !== '' ? $terminal : '(unassigned)';
+    if (!isset($state['pullStats']) || !is_array($state['pullStats'])) $state['pullStats'] = [];
+    $stats = is_array($state['pullStats'][$terminalKey] ?? null) ? $state['pullStats'][$terminalKey] : [];
+    $state['pullStats'][$terminalKey] = [
+        'terminal' => $terminalKey,
+        'firstPullAt' => $stats['firstPullAt'] ?? $now,
+        'lastPullAt' => $now,
+        'pollCount' => ((int) ($stats['pollCount'] ?? 0)) + 1,
+        'emptyPollCount' => ((int) ($stats['emptyPollCount'] ?? 0)) + ($out === [] ? 1 : 0),
+        'dispatchedCount' => ((int) ($stats['dispatchedCount'] ?? 0)) + count($out),
+        'lastDispatchAt' => $out !== [] ? $now : ($stats['lastDispatchAt'] ?? null),
+    ];
+
+    if ($assigned !== []) {
+        mt5RecordEvent($state, 'PULL_REQUEST', [
+            'terminal' => $terminal !== '' ? $terminal : null,
+            'limit' => $limit,
+            'totalOrders' => count($state['orders']),
+        ], $now);
+        foreach ($assigned as $row) {
+            mt5RecordEvent($state, 'ORDER_ASSIGNED', $row, $now);
+        }
+        mt5RecordEvent($state, 'PULL_RESPONSE', [
+            'terminal' => $terminal !== '' ? $terminal : null,
+            'count' => count($out),
+            'orderIds' => array_column($assigned, 'orderId'),
+        ], $now);
+    }
 
     $census = mt5QueueCensus(
         $state['orders'],

@@ -60,6 +60,10 @@ function makeContext({ fetchImpl } = {}) {
       idempotencyKey: 'idem-1'
     }),
     mt5BridgeHeaders: (extra) => ({ ...extra }),
+    /* Audit-trail helpers added alongside the MT5 signal ledger — stubbed so
+       this gate test stays focused on dispatch behavior. */
+    mt5SignalAuditContext: (signalId) => ({ signalId }),
+    logMt5SignalEvent: () => {},
     fmt: (n) => String(n),
     maxConcurrentTrades: 1,
     safeJson: async () => ({ ok: true, order: { orderId: 'order-1' } }),
