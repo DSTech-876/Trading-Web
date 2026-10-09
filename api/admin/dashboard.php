@@ -89,6 +89,53 @@ try {
                     'adaptive_signal_decisions'    => (int) $db->fetchOne("SELECT COUNT(*) as cnt FROM adaptive_signal_decisions")['cnt'],
                 ];
             
+            case 'trends':
+                // Return actual historical data for the last 7 days instead of hardcoded synthetic data
+                $signals7d = $db->fetchAll("
+                    SELECT DATE(created_at) as day, COUNT(*) as cnt 
+                    FROM grid_scalper_ma_signals 
+                    WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                ");
+                
+                $trades7d = $db->fetchAll("
+                    SELECT DATE(created_at) as day, COUNT(*) as cnt 
+                    FROM trade_outcomes 
+                    WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                ");
+                
+                $wins7d = $db->fetchAll("
+                    SELECT DATE(created_at) as day, COUNT(*) as cnt 
+                    FROM trade_outcomes 
+                    WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY) AND outcome = 'WIN'
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                ");
+                
+                $users7d = $db->fetchAll("
+                    SELECT DATE(created_at) as day, COUNT(*) as cnt 
+                    FROM users 
+                    WHERE created_at > DATE_SUB(NOW(), INTERVAL 7 DAY)
+                    GROUP BY DATE(created_at)
+                    ORDER BY day ASC
+                ");
+                
+                // Fill gaps for missing days with 0
+                $signals = array_map(function($r) { return (int) $r['cnt']; }, $signals7d);
+                $trades = array_map(function($r) { return (int) $r['cnt']; }, $trades7d);
+                $wins = array_map(function($r) { return (int) $r['cnt']; }, $wins7d);
+                $users = array_map(function($r) { return (int) $r['cnt']; }, $users7d);
+                
+                return [
+                    'signals' => $signals,
+                    'trades' => $trades,
+                    'wins' => $wins,
+                    'users' => $users,
+                ];
+            
             default:
                 return null;
         }
@@ -113,6 +160,7 @@ try {
             'win_rate'      => getMetric('win_rate', $db),
             'telegram'      => getMetric('telegram', $db),
             'system'        => getMetric('system', $db),
+            'trends'        => getMetric('trends', $db),
         ]);
     }
     
