@@ -91,10 +91,26 @@ if ($method === 'POST') {
             'INSERT INTO user_notifications (user_id, title, message, created_by)
              VALUES (?, ?, ?, ?)'
         )->execute([$userId, $title, $message, $adminId]);
+        
+        $notifId = (int) $pdo->lastInsertId();
+        
+        // Diagnostic logging
+        error_log("Notification CREATE: notifId=$notifId, userId=$userId, targetUser=$username, titleLen=" . strlen($title) . ", createdBy=$adminId");
+        
+        // Verify write
+        $verify = $pdo->prepare('SELECT id, user_id, title FROM user_notifications WHERE id = ?');
+        $verify->execute([$notifId]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$verifyRow) {
+            error_log("Notification CREATE VERIFICATION FAILED: notifId=$notifId not found");
+        } else {
+            error_log("Notification CREATE VERIFIED: " . json_encode($verifyRow));
+        }
 
         jsonResponse([
             'ok'      => true,
-            'id'      => (int) $pdo->lastInsertId(),
+            'id'      => $notifId,
             'target'  => $userId === null ? 'all' : $username,
         ], 201);
     } catch (\Throwable $e) {
@@ -113,11 +129,38 @@ if ($method === 'DELETE') {
     }
     try {
         $pdo  = getDB();
+        
+        // Get notification details before deletion
+        $verify = $pdo->prepare('SELECT id, user_id, title FROM user_notifications WHERE id = ?');
+        $verify->execute([$id]);
+        $notifBefore = $verify->fetch(PDO::FETCH_ASSOC);
+        
         $stmt = $pdo->prepare('DELETE FROM user_notifications WHERE id = ?');
         $stmt->execute([$id]);
-        if ($stmt->rowCount() === 0) {
+        
+        $affected = $stmt->rowCount();
+        
+        // Diagnostic logging
+        error_log("Notification DELETE: notifId=$id, affected=$affected, deletedBy=$adminId");
+        if ($notifBefore) {
+            error_log("Notification DELETE DETAILS: " . json_encode($notifBefore));
+        }
+        
+        if ($affected === 0) {
             jsonResponse(['error' => 'Notification not found'], 404);
         }
+        
+        // Verify deletion
+        $verify = $pdo->prepare('SELECT id FROM user_notifications WHERE id = ?');
+        $verify->execute([$id]);
+        $stillExists = $verify->fetch();
+        
+        if ($stillExists) {
+            error_log("Notification DELETE VERIFICATION FAILED: notifId=$id still exists after deletion");
+        } else {
+            error_log("Notification DELETE VERIFIED: Record successfully deleted");
+        }
+        
         jsonResponse(['ok' => true]);
     } catch (\Throwable $e) {
         $response = APILogger::logEndpointError('/api/admin/notifications', 'DELETE', $e);

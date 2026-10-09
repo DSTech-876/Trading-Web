@@ -225,10 +225,27 @@ try {
             }
             $params[':user_id'] = $user_id;
             
+            // Diagnostic logging
+            error_log("User PATCH: userId=$user_id, updateFields=" . implode(',', array_keys($updates)) . ", adminId=$admin_id");
+            
             $db->execute(
                 "UPDATE users SET $set_clause, updated_at = NOW() WHERE id = :user_id",
                 $params
             );
+            
+            // Verify update
+            $updated = $helper->getUserFull($user_id);
+            if (!$updated) {
+                error_log("User PATCH VERIFICATION FAILED: userId=$user_id not found after update");
+            } else {
+                $changedFields = [];
+                foreach ($updates as $field => $newValue) {
+                    if (($current[$field] ?? null) !== $newValue) {
+                        $changedFields[] = "$field: {$current[$field]} → $newValue";
+                    }
+                }
+                error_log("User PATCH VERIFIED: " . implode(", ", $changedFields));
+            }
             
             $helper->logAction(
                 $admin_id,

@@ -68,6 +68,22 @@ try {
             'INSERT IGNORE INTO strategy_access (user_id, strategy_key, granted_by) VALUES (?, ?, ?)'
         );
         $stmt->execute([$userId, $stratKey, $adminId]);
+        $rowCount = $stmt->rowCount();
+        
+        // Diagnostic logging
+        error_log("Strategy GRANT: user=$userId, strategy=$stratKey, grantedBy=$adminId, affected=$rowCount");
+        
+        // Verify write
+        $verify = $pdo->prepare('SELECT user_id, strategy_key FROM strategy_access WHERE user_id = ? AND strategy_key = ?');
+        $verify->execute([$userId, $stratKey]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$verifyRow) {
+            error_log("Strategy GRANT VERIFICATION FAILED: user=$userId, strategy=$stratKey not found");
+        } else {
+            error_log("Strategy GRANT VERIFIED: " . json_encode($verifyRow));
+        }
+        
         jsonResponse(['message' => 'Strategy granted']);
     }
 
@@ -76,9 +92,26 @@ try {
             'DELETE FROM strategy_access WHERE user_id = ? AND strategy_key = ?'
         );
         $stmt->execute([$userId, $stratKey]);
-        if ($stmt->rowCount() === 0) {
+        $rowCount = $stmt->rowCount();
+        
+        // Diagnostic logging
+        error_log("Strategy REVOKE: user=$userId, strategy=$stratKey, revokedBy=$adminId, affected=$rowCount");
+        
+        if ($rowCount === 0) {
             jsonResponse(['error' => 'Strategy access not found'], 404);
         }
+        
+        // Verify deletion
+        $verify = $pdo->prepare('SELECT user_id FROM strategy_access WHERE user_id = ? AND strategy_key = ?');
+        $verify->execute([$userId, $stratKey]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if ($verifyRow) {
+            error_log("Strategy REVOKE VERIFICATION FAILED: user=$userId, strategy=$stratKey still exists");
+        } else {
+            error_log("Strategy REVOKE VERIFIED: Record successfully deleted");
+        }
+        
         jsonResponse(['message' => 'Strategy revoked']);
     }
 } catch (\Throwable $e) {

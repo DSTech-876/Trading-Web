@@ -401,18 +401,47 @@
         const trading = payload.trading || {};
         const users = payload.users || {};
         const winRate = payload.win_rate || {};
+        const trends = payload.trends || {};
+        
+        // Use actual historical data from database if available
+        const signalsHistory = trends.signals && Array.isArray(trends.signals) ? trends.signals : [];
+        const tradesHistory = trends.trades && Array.isArray(trends.trades) ? trends.trades : [];
+        const winsHistory = trends.wins && Array.isArray(trends.wins) ? trends.wins : [];
+        const usersHistory = trends.users && Array.isArray(trends.users) ? trends.users : [];
+        
+        // Ensure we have 7 data points (one for each day in the past week)
+        // If database returns fewer, pad with today's value
         const signalsToday = Number(trading.signals_today || 0);
         const tradesToday = Number(trading.trades_today || 0);
         const winsToday = Number(trading.wins_today || 0);
         const baseUsers = Number(users.total_users || 0);
         const baseWinRate = Number(winRate.win_rate_30d || 0);
+        
+        // Pad arrays to 7 days if needed
+        const padArray = (arr, target, pad = 0) => {
+          const result = [...arr];
+          while (result.length < target) result.push(pad);
+          return result.slice(-target);
+        };
+        
+        // Calculate win rate for each day if we don't have it
+        let winRatesHistory = [];
+        if (winsHistory.length > 0 && tradesHistory.length > 0) {
+          winRatesHistory = tradesHistory.map((trades, i) => {
+            return trades > 0 ? Number((winsHistory[i] / trades * 100).toFixed(1)) : 0;
+          });
+        } else {
+          // Fallback: estimate win rate progression
+          winRatesHistory = padArray([], 7, baseWinRate);
+        }
+        
         return {
           labels: ['6d', '5d', '4d', '3d', '2d', 'Yesterday', 'Today'],
-          signals: [0.55,0.72,0.63,0.8,0.77,0.91,1].map((factor) => Math.max(0, Math.round(signalsToday * factor))),
-          userGrowth: [0.94,0.95,0.96,0.97,0.98,0.99,1].map((factor) => Math.max(0, Math.round(baseUsers * factor))),
-          winRates: [0.9,0.94,0.92,0.96,0.98,0.99,1].map((factor) => Math.min(100, Number((baseWinRate * factor).toFixed(1)))),
-          trades: [0.58,0.66,0.61,0.73,0.86,0.9,1].map((factor) => Math.max(0, Math.round(tradesToday * factor))),
-          wins: [0.5,0.63,0.59,0.71,0.78,0.88,1].map((factor) => Math.max(0, Math.round(winsToday * factor)))
+          signals: padArray(signalsHistory, 7, signalsToday),
+          userGrowth: padArray(usersHistory, 7, baseUsers),
+          winRates: padArray(winRatesHistory, 7, baseWinRate),
+          trades: padArray(tradesHistory, 7, tradesToday),
+          wins: padArray(winsHistory, 7, winsToday)
         };
       }
 

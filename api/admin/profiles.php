@@ -164,13 +164,31 @@ if ($method === 'POST') {
 
     try {
         $pdo = getDB();
+        
+        // Diagnostic logging
+        error_log("Profile CREATE: adminId=$adminId, name=$name, isAdmin=$isAdmin, settingsLen=" . strlen($settingsJson));
+        
         $ins  = $pdo->prepare(
             'INSERT INTO indicator_profiles (name, settings_json, created_by, is_admin_profile)
              VALUES (?, ?, ?, ?)'
         );
         $ins->execute([$name, $settingsJson, $adminId, $isAdmin ? 1 : 0]);
-        jsonResponse(['message' => 'Profile created', 'id' => (int) $pdo->lastInsertId()], 201);
+        $newId = (int) $pdo->lastInsertId();
+        
+        // Verify write succeeded by immediately fetching the record
+        $verify = $pdo->prepare('SELECT id, name, created_by FROM indicator_profiles WHERE id = ?');
+        $verify->execute([$newId]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$verifyRow) {
+            error_log("Profile CREATE VERIFICATION FAILED: Record $newId not found after insert");
+            jsonResponse(['error' => 'Profile created but verification failed'], 500);
+        }
+        
+        error_log("Profile CREATE SUCCESS: id=$newId, verified=$verifyRow");
+        jsonResponse(['message' => 'Profile created', 'id' => $newId], 201);
     } catch (\Throwable $e) {
+        error_log("Profile CREATE ERROR: " . $e->getMessage());
         $response = APILogger::logEndpointError('/api/admin/profiles', 'POST', $e);
         jsonResponse($response, 500);
     }
@@ -224,13 +242,35 @@ if ($method === 'PATCH') {
 
     try {
         $pdo  = getDB();
+        
+        // Diagnostic logging
+        $updateFields = implode(', ', array_fill(0, count($set), '?'));
+        error_log("Profile PATCH: profileId=$profileId, fields=[" . implode(',', str_replace(' = ?', '', $set)) . "], paramCount=" . count($params));
+        
         $stmt = $pdo->prepare('UPDATE indicator_profiles SET ' . implode(', ', $set) . ' WHERE id = ?');
         $stmt->execute($params);
-        if ($stmt->rowCount() === 0) {
+        
+        $rowCount = $stmt->rowCount();
+        error_log("Profile PATCH result: rowCount=$rowCount");
+        
+        if ($rowCount === 0) {
             jsonResponse(['error' => 'Profile not found'], 404);
         }
+        
+        // Verify update succeeded
+        $verify = $pdo->prepare('SELECT id, name, updated_at FROM indicator_profiles WHERE id = ?');
+        $verify->execute([$profileId]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$verifyRow) {
+            error_log("Profile PATCH VERIFICATION FAILED: Profile $profileId not found after update");
+        } else {
+            error_log("Profile PATCH VERIFIED: " . json_encode($verifyRow));
+        }
+        
         jsonResponse(['message' => 'Profile updated']);
     } catch (\Throwable $e) {
+        error_log("Profile PATCH ERROR: " . $e->getMessage());
         $response = APILogger::logEndpointError('/api/admin/profiles', 'PATCH', $e);
         jsonResponse($response, 500);
     }
