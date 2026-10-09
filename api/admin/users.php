@@ -265,6 +265,20 @@ if ($method === 'POST') {
         $stmt = $pdo->prepare($lastQuery);
         $stmt->execute($lastParams);
         $newId = (int) $pdo->lastInsertId();
+        
+        // Diagnostic logging
+        error_log("User CREATE: username=$username, role=$role, status=$status, sub=$sub, newId=$newId");
+        
+        // Verify write
+        $verify = $pdo->prepare('SELECT id, username, role, status FROM users WHERE id = ?');
+        $verify->execute([$newId]);
+        $verifyRow = $verify->fetch(PDO::FETCH_ASSOC);
+        
+        if (!$verifyRow) {
+            error_log("User CREATE VERIFICATION FAILED: id=$newId not found in database");
+        } else {
+            error_log("User CREATE VERIFIED: " . json_encode($verifyRow));
+        }
 
         /* Grant initial strategies if provided */
         $strategies = $body['strategies'] ?? [];
@@ -277,6 +291,7 @@ if ($method === 'POST') {
                 if ($key !== '') {
                     $lastParams = [$newId, $key, $adminId];
                     $ins->execute($lastParams);
+                    error_log("User Strategy GRANT: userId=$newId, strategy=$key, grantedBy=$adminId");
                 }
             }
         }
