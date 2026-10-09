@@ -149,10 +149,14 @@ try {
             echo json_encode(['error' => 'Unknown metric: ' . htmlspecialchars($metric)]);
             exit;
         }
+        
+        // Diagnostic logging
+        error_log("Dashboard GET metric=$metric, dataKeys=" . implode(',', array_keys($data)));
+        
         echo json_encode($data);
     } else {
         // Return all metrics
-        echo json_encode([
+        $allData = [
             'users'         => getMetric('users', $db),
             'subscriptions' => getMetric('subscriptions', $db),
             'strategies'    => getMetric('strategies', $db),
@@ -161,7 +165,14 @@ try {
             'telegram'      => getMetric('telegram', $db),
             'system'        => getMetric('system', $db),
             'trends'        => getMetric('trends', $db),
-        ]);
+        ];
+        
+        // Diagnostic logging
+        error_log("Dashboard GET all metrics, keys=" . implode(',', array_keys($allData)) . 
+                  ", trading_signals=" . ($allData['trading']['signals_today'] ?? 0) .
+                  ", trends_signals_count=" . count($allData['trends']['signals'] ?? []));
+        
+        echo json_encode($allData);
     }
     
 } catch (\Throwable $e) {
