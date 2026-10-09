@@ -76,7 +76,11 @@ try {
     }
 
     $before = riskSettingsRow($pdo);
-    $adminId = (int) $GLOBALS['adminUserId'];
+    $adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+    
+    if ($adminId <= 0) {
+        jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+    }
 
     $pdo->beginTransaction();
     try {

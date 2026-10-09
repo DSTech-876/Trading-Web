@@ -24,7 +24,10 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
-$adminId = $GLOBALS['adminUserId'];
+$adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+if ($adminId <= 0) {
+    jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+}
 
 /* ═══════════════════════════════════════════════
    GET — list recent notifications

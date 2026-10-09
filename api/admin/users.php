@@ -20,6 +20,11 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
+$adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+if ($adminId <= 0) {
+    jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+}
+
 /* ═══════════════════════════════════════════════
    GET — list users
    ═══════════════════════════════════════════════ */
@@ -264,7 +269,6 @@ if ($method === 'POST') {
         /* Grant initial strategies if provided */
         $strategies = $body['strategies'] ?? [];
         if (is_array($strategies) && $strategies) {
-            $adminId = $GLOBALS['adminUserId'];
             $lastQuery = 'INSERT IGNORE INTO strategy_access (user_id, strategy_key, granted_by) VALUES (?, ?, ?)';
             $lastParams = [];
             $ins = $pdo->prepare($lastQuery);

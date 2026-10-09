@@ -22,6 +22,11 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
+$adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+if ($adminId <= 0) {
+    jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+}
+
 /* ── Resolve target user ID ── */
 $targetId = (int) ($_GET['id'] ?? 0);
 if ($targetId <= 0) {
@@ -250,7 +255,7 @@ if ($method === 'PATCH') {
    ═══════════════════════════════════════════════ */
 if ($method === 'DELETE') {
     /* Prevent self-deletion */
-    if ($targetId === $GLOBALS['adminUserId']) {
+    if ($targetId === $adminId) {
         jsonResponse(['error' => 'Cannot delete your own admin account'], 403);
     }
 
