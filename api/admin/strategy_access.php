@@ -24,6 +24,11 @@ if (!in_array($method, ['POST', 'DELETE'], true)) {
     jsonResponse(['error' => 'Method not allowed'], 405);
 }
 
+$adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+if ($adminId <= 0) {
+    jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+}
+
 $body       = getJsonBody();
 $userId     = (int) ($body['user_id']      ?? 0);
 $stratKey   = trim($body['strategy_key']  ?? '');
@@ -62,7 +67,7 @@ try {
         $stmt = $pdo->prepare(
             'INSERT IGNORE INTO strategy_access (user_id, strategy_key, granted_by) VALUES (?, ?, ?)'
         );
-        $stmt->execute([$userId, $stratKey, $GLOBALS['adminUserId']]);
+        $stmt->execute([$userId, $stratKey, $adminId]);
         jsonResponse(['message' => 'Strategy granted']);
     }
 

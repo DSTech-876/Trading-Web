@@ -30,6 +30,11 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
+$adminId = (int) ($GLOBALS['adminUserId'] ?? 0);
+if ($adminId <= 0) {
+    jsonResponse(['error' => 'Admin user ID is missing or invalid'], 500);
+}
+
 /* ═══════════════════════════════════════════════
    GET — list profiles
    ═══════════════════════════════════════════════ */
@@ -132,7 +137,7 @@ if ($method === 'POST') {
                 'INSERT IGNORE INTO user_profile_assignments (user_id, profile_id, assigned_by)
                  VALUES (?, ?, ?)'
             );
-            $ins->execute([$userId, $profileId, $GLOBALS['adminUserId']]);
+            $ins->execute([$userId, $profileId, $adminId]);
             jsonResponse(['message' => 'Profile assigned']);
         } catch (\Throwable $e) {
             $response = APILogger::logEndpointError('/api/admin/profiles', 'POST', $e);
@@ -163,7 +168,7 @@ if ($method === 'POST') {
             'INSERT INTO indicator_profiles (name, settings_json, created_by, is_admin_profile)
              VALUES (?, ?, ?, ?)'
         );
-        $ins->execute([$name, $settingsJson, $GLOBALS['adminUserId'], $isAdmin ? 1 : 0]);
+        $ins->execute([$name, $settingsJson, $adminId, $isAdmin ? 1 : 0]);
         jsonResponse(['message' => 'Profile created', 'id' => (int) $pdo->lastInsertId()], 201);
     } catch (\Throwable $e) {
         $response = APILogger::logEndpointError('/api/admin/profiles', 'POST', $e);
