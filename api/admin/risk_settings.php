@@ -86,7 +86,7 @@ try {
         $oldValue = is_array($lockedRow) ? (string) $lockedRow['daily_loss_limit_pct'] : (string) $before['daily_loss_limit_pct'];
 
         $stmt = $pdo->prepare(
-            'UPDATE risk_settings SET daily_loss_limit_pct = ?, updated_by = ? WHERE id = 1'
+            'UPDATE risk_settings SET daily_loss_limit_pct = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1'
         );
         $stmt->execute([$newPct, $adminId]);
 
