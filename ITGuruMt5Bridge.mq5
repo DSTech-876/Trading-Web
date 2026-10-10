@@ -43,6 +43,9 @@ input string Inp_BreakEvenHeader = "===== Auto Break-Even =====";  // (label)
 input bool   InpBreakEvenEnable        = true;  // move SL to break-even once a trade is sufficiently in profit
 input double InpBreakEvenTriggerPoints = 150;   // profit (in points) required before arming break-even
 input double InpBreakEvenLockPoints    = 20;    // points beyond entry to lock in as profit (0 = exact entry)
+input bool   InpBreakEvenStepEnable      = true;  // after arming, keep advancing SL further into profit as the trade goes deeper
+input double InpBreakEvenStepPoints      = 50;    // every additional N points of profit beyond the trigger advances the locked-in SL by one step
+input double InpBreakEvenStepLockPoints  = 25;    // points of extra profit locked in per step (should be <= InpBreakEvenStepPoints to always trail behind price)
 
 input string Inp_ResilienceHeader = "===== Connection & Retry =====";  // (label)
 input int    InpMaxConsecutiveFailBeforeBackoff = 3;
@@ -1041,10 +1044,15 @@ bool ValidateMargin(string symbol, string side, double lot, double price, string
 
 // Moves a position's stop loss to break-even (entry price plus an optional
 // lock-in offset) once its unrealized profit reaches InpBreakEvenTriggerPoints,
-// so a subsequent reversal cannot turn a winning trade into a loss. Re-derives
-// "already armed" directly from the broker's current SL on every call instead
-// of persisting a flag, matching this EA's broker-state-is-truth pattern, so
-// it is safe across restarts and never loosens an SL a user tightened further.
+// so a subsequent reversal cannot turn a winning trade into a loss. When
+// InpBreakEvenStepEnable is on, the locked-in profit keeps advancing in
+// InpBreakEvenStepPoints increments the deeper the trade goes into profit
+// (a staircase trail), always staying InpBreakEvenStepPoints behind the
+// current unrealized profit so it never gets stopped out on a single tick's
+// pullback. Re-derives "already armed"/"current step" directly from the
+// broker's current SL on every call instead of persisting a flag, matching
+// this EA's broker-state-is-truth pattern, so it is safe across restarts and
+// never loosens an SL a user tightened further.
 void ManageBreakEven()
 {
    if(!InpBreakEvenEnable) return;
@@ -1075,8 +1083,27 @@ void ManageBreakEven()
 
       if(profitPts < InpBreakEvenTriggerPoints) continue;
 
-      double targetSl = isBuy ? entryPrice + InpBreakEvenLockPoints*point
-                               : entryPrice - InpBreakEvenLockPoints*point;
+      // Base lock-in is the configured break-even offset. If step trailing is
+      // enabled, add one InpBreakEvenStepLockPoints increment for every full
+      // InpBreakEvenStepPoints of profit earned beyond the trigger, so deeper
+      // profit progressively raises (buy) / lowers (sell) the protected SL.
+      double lockPts = InpBreakEvenLockPoints;
+      if(InpBreakEvenStepEnable && InpBreakEvenStepPoints>0)
+      {
+         double profitBeyondTrigger = profitPts - InpBreakEvenTriggerPoints;
+         int steps = (int)MathFloor(profitBeyondTrigger / InpBreakEvenStepPoints);
+         if(steps>0) lockPts += steps * InpBreakEvenStepLockPoints;
+
+         // Never lock in more than the trade has actually earned; always leave
+         // at least one step's worth of buffer behind the live profit so a
+         // normal tick-to-tick pullback cannot immediately trigger the stop.
+         double maxLockPts = profitPts - InpBreakEvenStepPoints;
+         if(lockPts > maxLockPts) lockPts = maxLockPts;
+         if(lockPts < InpBreakEvenLockPoints) lockPts = InpBreakEvenLockPoints;
+      }
+
+      double targetSl = isBuy ? entryPrice + lockPts*point
+                               : entryPrice - lockPts*point;
       targetSl = NormalizeDouble(targetSl, digits);
 
       // Already at or better than the break-even target -> nothing to do.
@@ -1109,7 +1136,8 @@ void ManageBreakEven()
       {
          LogEvent("INFO","BREAK_EVEN_SET",comment,
                   "ticket=#"+(string)ticket+" symbol="+symbol+" entry="+DoubleToString(entryPrice,digits)+
-                  " newSL="+DoubleToString(targetSl,digits)+" profitPts="+DoubleToString(profitPts,1));
+                  " newSL="+DoubleToString(targetSl,digits)+" lockPts="+DoubleToString(lockPts,1)+
+                  " profitPts="+DoubleToString(profitPts,1));
       }
       else
       {
