@@ -39,6 +39,11 @@ input bool   InpUseSessionFilter = false; // restrict trading to a server-time h
 input int    InpSessionStartHour = 0;     // 0-23, inclusive
 input int    InpSessionEndHour   = 23;    // 0-23, inclusive
 
+input string Inp_BreakEvenHeader = "===== Auto Break-Even =====";  // (label)
+input bool   InpBreakEvenEnable        = true;  // move SL to break-even once a trade is sufficiently in profit
+input double InpBreakEvenTriggerPoints = 150;   // profit (in points) required before arming break-even
+input double InpBreakEvenLockPoints    = 20;    // points beyond entry to lock in as profit (0 = exact entry)
+
 input string Inp_ResilienceHeader = "===== Connection & Retry =====";  // (label)
 input int    InpMaxConsecutiveFailBeforeBackoff = 3;
 input int    InpMaxBackoffSeconds = 120;
@@ -1032,6 +1037,88 @@ bool ValidateMargin(string symbol, string side, double lot, double price, string
    return true;
 }
 
+//------------------------------ Auto break-even -------------------------------
+
+// Moves a position's stop loss to break-even (entry price plus an optional
+// lock-in offset) once its unrealized profit reaches InpBreakEvenTriggerPoints,
+// so a subsequent reversal cannot turn a winning trade into a loss. Re-derives
+// "already armed" directly from the broker's current SL on every call instead
+// of persisting a flag, matching this EA's broker-state-is-truth pattern, so
+// it is safe across restarts and never loosens an SL a user tightened further.
+void ManageBreakEven()
+{
+   if(!InpBreakEvenEnable) return;
+
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(point<=0) point = _Point;
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
+      long   type       = PositionGetInteger(POSITION_TYPE);
+      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double curSl      = PositionGetDouble(POSITION_SL);
+      double curTp      = PositionGetDouble(POSITION_TP);
+
+      MqlTick tick;
+      if(!SymbolInfoTick(symbol, tick)) continue;
+
+      bool   isBuy     = (type==POSITION_TYPE_BUY);
+      double curPrice  = isBuy ? tick.bid : tick.ask;
+      double profitPts = isBuy ? (curPrice-entryPrice)/point : (entryPrice-curPrice)/point;
+
+      if(profitPts < InpBreakEvenTriggerPoints) continue;
+
+      double targetSl = isBuy ? entryPrice + InpBreakEvenLockPoints*point
+                               : entryPrice - InpBreakEvenLockPoints*point;
+      targetSl = NormalizeDouble(targetSl, digits);
+
+      // Already at or better than the break-even target -> nothing to do.
+      bool alreadyAtOrBetter = isBuy ? (curSl>0 && curSl>=targetSl)
+                                     : (curSl>0 && curSl<=targetSl);
+      if(alreadyAtOrBetter) continue;
+
+      // Respect the broker's minimum stop distance from the current market
+      // price; if too close, skip and retry on the next pass once price/time
+      // allows a valid modify.
+      long   stopLevelPts   = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+      long   freezeLevelPts = SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+      double minDist        = MathMax(stopLevelPts, freezeLevelPts) * point;
+      double distToPrice    = isBuy ? (curPrice-targetSl) : (targetSl-curPrice);
+      if(minDist>0 && distToPrice < minDist) continue;
+
+      MqlTradeRequest req;
+      MqlTradeResult  res;
+      ZeroMemory(req);
+      ZeroMemory(res);
+      req.action   = TRADE_ACTION_SLTP;
+      req.position = ticket;
+      req.symbol   = symbol;
+      req.sl       = targetSl;
+      req.tp       = curTp;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      bool ok = OrderSend(req,res);
+      if(ok && (res.retcode==TRADE_RETCODE_DONE || res.retcode==TRADE_RETCODE_PLACED))
+      {
+         LogEvent("INFO","BREAK_EVEN_SET",comment,
+                  "ticket=#"+(string)ticket+" symbol="+symbol+" entry="+DoubleToString(entryPrice,digits)+
+                  " newSL="+DoubleToString(targetSl,digits)+" profitPts="+DoubleToString(profitPts,1));
+      }
+      else
+      {
+         LogEvent("WARN","BREAK_EVEN_FAIL",comment,
+                  "ticket=#"+(string)ticket+" symbol="+symbol+" retcode="+(string)res.retcode+" comment="+res.comment);
+      }
+   }
+}
+
 //------------------------------ Daily loss halt --------------------------------
 
 string DailyStateFileName()
@@ -1767,5 +1854,14 @@ void OnTimer()
    ResetDailyTrackingIfNeeded();
    CheckDailyLossHalt();
    PollAndExecute();
+   ManageBreakEven();
    UpdateDashboard();
+}
+
+void OnTick()
+{
+   // Checked on every tick (independent of the InpPollSeconds signal-poll
+   // cadence) so a fast price reversal can't erase profit before the next
+   // timer pass arms break-even.
+   ManageBreakEven();
 }
