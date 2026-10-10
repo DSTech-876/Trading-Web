@@ -237,7 +237,7 @@ string TradeRetcodeDescription(uint retcode)
       case TRADE_RETCODE_LOCKED:            return "request locked for processing";
       case TRADE_RETCODE_FROZEN:            return "order/position frozen";
       case TRADE_RETCODE_INVALID_FILL:      return "unsupported order filling type (try a different InpMaxSlippagePoints/filling mode)";
-      case TRADE_RETCODE_CONNECTION_FAIL:   return "no connection";
+      case TRADE_RETCODE_CONNECTION:        return "no connection";
       case TRADE_RETCODE_ONLY_REAL:         return "operation allowed only for live accounts";
       default:                             return "retcode " + (string)retcode;
    }
