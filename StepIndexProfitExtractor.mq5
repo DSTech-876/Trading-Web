@@ -296,6 +296,54 @@ double PointsToPrice(double points)
    return points * PointValue();
 }
 
+// Query the broker's minimum stop distance in points
+long GetBrokerStopLevelPoints()
+{
+   long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   return (stopLevel > 0) ? stopLevel : 0;
+}
+
+// Enforce broker's minimum stop distance and normalize SL/TP
+// Returns true if SL/TP meet broker requirements, false if they need to be adjusted or skipped
+bool ValidateSLTP(double price, double &outSL, double &outTP, int direction)
+{
+   long stopLevelPts = GetBrokerStopLevelPoints();
+   if(stopLevelPts <= 0)
+      return true; // no constraint, accept as-is
+   
+   double minDistance = PointsToPrice(stopLevelPts);
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   
+   // SL must be at least minDistance away from current price
+   if(direction > 0) // BUY
+   {
+      if(outSL > 0 && (price - outSL) < minDistance)
+      {
+         outSL = NormalizeDouble(price - minDistance, digits);
+         if(outSL < 0)
+            outSL = 0; // broker may not allow negative SL adjustment for buys
+      }
+   }
+   else // SELL
+   {
+      if(outSL > 0 && (outSL - price) < minDistance)
+      {
+         outSL = NormalizeDouble(price + minDistance, digits);
+      }
+   }
+   
+   // TP must be at least minDistance away from current price
+   if(outTP > 0)
+   {
+      if(direction > 0 && (outTP - price) < minDistance)
+         outTP = NormalizeDouble(price + minDistance, digits);
+      else if(direction < 0 && (price - outTP) < minDistance)
+         outTP = NormalizeDouble(price - minDistance, digits);
+   }
+   
+   return true;
+}
+
 double GetAtr(int shift=0)
 {
    double buf[];
@@ -891,6 +939,9 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    sl = NormalizeDouble(sl, digits);
    tp = NormalizeDouble(tp, digits);
+    
+   // Validate SL/TP against broker's stop level; adjust if necessary
+   ValidateSLTP(price, sl, tp, direction);
 
    MqlTradeRequest req;
    MqlTradeResult  res;
@@ -929,6 +980,8 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
          tp = (direction>0) ? (req.price + PointsToPrice(tpPoints)) : (req.price - PointsToPrice(tpPoints));
          req.sl = NormalizeDouble(sl, digits);
          req.tp = NormalizeDouble(tp, digits);
+         // Re-validate SL/TP on retry
+         ValidateSLTP(req.price, req.sl, req.tp, direction);
       }
       Sleep(InpRetryDelayMs);
    }
@@ -991,7 +1044,28 @@ void ClosePosition(string why)
    req.magic     = InpMagic;
    req.type_filling = PickFilling();
 
-   bool ok = OrderSend(req, res);
+   // Retry on frozen position (10029) with backoff
+   bool ok = false;
+   int maxRetries = 3;
+   for(int attempt = 0; attempt < maxRetries; attempt++)
+   {
+      ZeroMemory(res);
+      ok = OrderSend(req, res);
+      if(ok && (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL))
+         break;
+      
+      // Error 10029: position/order frozen; try again
+      if(res.retcode == 10029 && attempt < maxRetries - 1)
+      {
+         Sleep(500); // wait for unlock
+         if(SymbolInfoTick(_Symbol, tick))
+            req.price = (type==POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+         continue;
+      }
+      
+      break;
+   }
+   
    LogInfo("ClosePosition (" + why + "): ok=" + (string)ok + " retcode=" + (string)res.retcode +
            " (" + TradeRetcodeDescription(res.retcode) + ")");
 }
@@ -1010,6 +1084,32 @@ void ModifySLTP(double newSL, double newTP)
    if(MathAbs(newSL-curSL) < PointValue()*0.5 && MathAbs(newTP-curTP) < PointValue()*0.5)
       return; // no meaningful change
 
+   // Get current price to validate against broker's stop level
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return;
+   
+   long type = PositionGetInteger(POSITION_TYPE);
+   double currentPrice = (type==POSITION_TYPE_BUY) ? tick.bid : tick.ask;
+   
+   // Validate SL/TP against broker's stop level
+   if(!ValidateSLTP(currentPrice, newSL, newTP, (type==POSITION_TYPE_BUY) ? 1 : -1))
+      return; // validation failed, abort modification
+   
+   // Check if SL still violates constraints after validation
+   long stopLevelPts = GetBrokerStopLevelPoints();
+   if(stopLevelPts > 0)
+   {
+      double minDistance = PointsToPrice(stopLevelPts);
+      if(newSL > 0)
+      {
+         if(type==POSITION_TYPE_BUY && (currentPrice - newSL) < minDistance)
+            return; // SL too close to current price, skip this modification
+         if(type==POSITION_TYPE_SELL && (newSL - currentPrice) < minDistance)
+            return; // SL too close to current price, skip this modification
+      }
+   }
+
    MqlTradeRequest req;
    MqlTradeResult  res;
    ZeroMemory(req);
@@ -1023,8 +1123,12 @@ void ModifySLTP(double newSL, double newTP)
 
    bool ok = OrderSend(req, res);
    if(!ok || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_DONE_PARTIAL))
+   {
+      // Log warning but don't treat as critical failure
+      // Error 10016 (invalid stops) or 10029 (frozen position) are recoverable
       LogWarn("ModifySLTP failed: ok=" + (string)ok + " retcode=" + (string)res.retcode +
               " (" + TradeRetcodeDescription(res.retcode) + ")");
+   }
 }
 
 // Called every tick while a position is open: handles quick profit extraction
