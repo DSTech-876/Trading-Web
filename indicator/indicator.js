@@ -17166,14 +17166,27 @@ function executeAutoTrade(signal, _capturedWs) {
     }
   }
 
-  /* When opposite mode flips direction, swap SL and TP so they are on the
-     correct side of the entry for the reversed trade direction.
+  /* When opposite mode flips direction, recompute SL/TP by mirroring the
+     original risk/reward *distances* around the entry rather than naively
+     swapping the SL/TP price levels. A naive swap turns the original
+     reward distance into the new risk and the original risk distance into
+     the new reward — inverting the R:R ratio (e.g. a 1:2 setup becomes a
+     2:1 setup), which is why opposite-mode trades were risking more than
+     they stood to gain. Mirroring preserves the original risk and reward
+     amounts, just reflected onto the opposite side of the entry.
      Skip if caller already computed correct SL/TP (_oppositePreApplied). */
   let tradeSl = signal.sl;
   let tradeTp = signal.tp;
-  if (!signal._oppositePreApplied && effectiveDir !== signal.dir && tradeSl != null && tradeTp != null) {
-    tradeSl = signal.tp;
-    tradeTp = signal.sl;
+  if (!signal._oppositePreApplied && effectiveDir !== signal.dir && tradeSl != null && tradeTp != null && signal.entry != null) {
+    const riskDist = Math.abs(signal.entry - signal.sl);
+    const rewardDist = Math.abs(signal.tp - signal.entry);
+    if (effectiveDir === "BULL") {
+      tradeSl = signal.entry - riskDist;
+      tradeTp = signal.entry + rewardDist;
+    } else {
+      tradeSl = signal.entry + riskDist;
+      tradeTp = signal.entry - rewardDist;
+    }
   }
 
   /* Dynamic quality gate by market regime + profile */
