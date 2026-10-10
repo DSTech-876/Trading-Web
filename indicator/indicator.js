@@ -2854,9 +2854,10 @@ let autoTradePendingTimer      = null;  /* unused shadow */
 let autoTradeConsecutiveErrors = 0;     /* unused shadow */
 let _autoTradeIdCounter = 0;           /* monotonically increasing counter for unique trade IDs */
 
-let autoTradeScalpOpposite   = false;  /* reverse scalp signal direction */
-let autoTradeStrategyOpposite = false; /* reverse strategy signal direction */
-let autoTradeHistory         = [];     /* trade history: { time, source, type, symbol, profit, result } */
+let autoTradeScalpOpposite    = false;  /* reverse scalp signal direction */
+let autoTradeStrategyOpposite = false;  /* reverse strategy signal direction */
+let autoTradeBreakoutOpposite = false;  /* reverse breakout signal direction */
+let autoTradeHistory          = [];     /* trade history: { time, source, type, symbol, profit, result } */
 let autoTradePL              = 0;      /* cumulative P/L for auto-trades */
 let autoTradeBalance         = null;   /* latest Deriv account balance */
 let autoTradeDailyStartBalance = null; /* daily baseline balance for daily-loss cap */
@@ -17141,7 +17142,7 @@ function executeAutoTrade(signal, _capturedWs) {
     return;
   }
 
-  /* Apply opposite mode: reverse direction for scalp / strategy if enabled */
+  /* Apply opposite mode: reverse direction for scalp / strategy / breakout if enabled */
   let effectiveDir = signal.dir;
   if (signal._oppositePreApplied) {
     /* SL/TP and direction already computed for the effective direction by the caller */
@@ -17151,6 +17152,9 @@ function executeAutoTrade(signal, _capturedWs) {
   } else if (signal.source === "strategy" && autoTradeStrategyOpposite) {
     effectiveDir = signal.dir === "BULL" ? "BEAR" : "BULL";
     addLog(`🔄 Opposite mode (Strategy): reversed ${signal.dir} → ${effectiveDir}`);
+  } else if (signal.source === "breakout" && autoTradeBreakoutOpposite) {
+    effectiveDir = signal.dir === "BULL" ? "BEAR" : "BULL";
+    addLog(`🔄 Opposite mode (Breakout): reversed ${signal.dir} → ${effectiveDir}`);
   }
 
   /* #16: Same-symbol opposing-direction check.
@@ -20756,6 +20760,7 @@ function saveSettings() {
       mt5StatusPollingEnabled,
       autoTradeScalpOpposite,
       autoTradeStrategyOpposite,
+      autoTradeBreakoutOpposite,
       autoTradeLiquiditySweep,
       autoTradeStopLossHunt,
       autoTradeFailedPinBar,
@@ -21201,8 +21206,10 @@ function restoreSettings() {
     updateAutoTradeCurrentStakeUI();
     if (s.autoTradeScalpOpposite != null) autoTradeScalpOpposite = s.autoTradeScalpOpposite;
     if (s.autoTradeStrategyOpposite != null) autoTradeStrategyOpposite = s.autoTradeStrategyOpposite;
+    if (s.autoTradeBreakoutOpposite != null) autoTradeBreakoutOpposite = s.autoTradeBreakoutOpposite;
     if (UI.autoTradeScalpOppositeToggle) UI.autoTradeScalpOppositeToggle.checked = autoTradeScalpOpposite;
     if (UI.autoTradeStrategyOppositeToggle) UI.autoTradeStrategyOppositeToggle.checked = autoTradeStrategyOpposite;
+    if (UI.autoTradeBreakoutOppositeToggle) UI.autoTradeBreakoutOppositeToggle.checked = autoTradeBreakoutOpposite;
     /* Per-strategy auto-trade sub-toggles */
     if (s.autoTradeLiquiditySweep != null) autoTradeLiquiditySweep = s.autoTradeLiquiditySweep;
     if (s.autoTradeStopLossHunt != null)   autoTradeStopLossHunt   = s.autoTradeStopLossHunt;
@@ -31127,6 +31134,13 @@ document.addEventListener("DOMContentLoaded", () => {
     UI.autoTradeStrategyOppositeToggle.addEventListener("change", () => {
       autoTradeStrategyOpposite = UI.autoTradeStrategyOppositeToggle.checked;
       addLog(`🔄 Strategy opposite mode: ${autoTradeStrategyOpposite ? "ON — signals will be reversed" : "OFF"}`);
+      saveSettings();
+    });
+  }
+  if (UI.autoTradeBreakoutOppositeToggle) {
+    UI.autoTradeBreakoutOppositeToggle.addEventListener("change", () => {
+      autoTradeBreakoutOpposite = UI.autoTradeBreakoutOppositeToggle.checked;
+      addLog(`🔄 Breakout opposite mode: ${autoTradeBreakoutOpposite ? "ON — signals will be reversed" : "OFF"}`);
       saveSettings();
     });
   }
