@@ -949,7 +949,9 @@ void ModifySLTP(double newSL, double newTP)
    req.sl       = newSL;
    req.tp       = newTP;
 
-   OrderSend(req, res);
+   bool ok = OrderSend(req, res);
+   if(!ok || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_DONE_PARTIAL))
+      LogInfo("ModifySLTP failed: ok=" + (string)ok + " retcode=" + (string)res.retcode);
 }
 
 // Called every tick while a position is open: handles quick profit extraction
