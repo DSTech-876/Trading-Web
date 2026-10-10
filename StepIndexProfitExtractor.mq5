@@ -263,6 +263,18 @@ int OnInit()
 
    ZeroMemory(g_pending);
 
+   // Reset spike/exhaustion and re-entry tracking state explicitly: unlike a
+   // fresh terminal load, changing EA inputs only triggers OnDeinit/OnInit
+   // without clearing module-level globals, so stale state must be cleared here.
+   g_consecutiveSpikeDirection = 0;
+   g_consecutiveSpikeCount     = 0;
+   g_lastSpikeRangeHigh        = 0.0;
+   g_lastSpikeRangeLow         = 0.0;
+   g_lastSpikeWasUp            = false;
+   g_awaitingReentry           = false;
+   g_reentryDirection          = 0;
+   g_reentryReadyAt            = 0;
+
    g_handleFastMA = iMA(_Symbol, _Period, InpFastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_handleSlowMA = iMA(_Symbol, _Period, InpSlowMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_handleAtr    = iATR(_Symbol, _Period, InpAtrPeriod);
@@ -391,7 +403,7 @@ int SessionAdaptiveQualityThreshold()
    TimeToStruct(TimeCurrent(), dt);
    int h = dt.hour;
 
-   if(g_hourStats[h].trades < InpSessionMinSamples)
+   if(g_hourStats[h].trades == 0 || g_hourStats[h].trades < InpSessionMinSamples)
       return baseThreshold;
 
    double hourWinRate = 100.0 * g_hourStats[h].wins / g_hourStats[h].trades;
@@ -856,7 +868,14 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
       return false;
    }
 
-   g_openTicket        = res.order>0 ? res.order : res.deal;
+   // Resolve the authoritative position ticket by selecting the position on
+   // this symbol rather than trusting res.order/res.deal directly (more
+   // robust across brokers/netting vs hedging accounts).
+   if(PositionSelect(_Symbol))
+      g_openTicket = (ulong)PositionGetInteger(POSITION_TICKET);
+   else
+      g_openTicket = (res.order>0) ? res.order : res.deal;
+
    g_openTime           = TimeCurrent();
    g_openDirection      = direction;
    g_openEntryPrice     = res.price>0 ? res.price : price;
