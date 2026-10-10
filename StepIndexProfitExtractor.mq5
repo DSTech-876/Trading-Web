@@ -166,6 +166,12 @@ bool     g_awaitingReentry = false;
 int      g_reentryDirection= 0;
 datetime g_reentryReadyAt  = 0;
 
+// Edge-triggered diagnostic state: avoids re-printing the same warning every
+// tick/bar while still guaranteeing it is logged the moment a blocking
+// condition starts (or stops).
+bool     g_lastAutoTradingAllowed   = true;
+bool     g_lastSymbolFilterPassed   = true;
+
 // Spike/exhaustion tracking
 int      g_consecutiveSpikeDirection = 0; // +1/-1 run of same-direction spike candles
 int      g_consecutiveSpikeCount     = 0;
@@ -193,6 +199,66 @@ void LogInfo(string msg)
 {
    if(InpVerboseLogging)
       Print("[StepIndexProfitExtractor] ", msg);
+}
+
+// Always printed regardless of InpVerboseLogging: used for conditions that
+// explain "no trades executing" (permissions, environment) so they are never
+// accidentally silenced by the verbose-logging toggle.
+void LogWarn(string msg)
+{
+   Print("[StepIndexProfitExtractor] WARNING: ", msg);
+}
+
+// Human-readable text for the trade server return codes most commonly seen
+// when "no trades execute" despite a confirmed, quality-gated setup.
+string TradeRetcodeDescription(uint retcode)
+{
+   switch(retcode)
+   {
+      case TRADE_RETCODE_DONE:              return "done";
+      case TRADE_RETCODE_DONE_PARTIAL:      return "done partially";
+      case TRADE_RETCODE_REQUOTE:           return "requote";
+      case TRADE_RETCODE_REJECT:            return "request rejected";
+      case TRADE_RETCODE_CONNECTION:        return "no connection to trade server";
+      case TRADE_RETCODE_TIMEOUT:           return "request timed out";
+      case TRADE_RETCODE_INVALID:           return "invalid request";
+      case TRADE_RETCODE_INVALID_VOLUME:    return "invalid volume (check broker's min/max/step lot size)";
+      case TRADE_RETCODE_INVALID_PRICE:     return "invalid price";
+      case TRADE_RETCODE_INVALID_STOPS:     return "invalid stops (SL/TP violate broker's stop level/freeze level)";
+      case TRADE_RETCODE_TRADE_DISABLED:    return "trading is disabled for this account/symbol";
+      case TRADE_RETCODE_MARKET_CLOSED:     return "market is closed";
+      case TRADE_RETCODE_NO_MONEY:          return "not enough money/margin";
+      case TRADE_RETCODE_PRICE_CHANGED:     return "price changed";
+      case TRADE_RETCODE_PRICE_OFF:         return "no quotes to process request";
+      case TRADE_RETCODE_LIMIT_ORDERS:      return "pending orders limit reached";
+      case TRADE_RETCODE_LIMIT_VOLUME:      return "volume limit reached";
+      case TRADE_RETCODE_CLIENT_DISABLES_AT:return "automated trading disabled by client terminal (enable the 'Algo Trading' button)";
+      case TRADE_RETCODE_SERVER_DISABLES_AT:return "automated trading disabled by trade server";
+      case TRADE_RETCODE_LOCKED:            return "request locked for processing";
+      case TRADE_RETCODE_FROZEN:            return "order/position frozen";
+      case TRADE_RETCODE_INVALID_FILL:      return "unsupported order filling type (try a different InpMaxSlippagePoints/filling mode)";
+      case TRADE_RETCODE_CONNECTION_FAIL:   return "no connection";
+      case TRADE_RETCODE_ONLY_REAL:         return "operation allowed only for live accounts";
+      default:                             return "retcode " + (string)retcode;
+   }
+}
+
+// Checks the three independent switches that must ALL be on for an EA to be
+// able to send orders: the terminal's global "Algo Trading" button, this
+// EA's own "Allow Algo Trading" permission, and the account/server-side
+// permission. Any one of them being off silently blocks every OrderSend()
+// call without the EA itself failing to compile or run.
+bool IsAutoTradingAllowed()
+{
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return false;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED))
+      return false;
+   if(!AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+      return false;
+   if(!AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+      return false;
+   return true;
 }
 
 bool IsStepIndexSymbol()
@@ -275,6 +341,9 @@ int OnInit()
    g_reentryDirection          = 0;
    g_reentryReadyAt            = 0;
 
+   g_lastAutoTradingAllowed    = IsAutoTradingAllowed();
+   g_lastSymbolFilterPassed    = true;
+
    g_handleFastMA = iMA(_Symbol, _Period, InpFastMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_handleSlowMA = iMA(_Symbol, _Period, InpSlowMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
    g_handleAtr    = iATR(_Symbol, _Period, InpAtrPeriod);
@@ -302,6 +371,9 @@ int OnInit()
 
    if(!IsStepIndexSymbol())
       Print("[StepIndexProfitExtractor] WARNING: chart symbol '", _Symbol, "' does not look like a Step Index. New entries are disabled until attached to one (InpRestrictToStepIndex=true).");
+
+   if(!g_lastAutoTradingAllowed)
+      LogWarn("Automated trading is NOT currently allowed (terminal 'Algo Trading' button, this EA's 'Allow Algo Trading' setting, or the account's expert-trading permission is off). No orders will be sent until this is enabled.");
 
    g_lastBarTime = 0;
    LogInfo("Initialized on " + _Symbol + " (" + EnumToString((ENUM_TIMEFRAMES)_Period) + ")");
@@ -799,14 +871,14 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
    {
-      LogInfo("ExecuteTrade: failed to get tick.");
+      LogWarn("ExecuteTrade: failed to get tick.");
       return false;
    }
 
    double atr = GetAtr(1);
    if(atr <= 0.0)
    {
-      LogInfo("ExecuteTrade: ATR unavailable, aborting entry.");
+      LogWarn("ExecuteTrade: ATR unavailable, aborting entry.");
       return false;
    }
 
@@ -864,7 +936,7 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
 
    if(!ok || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_DONE_PARTIAL))
    {
-      LogInfo("ExecuteTrade failed. retcode=" + (string)res.retcode);
+      LogWarn("ExecuteTrade failed. retcode=" + (string)res.retcode + " (" + TradeRetcodeDescription(res.retcode) + ")");
       return false;
    }
 
@@ -921,7 +993,8 @@ void ClosePosition(string why)
    req.type_filling = PickFilling();
 
    bool ok = OrderSend(req, res);
-   LogInfo("ClosePosition (" + why + "): ok=" + (string)ok + " retcode=" + (string)res.retcode);
+   LogInfo("ClosePosition (" + why + "): ok=" + (string)ok + " retcode=" + (string)res.retcode +
+           " (" + TradeRetcodeDescription(res.retcode) + ")");
 }
 
 void ModifySLTP(double newSL, double newTP)
@@ -951,7 +1024,8 @@ void ModifySLTP(double newSL, double newTP)
 
    bool ok = OrderSend(req, res);
    if(!ok || (res.retcode!=TRADE_RETCODE_DONE && res.retcode!=TRADE_RETCODE_DONE_PARTIAL))
-      LogInfo("ModifySLTP failed: ok=" + (string)ok + " retcode=" + (string)res.retcode);
+      LogWarn("ModifySLTP failed: ok=" + (string)ok + " retcode=" + (string)res.retcode +
+              " (" + TradeRetcodeDescription(res.retcode) + ")");
 }
 
 // Called every tick while a position is open: handles quick profit extraction
@@ -1086,7 +1160,17 @@ void ScanForNewSetup()
       return;
    }
 
-   if(!IsStepIndexSymbol())
+   bool symbolOk = IsStepIndexSymbol();
+   if(symbolOk != g_lastSymbolFilterPassed)
+   {
+      if(!symbolOk)
+         LogWarn("Chart symbol '" + _Symbol + "' no longer matches InpAllowedSymbolKeywords ('" + InpAllowedSymbolKeywords +
+                 "'); entry scanning is paused until attached to a matching Step Index symbol or InpRestrictToStepIndex is disabled.");
+      else
+         LogInfo("Chart symbol '" + _Symbol + "' now matches the Step Index filter; resuming entry scanning.");
+      g_lastSymbolFilterPassed = symbolOk;
+   }
+   if(!symbolOk)
       return;
 
    int raw = GetRawSignal();
@@ -1153,8 +1237,21 @@ void OnTick()
 
    UpdateSpikeTracker();
 
+   bool autoTradingAllowed = IsAutoTradingAllowed();
+   if(autoTradingAllowed != g_lastAutoTradingAllowed)
+   {
+      if(!autoTradingAllowed)
+         LogWarn("Automated trading just became disallowed (check the terminal's 'Algo Trading' button, this EA's 'Allow Algo Trading' input/checkbox, and the account's expert-trading permission). New entries are paused until it is re-enabled.");
+      else
+         LogInfo("Automated trading is allowed again; resuming entry scanning.");
+      g_lastAutoTradingAllowed = autoTradingAllowed;
+   }
+
    if(HasOpenPosition())
       return; // one setup, one risk, one execution at a time - no grid/averaging
+
+   if(!autoTradingAllowed)
+      return; // do not even start/confirm new setups while orders cannot be sent
 
    ProcessPendingSetup();
    ScanForNewSetup();
