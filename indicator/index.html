@@ -502,7 +502,9 @@
 
             <p class="param-group-title">Signal Sources</p>
             <label class="toggle-row"><input type="checkbox" id="autoTradeToggle" /> 📈 Breakout-Retest Trades</label>
-            <p class="hint" style="margin-bottom:6px;">Place a multiplier contract when a TRADE signal fires from the breakout-retest engine.</p>
+            <p class="hint" style="margin-bottom:2px;">Place a multiplier contract when a TRADE signal fires from the breakout-retest engine.</p>
+            <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeBreakoutOppositeToggle" /> 🔄 Opposite Mode (Breakout)</label>
+            <p class="hint" style="margin-bottom:6px;">Reverse the breakout signal direction — if signal says BUY, place SELL and vice versa.</p>
 
             <label class="toggle-row"><input type="checkbox" id="autoTradeScalpToggle" /> ⚡ Live Scalp Trades</label>
             <p class="hint" style="margin-bottom:2px;">Place a multiplier contract when a live scalp signal fires (confluence scanner).</p>
