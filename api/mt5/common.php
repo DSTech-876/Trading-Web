@@ -20,6 +20,25 @@ const MT5_ALLOWED_STATUS = [
 
 const MT5_FINAL_STATUS = ['FILLED', 'REJECTED', 'CANCELLED', 'EXPIRED'];
 
+// Statuses that mean an order either already reached the broker or is still
+// live in the queue — i.e. a second, independently-submitted signal that
+// matches one of these must be treated as a duplicate, not a fresh trade.
+// REJECTED/CANCELLED/EXPIRED are deliberately excluded: those orders never
+// had (or lost) any account impact, so a later matching signal is a
+// legitimate resubmission, not a duplicate.
+const MT5_DUPLICATE_BLOCKING_STATUS = ['QUEUED', 'DISPATCHED', 'RECEIVED', 'FILLED', 'MODIFIED'];
+
+// Window (seconds) in which a second signal for the same user/symbol/side/
+// source/strategy/entry/SL/TP is considered the *same* trading decision
+// rather than a new one. This exists because a user can have the indicator's
+// auto-trade engine running in more than one browser tab/session at once
+// (same login, two windows, a refreshed tab left open in the background,
+// etc.) — each session evaluates the same candle independently and mints its
+// own signalId/idempotencyKey, so the exact-match idempotency key check in
+// signal.php cannot catch it. This fingerprint-based guard catches it
+// instead, regardless of which session/tab/terminal it came from.
+const MT5_DUPLICATE_SIGNAL_WINDOW_SECS = 300;
+
 function mt5StoragePath(): string
 {
     return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
@@ -677,6 +696,40 @@ function mt5NormalizeSignalPayload(array $body): array
         'signalId' => $signalId,
         'confidence' => $confidence,
     ];
+}
+
+/**
+ * Find an existing order for the same user/trade decision that was created
+ * within MT5_DUPLICATE_SIGNAL_WINDOW_SECS and is still (or was) live — i.e.
+ * a near-simultaneous resubmission of the *same* signal, most commonly
+ * caused by the same user running auto-trade in more than one browser
+ * session/tab at once. Each session mints its own signalId/idempotencyKey
+ * (both include a per-session counter and/or a wall-clock timestamp), so the
+ * exact idempotency-key match in signal.php cannot catch this; matching on
+ * the actual trade parameters instead does, regardless of which
+ * session/tab/terminal produced the request.
+ *
+ * @param array<string,array<string,mixed>> $orders  $state['orders']
+ * @param array<string,mixed> $normalized             mt5NormalizeSignalPayload() result
+ * @return array<string,mixed>|null                   the matching order, or null
+ */
+function mt5FindRecentDuplicateOrder(array $orders, int $userId, array $normalized, int $now): ?array
+{
+    $tolerance = max((float) $normalized['point'], 1e-9) * 2;
+    foreach ($orders as $order) {
+        if ((int) ($order['userId'] ?? -1) !== $userId) continue;
+        if (!in_array((string) ($order['status'] ?? ''), MT5_DUPLICATE_BLOCKING_STATUS, true)) continue;
+        if (($now - (int) ($order['createdAt'] ?? 0)) > MT5_DUPLICATE_SIGNAL_WINDOW_SECS) continue;
+        if ((string) ($order['symbol'] ?? '') !== $normalized['symbol']) continue;
+        if ((string) ($order['side'] ?? '') !== $normalized['side']) continue;
+        if ((string) ($order['source'] ?? '') !== $normalized['source']) continue;
+        if ((string) ($order['strategyName'] ?? '') !== $normalized['strategyName']) continue;
+        if (abs((float) ($order['entry'] ?? 0) - (float) $normalized['entry']) > $tolerance) continue;
+        if (abs((float) ($order['sl'] ?? 0) - (float) $normalized['sl']) > $tolerance) continue;
+        if (abs((float) ($order['tp'] ?? 0) - (float) $normalized['tp']) > $tolerance) continue;
+        return $order;
+    }
+    return null;
 }
 
 /**

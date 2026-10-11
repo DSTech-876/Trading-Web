@@ -89,6 +89,28 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
         return ['duplicate' => true, 'order' => $existing, 'queueDepth' => count($state['orders'])];
     }
 
+    // Cross-session duplicate guard: the idempotency key above only catches
+    // an *exact* repeat (same key), but the same user running auto-trade in
+    // two browser sessions/tabs independently mints a different signalId and
+    // idempotency key for what is the same underlying signal — each tab
+    // evaluates the same candle on its own and would otherwise queue, and the
+    // EA would fire, two real trades for one trading decision. Catch that by
+    // matching on the actual trade parameters (symbol/side/source/strategy/
+    // entry/SL/TP) for this user within a short recent window instead of
+    // relying on the client-supplied key matching exactly.
+    $recentDuplicate = mt5FindRecentDuplicateOrder($state['orders'], $userId, $normalized, $now);
+    if ($recentDuplicate !== null) {
+        mt5RecordEvent($state, 'ORDER_CREATED', [
+            'signalId' => $signalId !== '' ? $signalId : null,
+            'orderId' => $recentDuplicate['orderId'] ?? null,
+            'symbol' => $normalized['symbol'],
+            'duplicate' => true,
+            'reason' => 'duplicate protection: same user/symbol/side/entry/sl/tp within '
+                . MT5_DUPLICATE_SIGNAL_WINDOW_SECS . 's (likely a second logged-in session/tab)',
+        ], $now);
+        return ['duplicate' => true, 'order' => $recentDuplicate, 'queueDepth' => count($state['orders'])];
+    }
+
     $orderId = 'mt5_' . gmdate('YmdHis') . '_' . bin2hex(random_bytes(4));
     $order = [
         'orderId' => $orderId,
