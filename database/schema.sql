@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS users (
     telegram_user_id        BIGINT UNSIGNED DEFAULT NULL,
     telegram_username       VARCHAR(100)   DEFAULT NULL,
     telegram_linked_at      DATETIME       DEFAULT NULL,
+    mt5_bridge_key          CHAR(64)       DEFAULT NULL,
     last_login_at           TIMESTAMP      NULL DEFAULT NULL,
     created_at              TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS users (
     UNIQUE KEY uq_username  (username),
     UNIQUE KEY uq_email     (email),
     UNIQUE KEY uq_tg_user   (telegram_user_id),
+    UNIQUE KEY uq_mt5_bridge_key (mt5_bridge_key),
     INDEX      idx_username (username),
     INDEX      idx_email    (email),
     INDEX      idx_role     (role),
@@ -56,6 +58,33 @@ SET @users_has_subscription_plan := (
 );
 SET @users_sql := IF(@users_has_subscription_plan = 0,
     'ALTER TABLE users ADD COLUMN subscription_plan ENUM(''trial'',''weekly'',''monthly'') DEFAULT NULL AFTER subscription_status',
+    'SELECT 1');
+PREPARE users_stmt FROM @users_sql;
+EXECUTE users_stmt;
+DEALLOCATE PREPARE users_stmt;
+
+-- ──────────────────────────────────────────────
+-- Migration: add mt5_bridge_key to existing databases
+-- Safe to re-run — only applies when the column is missing.
+--
+-- Each user gets their own unique MT5 bridge key (generated on demand by
+-- api/mt5/bridge_key.php), configured into that user's own EA instance
+-- (ITGuruMt5Bridge.mq5 InpBridgeKey). api/mt5/pull.php and api/mt5/status.php
+-- resolve this key to its owning user and only ever dispatch/update that
+-- user's own orders — this is what stops one user's auto-trade signal from
+-- firing on another user's MT5 account when both share the same server
+-- deployment. This is distinct from the admin-only MT5_BRIDGE_KEY env var,
+-- which remains a single operator secret used solely by api/mt5/audit.php.
+-- ──────────────────────────────────────────────
+SET @users_has_mt5_bridge_key := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'mt5_bridge_key'
+);
+SET @users_sql := IF(@users_has_mt5_bridge_key = 0,
+    'ALTER TABLE users ADD COLUMN mt5_bridge_key CHAR(64) DEFAULT NULL AFTER telegram_linked_at, ADD UNIQUE KEY uq_mt5_bridge_key (mt5_bridge_key)',
     'SELECT 1');
 PREPARE users_stmt FROM @users_sql;
 EXECUTE users_stmt;

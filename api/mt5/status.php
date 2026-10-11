@@ -14,7 +14,11 @@ if (!rateLimit(180, 60)) {
 
 $rawBody = file_get_contents('php://input');
 $body = getJsonBody();
-mt5RequireBridgeKey($body);
+// Resolves this EA's own user — see mt5ResolveBridgeUserId() doc in
+// common.php. Every order update below is rejected unless the order being
+// updated actually belongs to this user, so one user's EA can never alter
+// another user's order lifecycle (even by guessing/replaying an orderId).
+$bridgeUserId = mt5ResolveBridgeUserId($body);
 
 $updates = $body['updates'] ?? null;
 if (!is_array($updates)) {
@@ -66,7 +70,7 @@ if ($validUpdates === []) {
 }
 
 $now = time();
-$result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): array {
+$result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now, $bridgeUserId): array {
     $applied = 0;
     $missing = [];
     $transitions = [];
@@ -79,6 +83,14 @@ $result = mt5WithStateLock(function (array &$state) use ($validUpdates, $now): a
             continue;
         }
         $order = &$state['orders'][$orderId];
+        // Cross-user isolation: report the order as "missing" (not a
+        // separate "forbidden" reason) rather than disclosing to a caller
+        // that an orderId they don't own exists at all.
+        if ((int) ($order['userId'] ?? -1) !== $bridgeUserId) {
+            $missing[] = $orderId;
+            unset($order);
+            continue;
+        }
         $fromStatus = (string) ($order['status'] ?? 'UNKNOWN');
 
         /* Lifecycle-revert guard: once an order has reached a FINAL status

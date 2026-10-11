@@ -603,6 +603,13 @@
                 <input type="number" id="mt5MaxLot" min="0.00001" step="0.00001" value="100" />
               </div>
             </div>
+            <div class="account-input-row">
+              <label class="hint" for="mt5BridgeKeyDisplay">My MT5 Bridge Key</label>
+              <input type="text" id="mt5BridgeKeyDisplay" readonly placeholder="Click Reveal to fetch your key" />
+              <button type="button" id="mt5BridgeKeyRevealBtn" class="bar-btn">Reveal</button>
+              <button type="button" id="mt5BridgeKeyRegenBtn" class="bar-btn" title="Generates a new key and immediately revokes the old one">Regenerate</button>
+            </div>
+            <p class="hint" style="margin-bottom:2px;">Paste this key into <b>your own</b> ITGuruMt5Bridge.mq5's <code>InpBridgeKey</code> input. It is unique to your account — never share it, and never reuse the same key across more than one user's EA, or that EA could receive another user's trade signals.</p>
             <label class="toggle-row"><input type="checkbox" id="mt5StatusPollingToggle" checked /> Poll MT5 status updates</label>
             <p class="hint" style="margin-bottom:2px;">Uses MULTUP/MULTDOWN contracts with SL &amp; TP from the signal's entry, stop-loss, and take-profit levels. Requires a valid Deriv token.</p>
             <p class="hint" style="margin-bottom:2px;">In <b>MT5 Bridge</b> mode, signals are sent to your bridge API with normalized Entry/SL/TP + order type mapping (market/limit/stop) and broker constraints.</p>
