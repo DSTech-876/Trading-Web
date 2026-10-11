@@ -62,18 +62,29 @@ This document provides minimal request/response templates matching these endpoin
 ### `GET|POST /api/mt5/pull.php`
 
 **Auth options**
-- Header: `X-MT5-BRIDGE-KEY: <MT5_BRIDGE_KEY>`
+- Header: `X-MT5-BRIDGE-KEY: <your-personal-bridge-key>`
 - Or request field/query: `bridge_key`
+
+> **Per-user key, not a shared secret.** Unlike the admin-only `MT5_BRIDGE_KEY` env var (used
+> solely by `audit.php`), `pull.php` and `status.php` require **each user's own personal bridge
+> key**, fetched/rotated from the web app via `GET`/`POST /api/mt5/bridge_key.php` (authenticated
+> with the user's normal login token) and configured into *that user's own* `ITGuruMt5Bridge.mq5`
+> `InpBridgeKey` input. The key is resolved server-side to its owning user
+> (`mt5ResolveBridgeUserId()` in `common.php`), and every order dispatched by `pull.php` — and every
+> status update accepted by `status.php` — is filtered to that user's own orders. This is what
+> stops one user's auto-trade signal from ever being dispatched to another user's MT5 account when
+> multiple users share the same server deployment: previously, any EA that knew the single shared
+> `MT5_BRIDGE_KEY` could pull *any* user's queued order.
 
 **GET example**
 ```http
-GET /api/mt5/pull.php?bridge_key=<MT5_BRIDGE_KEY>&limit=20&terminal=MT5-TERM-01
+GET /api/mt5/pull.php?bridge_key=<your-personal-bridge-key>&limit=20&terminal=MT5-TERM-01
 ```
 
 **POST request JSON (minimal)**
 ```json
 {
-  "bridge_key": "<MT5_BRIDGE_KEY>",
+  "bridge_key": "<your-personal-bridge-key>",
   "limit": 20,
   "terminal": "MT5-TERM-01"
 }
@@ -122,13 +133,17 @@ When the operator sets `MT5_TRADING_HALTED=true` in `.env` (emergency kill-switc
 ### `POST /api/mt5/status.php`
 
 **Auth options**
-- Header: `X-MT5-BRIDGE-KEY: <MT5_BRIDGE_KEY>`
+- Header: `X-MT5-BRIDGE-KEY: <your-personal-bridge-key>`
 - Or request field: `bridge_key`
+
+Same per-user key as `pull.php` (see above) — an update for an `orderId` that does not belong to
+the resolved user is rejected the same way as an unknown `orderId` (reported under
+`missingOrderIds`), so one user's EA cannot discover or alter another user's order status either.
 
 ### Single update request
 ```json
 {
-  "bridge_key": "<MT5_BRIDGE_KEY>",
+  "bridge_key": "<your-personal-bridge-key>",
   "orderId": "mt5_20260516235154_ab12cd34",
   "status": "FILLED",
   "brokerTicket": "12345678",
@@ -141,7 +156,7 @@ When the operator sets `MT5_TRADING_HALTED=true` in `.env` (emergency kill-switc
 ### Batch update request
 ```json
 {
-  "bridge_key": "<MT5_BRIDGE_KEY>",
+  "bridge_key": "<your-personal-bridge-key>",
   "updates": [
     {
       "orderId": "mt5_20260516235154_ab12cd34",
@@ -264,8 +279,20 @@ The reference EA in the repo root implements, in addition to the server-side con
   broker return codes; a live `Comment()` dashboard shows connection state, halt state, and
   signal/poll counters.
 
-`InpBridgeKey` has **no default value** — it must be set explicitly to match `MT5_BRIDGE_KEY` on the
-server. Never commit a real bridge key into source control.
+`InpBridgeKey` has **no default value** — it must be set explicitly to **your own personal bridge
+key**, fetched/rotated from the web app's MT5 Bridge settings panel (`GET`/`POST
+/api/mt5/bridge_key.php`). It is *not* the server's admin-only `MT5_BRIDGE_KEY` env var, and must
+never be shared across more than one user's EA — see the per-user key note under section 2 above.
+Never commit a real bridge key into source control.
+
+**Per-strategy magic numbers** — every order this EA places uses `InpMagic` as a base plus a small
+deterministic offset derived from the order's `source`/`strategyName` (`EffectiveMagic()`), bounded
+to `[InpMagic, InpMagic + 1000)`. This means trades from different strategies land on distinct,
+stable magic numbers visible directly in MT5's Trade/History "Magic" column, without needing to
+cross-reference the web dashboard to tell which strategy opened which trade. Every "does this
+position belong to this EA" check (`IsOwnMagic()`) compares against that whole range rather than
+exact equality to `InpMagic`, so open-trade counting, exposure totals, and duplicate-detection logic
+still recognize all of this EA's own positions regardless of which strategy placed them.
 
 ---
 

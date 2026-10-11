@@ -9,6 +9,11 @@
 //|  2. Tools > Options > Expert Advisors > Allow WebRequest for:     |
 //|       https://<your-domain>                                      |
 //|  3. Set InpBaseUrl and InpBridgeKey (never commit real secrets).  |
+//|     InpBridgeKey is YOUR OWN personal key from the web app's      |
+//|     MT5 Bridge settings panel ("Reveal"/"Regenerate" button) —    |
+//|     NOT a secret shared with other users. Each user has a         |
+//|     different key; this is what keeps another user's auto-trade  |
+//|     signal from ever being dispatched to your MT5 account.        |
 //|  4. ALWAYS test on a demo account before enabling live trading.   |
 //+------------------------------------------------------------------+
 #property strict
@@ -18,7 +23,7 @@
 //================================= Inputs ===================================
 
 input string InpBaseUrl         = "https://trading.dsitservicesja.com"; // no trailing slash
-input string InpBridgeKey       = "4be5ae08c7d9a41d4fdc9d87a9280e4f1dda3468dbc04d3d76969f3c2e4dfa79";    // REQUIRED: set a strong secret, matches server MT5_BRIDGE_KEY. Never commit real keys.
+input string InpBridgeKey       = "";    // REQUIRED: your personal key from the MT5 Bridge settings panel (Reveal/Regenerate). Unique per user — never share or reuse across users.
 input string InpTerminalId      = "MT5-TERM-01";
 input int    InpPollSeconds     = 2;      // base polling interval
 input int    InpHttpTimeoutMs   = 15000;
@@ -76,7 +81,38 @@ struct BridgeOrder
    double tp;
    double lot;
    long   createdAt; // unix epoch seconds, from server
+   string source;       // e.g. "breakout" — matches the web app's signal source
+   string strategyName; // e.g. "orb", "grid_scalper_ma" — which strategy fired this trade
 };
+
+// Per-strategy magic numbers: every order this EA places uses InpMagic as a
+// BASE plus a small deterministic offset derived from (source, strategyName)
+// so trades from different strategies land on distinct, stable magic
+// numbers that show up directly in MT5's Trade/History "Magic" column,
+// letting a user tell them apart without cross-referencing the web
+// dashboard. MAGIC_STRATEGY_RANGE bounds the offset so every order this EA
+// ever places still falls in [InpMagic, InpMagic + MAGIC_STRATEGY_RANGE), and
+// every existing "does this position belong to this EA" check below compares
+// against that whole range (IsOwnMagic) instead of exact equality to
+// InpMagic — otherwise every position-scanning/counting function (open
+// trade counts, exposure totals, cooldown/duplicate checks) would stop
+// recognizing positions placed under a non-zero offset as its own.
+#define MAGIC_STRATEGY_RANGE 1000
+
+bool IsOwnMagic(const long magic)
+{
+   return magic >= InpMagic && magic < InpMagic + MAGIC_STRATEGY_RANGE;
+}
+
+long EffectiveMagic(const string source, const string strategyName)
+{
+   string key = source + "|" + strategyName;
+   uint hash = 0;
+   int len = StringLen(key);
+   for(int i = 0; i < len; i++)
+      hash = hash * 31 + (uint)StringGetCharacter(key, i);
+   return InpMagic + (long)(hash % MAGIC_STRATEGY_RANGE);
+}
 
 //================================= Globals ===================================
 
@@ -320,7 +356,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
    {
       ulong t=PositionGetTicket(i);
       if(t==0 || !PositionSelectByTicket(t)) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+      if(!IsOwnMagic((long)PositionGetInteger(POSITION_MAGIC))) continue;
       if(PositionGetString(POSITION_COMMENT)!=o.orderId) continue;
       status="FILLED";
       ticket=(string)t;
@@ -333,7 +369,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
    {
       ulong t=OrderGetTicket(i);
       if(t==0 || !OrderSelect(t)) continue;
-      if((long)OrderGetInteger(ORDER_MAGIC)!=InpMagic) continue;
+      if(!IsOwnMagic((long)OrderGetInteger(ORDER_MAGIC))) continue;
       if(OrderGetString(ORDER_COMMENT)!=o.orderId) continue;
       status="RECEIVED";
       ticket=(string)t;
@@ -350,7 +386,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
    {
       ulong dealTicket = HistoryDealGetTicket(i);
       if(dealTicket==0) continue;
-      if((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic) continue;
+      if(!IsOwnMagic((long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC))) continue;
       if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY)!=DEAL_ENTRY_IN) continue;
       ulong orderTicket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
       if(orderTicket==0 || !HistoryOrderSelect(orderTicket)) continue;
@@ -378,7 +414,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
    {
       ulong orderTicket = HistoryOrderGetTicket(i);
       if(orderTicket==0) continue;
-      if((long)HistoryOrderGetInteger(orderTicket, ORDER_MAGIC) != InpMagic) continue;
+      if(!IsOwnMagic((long)HistoryOrderGetInteger(orderTicket, ORDER_MAGIC))) continue;
       if(HistoryOrderGetString(orderTicket, ORDER_COMMENT)!=o.orderId) continue;
       long state = HistoryOrderGetInteger(orderTicket, ORDER_STATE);
       if(state==ORDER_STATE_EXPIRED)       status="EXPIRED";
@@ -588,6 +624,8 @@ int ParseOrders(string json, BridgeOrder &out[])
       o.tp        = JsonGetNumber(obj,"tp",0.0);
       o.lot       = JsonGetNumber(obj,"lot",0.01);
       o.createdAt = JsonGetLong(obj,"createdAt",0);
+      o.source       = JsonGetString(obj,"source");
+      o.strategyName = JsonGetString(obj,"strategyName");
 
       if(o.orderId!="" && o.symbol!="" && o.orderType!="" && o.lot>0)
       {
@@ -957,7 +995,7 @@ void ScanOpenState(string symbol, string orderId,
       ulong ticket = PositionGetTicket(i);
       if(ticket==0) continue;
       if(!PositionSelectByTicket(ticket)) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(!IsOwnMagic((long)PositionGetInteger(POSITION_MAGIC))) continue;
 
       string posSymbol = PositionGetString(POSITION_SYMBOL);
       double vol = PositionGetDouble(POSITION_VOLUME);
@@ -978,7 +1016,7 @@ void ScanOpenState(string symbol, string orderId,
       ulong ticket = OrderGetTicket(i);
       if(ticket==0) continue;
       if(!OrderSelect(ticket)) continue;
-      if((long)OrderGetInteger(ORDER_MAGIC) != InpMagic) continue;
+      if(!IsOwnMagic((long)OrderGetInteger(ORDER_MAGIC))) continue;
 
       string ordSymbol = OrderGetString(ORDER_SYMBOL);
       double vol = OrderGetDouble(ORDER_VOLUME_CURRENT);
@@ -1062,7 +1100,7 @@ void ManageBreakEven()
       ulong ticket = PositionGetTicket(i);
       if(ticket==0) continue;
       if(!PositionSelectByTicket(ticket)) continue;
-      if((long)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      if(!IsOwnMagic((long)PositionGetInteger(POSITION_MAGIC))) continue;
 
       string symbol = PositionGetString(POSITION_SYMBOL);
       double point  = SymbolInfoDouble(symbol, SYMBOL_POINT);
@@ -1537,7 +1575,7 @@ bool SendTrade(BridgeOrder &o)
    ZeroMemory(req);
    ZeroMemory(res);
 
-   req.magic      = InpMagic;
+   req.magic      = EffectiveMagic(o.source, o.strategyName);
    req.symbol     = o.symbol;
    req.volume     = lot;
    req.deviation  = InpMaxSlippagePoints;
@@ -1578,7 +1616,8 @@ bool SendTrade(BridgeOrder &o)
             "action="+(string)req.action+" type="+(string)req.type+" symbol="+req.symbol+
             " volume="+DoubleToString(req.volume,2)+" price="+DoubleToString(req.price,reqDigits)+
             " sl="+DoubleToString(req.sl,reqDigits)+" tp="+DoubleToString(req.tp,reqDigits)+
-            " deviation="+(string)req.deviation+" magic="+(string)req.magic);
+            " deviation="+(string)req.deviation+" magic="+(string)req.magic+
+            " source="+o.source+" strategy="+o.strategyName);
 
    bool ok=false;
    int attempt=0;
@@ -1757,7 +1796,7 @@ void UpdateDashboard()
 
    string txt = "";
    txt += "=== ITGuru MT5 Bridge =============\n";
-   txt += "Terminal: "+InpTerminalId+"   Magic: "+(string)InpMagic+"\n";
+   txt += "Terminal: "+InpTerminalId+"   Magic base: "+(string)InpMagic+" (+0-"+(string)(MAGIC_STRATEGY_RANGE-1)+" per strategy)\n";
    txt += "Connection: "+connStatus+"   Last OK poll: "+(g_lastSuccessfulPoll>0?TimeToString(g_lastSuccessfulPoll,TIME_DATE|TIME_SECONDS):"never")+"\n";
    txt += "Trading: "+haltStatus+"\n";
    txt += "------------------------------------\n";
@@ -1790,7 +1829,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.type==TRADE_TRANSACTION_DEAL_ADD)
    {
       if(!HistoryDealSelect(trans.deal)) return;
-      if((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic) return;
+      if(!IsOwnMagic((long)HistoryDealGetInteger(trans.deal, DEAL_MAGIC))) return;
       if((long)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_IN) return; // only new fills
 
       ulong orderTicket = (ulong)HistoryDealGetInteger(trans.deal, DEAL_ORDER);
@@ -1821,7 +1860,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.type==TRADE_TRANSACTION_HISTORY_ADD)
    {
       if(!HistoryOrderSelect(trans.order)) return;
-      if((long)HistoryOrderGetInteger(trans.order, ORDER_MAGIC) != InpMagic) return;
+      if(!IsOwnMagic((long)HistoryOrderGetInteger(trans.order, ORDER_MAGIC))) return;
 
       long otype = HistoryOrderGetInteger(trans.order, ORDER_TYPE);
       bool wasPending = (otype==ORDER_TYPE_BUY_LIMIT || otype==ORDER_TYPE_SELL_LIMIT ||

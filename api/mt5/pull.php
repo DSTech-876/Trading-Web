@@ -19,7 +19,11 @@ if (!rateLimit(180, 60)) {
 }
 
 $body = $_SERVER['REQUEST_METHOD'] === 'POST' ? getJsonBody() : [];
-mt5RequireBridgeKey($body);
+// Resolves to the specific user who owns this bridge key — NOT the shared
+// admin MT5_BRIDGE_KEY. Every order below is filtered to this user's own
+// orders so a second user's EA (or a misconfigured/stale terminal id) can
+// never be handed this user's trade (or vice versa).
+$bridgeUserId = mt5ResolveBridgeUserId($body);
 
 $limit = (int) ($_GET['limit'] ?? $body['limit'] ?? 20);
 $limit = max(1, min(100, $limit));
@@ -32,11 +36,14 @@ $census = ['totalOrders' => 0, 'byStatus' => [], 'byTerminal' => [], 'notDispatc
 
 // While halted, do not dispatch any new/retry orders to the EA. Existing
 // in-flight orders are left untouched so status callbacks still work.
-$orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now, &$census): array {
+$orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, $terminal, $retryAfterSecs, $now, $bridgeUserId, &$census): array {
     $out = [];
     $assigned = [];
     foreach ($state['orders'] as &$order) {
         if (count($out) >= $limit) break;
+        // Cross-user isolation: this terminal's bridge key only ever sees
+        // its own user's orders, regardless of terminal id/pinning below.
+        if ((int) ($order['userId'] ?? -1) !== $bridgeUserId) continue;
         $status = (string) ($order['status'] ?? '');
         if (in_array($status, MT5_FINAL_STATUS, true)) continue;
 
@@ -123,7 +130,7 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
     }
 
     $census = mt5QueueCensus(
-        $state['orders'],
+        array_filter($state['orders'], static fn($o): bool => is_array($o) && (int) ($o['userId'] ?? -1) === $bridgeUserId),
         array_map(static fn(array $o): string => (string) ($o['orderId'] ?? ''), $out),
         $terminal,
         $now,
@@ -135,7 +142,8 @@ $orders = $halted ? [] : mt5WithStateLock(function (array &$state) use ($limit, 
 
 if ($halted) {
     $state = mt5ReadState();
-    $census = mt5QueueCensus($state['orders'], [], $terminal, $now, $retryAfterSecs, true);
+    $usersOrders = array_filter($state['orders'], static fn($o): bool => is_array($o) && (int) ($o['userId'] ?? -1) === $bridgeUserId);
+    $census = mt5QueueCensus($usersOrders, [], $terminal, $now, $retryAfterSecs, true);
 }
 
 $public = array_map(static fn(array $o): array => [

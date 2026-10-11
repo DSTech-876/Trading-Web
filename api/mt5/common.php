@@ -482,13 +482,138 @@ function mt5RequireBridgeKey(array $body = []): void
         jsonResponse(['error' => 'MT5 bridge is not configured'], 503);
     }
 
+    $incoming = mt5IncomingBridgeKey($body);
+    if ($incoming === '' || !hash_equals($expected, $incoming)) {
+        jsonResponse(['error' => 'Unauthorized bridge key'], 403);
+    }
+}
+
+/**
+ * Reads the bridge key the caller supplied, trying the header first (what
+ * ITGuruMt5Bridge.mq5 sends) and falling back to a query/body param so curl
+ * one-liners and the audit.php admin tool still work without a header.
+ *
+ * @param array<string,mixed> $body
+ */
+function mt5IncomingBridgeKey(array $body = []): string
+{
     $incoming = (string) ($_SERVER['HTTP_X_MT5_BRIDGE_KEY'] ?? '');
     if ($incoming === '') {
         $incoming = (string) ($_GET['bridge_key'] ?? $body['bridge_key'] ?? '');
     }
-    if ($incoming === '' || !hash_equals($expected, $incoming)) {
+    return $incoming;
+}
+
+/**
+ * Resolves the caller's bridge key to the specific user who owns it.
+ *
+ * This is deliberately separate from mt5RequireBridgeKey()/MT5_BRIDGE_KEY:
+ * that single, server-wide shared secret is kept as an admin/operator-only
+ * credential for api/mt5/audit.php (cross-user diagnostics). pull.php and
+ * status.php — the endpoints the EA actually uses to receive and acknowledge
+ * trade orders — use this per-user key instead, because a single shared
+ * secret gives every EA that knows it access to every user's queued orders.
+ * Concretely: if two users both run auto-trade with ITGuruMt5Bridge pointed
+ * at the same server, whichever EA polls pull.php first would receive
+ * *either* user's order under the old shared-key model — i.e. one user's
+ * signal could fire a real trade on another user's MT5 account. Requiring
+ * each EA to authenticate with its own user's unique key (issued by
+ * api/mt5/bridge_key.php) and filtering every order lookup/update to that
+ * resolved user id closes that gap regardless of terminal id configuration.
+ *
+ * @param array<string,mixed> $body
+ */
+function mt5ResolveBridgeUserId(array $body = []): int
+{
+    $incoming = trim(mt5IncomingBridgeKey($body));
+    if ($incoming === '' || strlen($incoming) !== 64 || !ctype_xdigit($incoming)) {
         jsonResponse(['error' => 'Unauthorized bridge key'], 403);
     }
+
+    $userId = mt5LookupUserIdByBridgeKey($incoming);
+    if ($userId === null) {
+        jsonResponse(['error' => 'Unauthorized bridge key'], 403);
+    }
+
+    return $userId;
+}
+
+/** Timing-safe-by-construction: looks up the (unique, high-entropy, random)
+ *  key via an indexed exact match — equivalent in practice to hash_equals()
+ *  since there is nothing short/guessable being compared character-by-character. */
+function mt5LookupUserIdByBridgeKey(string $key): ?int
+{
+    try {
+        $pdo = getDB();
+        $stmt = $pdo->prepare(
+            "SELECT id FROM users WHERE mt5_bridge_key = ? AND status = 'active' LIMIT 1"
+        );
+        $stmt->execute([$key]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return is_array($row) && isset($row['id']) ? (int) $row['id'] : null;
+    } catch (\Throwable $e) {
+        error_log('mt5LookupUserIdByBridgeKey DB error: ' . $e->getMessage());
+        return null;
+    }
+}
+
+/** 64 lowercase hex characters — same shape as the per-user Telegram link
+ *  token (see api/telegram/link_token.php) and the admin MT5_BRIDGE_KEY. */
+function mt5GenerateBridgeKey(): string
+{
+    return bin2hex(random_bytes(32));
+}
+
+/**
+ * Fetches the calling user's existing MT5 bridge key, minting and persisting
+ * a new one on first use. A unique-constraint collision on mt5_bridge_key is
+ * astronomically unlikely (2^256 keyspace) but is retried a few times rather
+ * than trusted blindly.
+ */
+function mt5GetOrCreateBridgeKey(int $userId): string
+{
+    $pdo = getDB();
+    $stmt = $pdo->prepare('SELECT mt5_bridge_key FROM users WHERE id = ? LIMIT 1');
+    $stmt->execute([$userId]);
+    $existing = $stmt->fetchColumn();
+    if (is_string($existing) && $existing !== '') {
+        return $existing;
+    }
+
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        $key = mt5GenerateBridgeKey();
+        try {
+            $pdo->prepare('UPDATE users SET mt5_bridge_key = ? WHERE id = ?')->execute([$key, $userId]);
+            return $key;
+        } catch (\Throwable $e) {
+            // Unique constraint collision (practically impossible) — retry
+            // with a freshly generated key rather than surfacing a 500.
+            continue;
+        }
+    }
+
+    throw new RuntimeException('Could not generate a unique MT5 bridge key');
+}
+
+/**
+ * Replaces the calling user's MT5 bridge key with a freshly generated one,
+ * immediately revoking the old key (any EA still configured with it starts
+ * getting 403s on its next poll until reconfigured).
+ */
+function mt5RegenerateBridgeKey(int $userId): string
+{
+    $pdo = getDB();
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        $key = mt5GenerateBridgeKey();
+        try {
+            $pdo->prepare('UPDATE users SET mt5_bridge_key = ? WHERE id = ?')->execute([$key, $userId]);
+            return $key;
+        } catch (\Throwable $e) {
+            continue;
+        }
+    }
+
+    throw new RuntimeException('Could not generate a unique MT5 bridge key');
 }
 
 function mt5InferDigits(string $symbol, float $price): int

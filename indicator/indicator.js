@@ -16608,6 +16608,34 @@ async function fetchRiskConfig() {
   finally { riskConfigInitialRequestSettled = true; }
 }
 
+/** Fetch (or, when `regenerate` is true, rotate) the logged-in user's own
+ *  per-user MT5 bridge key via /api/mt5/bridge_key.php, and display it in
+ *  the MT5 Bridge settings panel. This key — not the shared admin
+ *  MT5_BRIDGE_KEY — is what each user's own ITGuruMt5Bridge.mq5 instance
+ *  must use, so api/mt5/pull.php only ever dispatches this user's own
+ *  orders to their own EA (see mt5ResolveBridgeUserId() in
+ *  api/mt5/common.php). */
+async function fetchMt5BridgeKey(regenerate) {
+  if (typeof ITGuruAuth === "undefined" || !ITGuruAuth.isLoggedIn()) {
+    addLog("⚠ Log in first to view or regenerate your MT5 bridge key");
+    return;
+  }
+  try {
+    const resp = await fetch("/api/mt5/bridge_key.php", {
+      method: regenerate ? "POST" : "GET",
+      headers: mt5BridgeHeaders()
+    });
+    const data = await safeJson(resp);
+    if (!resp.ok || !data?.ok || !data?.bridgeKey) {
+      throw new Error(data?.error || `HTTP ${resp.status}`);
+    }
+    if (UI.mt5BridgeKeyDisplay) UI.mt5BridgeKeyDisplay.value = data.bridgeKey;
+    addLog(regenerate ? "🔑 MT5 bridge key regenerated — update your EA's InpBridgeKey" : "🔑 MT5 bridge key loaded");
+  } catch (err) {
+    addLog(`⚠ Could not fetch MT5 bridge key: ${err.message || err}`);
+  }
+}
+
 function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, stake, signalId) {
   const currentPrice = candles.length > 0 ? Number(candles[candles.length - 1]?.close || candles[candles.length - 1]?.c || 0) : null;
   const side = effectiveDir === "BULL" ? "BUY" : "SELL";
@@ -31292,6 +31320,15 @@ document.addEventListener("DOMContentLoaded", () => {
     UI.mt5MaxLot.addEventListener("input", () => {
       mt5MaxLot = Math.max(mt5MinLot, parseFloat(UI.mt5MaxLot.value) || mt5MinLot);
       saveSettings();
+    });
+  }
+  if (UI.mt5BridgeKeyRevealBtn) {
+    UI.mt5BridgeKeyRevealBtn.addEventListener("click", () => fetchMt5BridgeKey(false));
+  }
+  if (UI.mt5BridgeKeyRegenBtn) {
+    UI.mt5BridgeKeyRegenBtn.addEventListener("click", () => {
+      if (!confirm("Regenerate your MT5 bridge key? Any EA still configured with the old key will stop working until you update it.")) return;
+      fetchMt5BridgeKey(true);
     });
   }
   if (UI.mt5StatusPollingToggle) {
