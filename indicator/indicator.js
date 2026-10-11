@@ -1459,9 +1459,15 @@ async function qualifySignalForTelegram(signal, strategyLabel, force = false, ov
     }
     return { allowed: true, decision };
   } catch (err) {
+    /* Fail CLOSED, not open: if the adaptive service errors (offline, 5xx,
+       timeout), do not let the signal bypass qualification entirely — that
+       previously meant a flaky/erroring adaptive backend caused every
+       signal (including repeat/duplicate Session Range sweeps) to be sent
+       to Telegram unfiltered. Blocking on error is safer for an automated
+       trading pipeline than silently admitting everything. */
     console.warn("Adaptive signal qualification failed:", err.message);
-    addLog(`🧠 Adaptive Intelligence fallback — ${err.message}`);
-    return { allowed: true, decision: null };
+    addLog(`🧠 Adaptive Intelligence fallback — blocking signal (${err.message})`);
+    return { allowed: false, decision: null };
   }
 }
 
