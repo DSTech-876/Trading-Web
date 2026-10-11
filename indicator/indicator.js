@@ -2543,7 +2543,7 @@ function getMarketTuning() {
  * @param {string} [symbol] – symbol string; defaults to active symbol
  * @returns {{ rrLiquiditySweep: number, rrStopLossHunt: number, rrFailedPinBar: number,
  *             rrGridScalperMA: number, rrFVGFallback: number, rrPO3Fallback: number,
- *             rrMTFMin: number, slBufferMult: number, trailingMult: number,
+ *             rrMTFMin: number, rrOrderblock: number, slBufferMult: number, trailingMult: number,
  *             cooldownReduction: number, minImpulseATR: number }}
  */
 function getStrategyProfitParams(symbol) {
@@ -2561,6 +2561,7 @@ function getStrategyProfitParams(symbol) {
       rrFVGFallback:    2.5,    /* raised from 2.0 — FVG fills extend further on 1s */
       rrPO3Fallback:    2.5,    /* raised from 2.0 — PO3 distribution moves are swift */
       rrMTFMin:         2.5,    /* raised from 2.0 — structural moves are pronounced */
+      rrOrderblock:     2.2,    /* distinct from rrLiquiditySweep — OB retests are slower to develop on 1s */
       slBufferMult:     0.8,    /* tighter SL buffer (less ATR slack) — 1s ATR is small */
       trailingMult:     1.8,    /* wider trailing (1.8× vs 1.5×) — survive 1s noise */
       cooldownReduction: 0.5,   /* halve cooldowns — opportunities form every few seconds */
@@ -2578,6 +2579,7 @@ function getStrategyProfitParams(symbol) {
       rrFVGFallback:    2.5,    /* raised from 2.0 — imbalances fill with extension */
       rrPO3Fallback:    2.5,    /* raised from 2.0 — distribution targets are reachable */
       rrMTFMin:         2.5,    /* raised from 2.0 — structural moves have good follow-through */
+      rrOrderblock:     2.2,    /* distinct from rrLiquiditySweep — OB zones hold further back */
       slBufferMult:     0.9,    /* slightly tighter SL buffer — reduce unnecessary risk */
       trailingMult:     1.7,    /* slightly wider trailing — let standard vol breathe */
       cooldownReduction: 0.7,   /* 30% cooldown reduction — moderate pace */
@@ -2594,6 +2596,7 @@ function getStrategyProfitParams(symbol) {
     rrFVGFallback:    2.0,
     rrPO3Fallback:    2.0,
     rrMTFMin:         2.0,
+    rrOrderblock:     1.8,    /* distinct from rrLiquiditySweep so OB setups aren't a 1:1 clone */
     slBufferMult:     1.0,
     trailingMult:     1.0,
     cooldownReduction: 1.0,
@@ -7593,12 +7596,13 @@ function buildGridScalperMASignal(dir, idx, mode, breakLevel = null) {
     sl = swingHigh + slBuffer;
     if (sl <= entry) sl = entry + atr;
   }
-  let risk = Math.abs(entry - sl);
+  const risk = Math.abs(entry - sl);
+  /* Reject (rather than artificially tighten) when SL distance exceeds the
+     ATR cap: shrinking the stop inward would place it inside the swing
+     structure it's meant to protect, so normal retests would stop the trade
+     out just before price reverses toward TP (SL-then-TP). */
   const maxRisk = atr * GRID_SCALPER_MA_MAX_SL_ATR;
-  if (risk > maxRisk) {
-    sl = dir === "BULL" ? entry - maxRisk : entry + maxRisk;
-    risk = maxRisk;
-  }
+  if (risk > maxRisk) return null;
   if (risk < atr * 0.05) return null;
   const sym = getActiveSymbol() || "";
   let rrMultiplier = GRID_SCALPER_MA_RR_DEFAULT;
@@ -25555,14 +25559,16 @@ function detectLiquiditySweep() {
     sl = Math.min(rangeHigh, sweepCandle.high) + slBuffer;
   }
 
-  let risk = Math.abs(entry - sl);
+  const risk = Math.abs(entry - sl);
 
-  /* Cap SL distance to prevent runaway risk when entry drifts far from range */
+  /* Reject (rather than artificially tighten) when SL distance exceeds the
+     ATR cap: shrinking the stop inward would place it *inside* the swept
+     structure, so a normal post-sweep retest would stop the trade out right
+     before price reverses toward TP (SL-then-TP). Rejecting preserves the
+     structural stop placement and only skips setups whose risk is genuinely
+     too large to trade. */
   const maxRisk = atr * LIQUIDITY_SWEEP_MAX_SL_ATR;
-  if (risk > maxRisk) {
-    sl = dir === "BULL" ? entry - maxRisk : entry + maxRisk;
-    risk = maxRisk;
-  }
+  if (risk > maxRisk) return null;
 
   /* Reject if risk is negligible (likely noise) */
   if (risk < atr * 0.05) return null;
