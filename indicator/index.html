@@ -512,27 +512,45 @@
             <p class="hint" style="margin-bottom:6px;">Reverse the scalp signal direction — if signal says BUY, place SELL and vice versa.</p>
 
             <label class="toggle-row"><input type="checkbox" id="autoTradeStrategyToggle" /> 📊 Strategy Trades</label>
-            <p class="hint" style="margin-bottom:2px;">Place a multiplier contract when any of the 7 strategies fires. Use the sub-toggles below to select which strategies auto-trade.</p>
+            <p class="hint" style="margin-bottom:2px;">Place a multiplier contract when any of the strategies fires. Use the sub-toggles below to select which strategies auto-trade. Each strategy has its own 🔄 Opposite Mode toggle to reverse just that strategy's signal direction.</p>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeLiquiditySweepToggle" checked /> 🌊 Liquidity Sweep</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeLiquiditySweepOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeStopLossHuntToggle" checked /> 🎯 Stop Loss Hunt</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeStopLossHuntOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeFailedPinBarToggle" checked /> 📌 Failed Pin Bar</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeFailedPinBarOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeFibScalpToggle" checked /> 📐 Fib Golden Zone</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeFibScalpOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradePo3Toggle" checked /> ⚡ Power of 3</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradePo3OppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeTiktokToggle" checked /> 📈 TikTok Fib</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeTiktokOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeGridScalperV2Toggle" checked /> 💹 Grid Scalper V2</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeGridScalperV2OppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeNYOpenRangeToggle" checked /> 🕤 NY Open Range</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeNYOpenRangeOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeSessionRangeToggle" checked /> 🌍 Session Range (London Sweep)</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeSessionRangeOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeGridScalperMAToggle" checked /> 🔲 Grid Scalper MA</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeGridScalperMAOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeFvgStratToggle" checked /> 🎯 Fair Value Gap</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeFvgStratOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeMtfTopDownToggle" checked /> ⏱ MTF Top-Down</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeMtfTopDownOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeCandleInterpToggle" checked /> 🕯 Candle Interp</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeCandleInterpOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeOrderblockToggle" checked /> 🏦 Orderblock</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeOrderblockOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradePo3_4hToggle" checked /> 🕓 4H PO3</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradePo3_4hOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeBreakerBlockToggle" checked /> 🧱 Breaker Block</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeBreakerBlockOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeOrbToggle" checked /> 📊 ORB</label>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeOrbOppositeToggle" /> 🔄 Opposite Mode</label>
             <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeCrtTbsToggle" checked /> 🐢 CRT+TBS</label>
-            <label class="toggle-row toggle-row-sub"><input type="checkbox" id="autoTradeStrategyOppositeToggle" /> 🔄 Opposite Mode (Strategy)</label>
-            <p class="hint" style="margin-bottom:10px;">Reverse the strategy signal direction — if signal says BUY, place SELL and vice versa.</p>
+            <label class="toggle-row toggle-row-sub2"><input type="checkbox" id="autoTradeCrtTbsOppositeToggle" /> 🔄 Opposite Mode</label>
+            <p class="hint" style="margin-bottom:10px;">Each strategy's Opposite Mode reverses only that strategy's signal direction — if it says BUY, place SELL and vice versa.</p>
+
 
             <p class="param-group-title">Contract Settings</p>
             <div class="account-inputs">

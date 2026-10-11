@@ -1082,11 +1082,17 @@ const STRATEGY_DISPLAY_LABELS = Object.freeze({
   mtfTopDown: "MTF Top-Down",
   breakout_retest: "Breakout Retest",
   liquidity_sweep: "Liquidity Sweep",
+  liquiditySweep: "Liquidity Sweep",
   stop_loss_hunt: "Stop Loss Hunt",
+  stopLossHunt: "Stop Loss Hunt",
   failed_pin_bar: "Failed Pin Bar",
+  failedPinBar: "Failed Pin Bar",
   fib_scalp: "Fib Golden Zone",
+  fibScalp: "Fib Golden Zone",
   ny_open_range: "NY Open Range",
+  nyOpenRange: "NY Open Range",
   session_range: "Session Range",
+  sessionRange: "Session Range",
   grid_scalper_ma: "Grid Scalper MA",
   gridScalperMA: "Grid Scalper MA",
   grid_scalper_v2: "Grid Scalper V2",
@@ -1112,6 +1118,56 @@ function resolveStrategyDisplayLabel(typeOrKey, fallback = "Strategy") {
   if (!key) return fallback;
   return STRATEGY_DISPLAY_LABELS[key] || fallback;
 }
+
+/* Maps the snake_case `signal.type`/`strategyType` values used by signal
+ * objects (e.g. the Telegram caption builder) to the camelCase
+ * `strategyName` keys used by autoTradeStrategyOppositeMap / executeAutoTrade.
+ * Used by isStrategyOppositeEnabled() so display code that only has
+ * `signal.type` (not `signal.strategyName`) still resolves the right
+ * per-strategy Opposite Mode flag. */
+const STRATEGY_TYPE_TO_OPPOSITE_KEY = Object.freeze({
+  liquidity_sweep: "liquiditySweep",
+  stop_loss_hunt: "stopLossHunt",
+  failed_pin_bar: "failedPinBar",
+  fib_scalp: "fibScalp",
+  power_of_3: "po3",
+  tiktok: "tiktok",
+  grid_scalper_v2: "gridScalperV2",
+  ny_open_range: "nyOpenRange",
+  session_range: "sessionRange",
+  grid_scalper_ma: "gridScalperMA",
+  fvg_strat: "fvgStrat",
+  mtf_top_down: "mtfTopDown",
+  candle_interp: "candleInterp",
+  orderblock: "orderblock",
+  po3_4h: "po3_4h",
+  breaker_block: "breaker_block",
+  orb: "orb",
+  crt_tbs: "crt_tbs"
+});
+
+/* UI checkbox ids for each per-strategy Opposite Mode sub-toggle, keyed by
+ * the same camelCase strategyName used in autoTradeStrategyOppositeMap. */
+const STRATEGY_OPPOSITE_TOGGLE_REFS = Object.freeze({
+  liquiditySweep: "autoTradeLiquiditySweepOppositeToggle",
+  stopLossHunt:   "autoTradeStopLossHuntOppositeToggle",
+  failedPinBar:   "autoTradeFailedPinBarOppositeToggle",
+  fibScalp:       "autoTradeFibScalpOppositeToggle",
+  po3:            "autoTradePo3OppositeToggle",
+  tiktok:         "autoTradeTiktokOppositeToggle",
+  gridScalperV2:  "autoTradeGridScalperV2OppositeToggle",
+  nyOpenRange:    "autoTradeNYOpenRangeOppositeToggle",
+  sessionRange:   "autoTradeSessionRangeOppositeToggle",
+  gridScalperMA:  "autoTradeGridScalperMAOppositeToggle",
+  fvgStrat:       "autoTradeFvgStratOppositeToggle",
+  mtfTopDown:     "autoTradeMtfTopDownOppositeToggle",
+  candleInterp:   "autoTradeCandleInterpOppositeToggle",
+  orderblock:     "autoTradeOrderblockOppositeToggle",
+  po3_4h:         "autoTradePo3_4hOppositeToggle",
+  breaker_block:  "autoTradeBreakerBlockOppositeToggle",
+  orb:            "autoTradeOrbOppositeToggle",
+  crt_tbs:        "autoTradeCrtTbsOppositeToggle"
+});
 
 const SIGNAL_FACTOR_DEFAULT_WEIGHTS = Object.freeze({
   "Trend Alignment": 5,
@@ -2855,8 +2911,23 @@ let autoTradeConsecutiveErrors = 0;     /* unused shadow */
 let _autoTradeIdCounter = 0;           /* monotonically increasing counter for unique trade IDs */
 
 let autoTradeScalpOpposite    = false;  /* reverse scalp signal direction */
-let autoTradeStrategyOpposite = false;  /* reverse strategy signal direction */
 let autoTradeBreakoutOpposite = false;  /* reverse breakout signal direction */
+/* Per-strategy opposite-mode toggles — each "strategy"-sourced signal has its
+   own reverse-direction flag (keyed by the camelCase `strategyName` passed to
+   executeAutoTrade) instead of one shared switch, so enabling Opposite Mode
+   for one strategy can no longer silently reverse every other strategy's
+   trades too. Replaces the old single `autoTradeStrategyOpposite` boolean. */
+let autoTradeStrategyOppositeMap = {
+  liquiditySweep: false, stopLossHunt: false, failedPinBar: false, fibScalp: false,
+  po3: false, tiktok: false, gridScalperV2: false, nyOpenRange: false, sessionRange: false,
+  gridScalperMA: false, fvgStrat: false, mtfTopDown: false, candleInterp: false,
+  orderblock: false, po3_4h: false, breaker_block: false, orb: false, crt_tbs: false
+};
+function isStrategyOppositeEnabled(strategyNameOrType) {
+  if (!strategyNameOrType) return false;
+  const key = STRATEGY_TYPE_TO_OPPOSITE_KEY[strategyNameOrType] || strategyNameOrType;
+  return !!autoTradeStrategyOppositeMap[key];
+}
 let autoTradeHistory          = [];     /* trade history: { time, source, type, symbol, profit, result } */
 let autoTradePL              = 0;      /* cumulative P/L for auto-trades */
 let autoTradeBalance         = null;   /* latest Deriv account balance */
@@ -8375,7 +8446,7 @@ function processGridScalperMA() {
     /* Grid Scalper MA opposite mode: recalculate SL/TP for the reversed direction
        rather than relying on the naive SL↔TP swap which produces poor R:R on
        Step Index (SL becomes old TP distance = too tight). */
-    if (autoTradeStrategyOpposite) {
+    if (isStrategyOppositeEnabled("gridScalperMA")) {
       const oppDir = signal.dir === "BULL" ? "BEAR" : "BULL";
       const risk = Math.abs(signal.entry - signal.sl);
       const oppSl = oppDir === "BULL"
@@ -11926,7 +11997,8 @@ function buildStrategyTelegramCaption(signal) {
      auto-trade opposite toggle. */
   const gsOppositeOn = signal.type === "grid_scalper_ma" &&
     typeof gridScalperMAOppositeEnabled !== "undefined" && gridScalperMAOppositeEnabled;
-  if (autoTradeStrategyOpposite || gsOppositeOn) {
+  const stratOppositeOn = isStrategyOppositeEnabled(signal.strategyName || signal.type);
+  if (stratOppositeOn || gsOppositeOn) {
     const oppDir = signal.dir === "BULL" ? "BEAR" : "BULL";
     const oppLabel = oppDir === "BULL" ? "BUY" : "SELL";
     const oppEmoji = oppDir === "BULL" ? "🟢" : "🔴";
@@ -11957,7 +12029,7 @@ function buildStrategyTelegramCaption(signal) {
   if (Number.isFinite(signal.atr ?? signal.atrAtSignal)) lines.push(`<b>ATR:</b> ${fmt(signal.atr ?? signal.atrAtSignal, 3)}`);
 
   /* Show opposite signal details when opposite mode is active */
-  if ((autoTradeStrategyOpposite || gsOppositeOn) && signal.type === "grid_scalper_ma") {
+  if ((stratOppositeOn || gsOppositeOn) && signal.type === "grid_scalper_ma") {
     const oppDir = signal.dir === "BULL" ? "BEAR" : "BULL";
     const risk = Math.abs(signal.entry - signal.sl);
     const oppSl = oppDir === "BULL" ? signal.entry - risk : signal.entry + risk;
@@ -17182,9 +17254,9 @@ function executeAutoTrade(signal, _capturedWs) {
   } else if (signal.source === "scalp" && autoTradeScalpOpposite) {
     effectiveDir = signal.dir === "BULL" ? "BEAR" : "BULL";
     addLog(`🔄 Opposite mode (Scalp): reversed ${signal.dir} → ${effectiveDir}`);
-  } else if (signal.source === "strategy" && autoTradeStrategyOpposite) {
+  } else if (signal.source === "strategy" && isStrategyOppositeEnabled(signal.strategyName)) {
     effectiveDir = signal.dir === "BULL" ? "BEAR" : "BULL";
-    addLog(`🔄 Opposite mode (Strategy): reversed ${signal.dir} → ${effectiveDir}`);
+    addLog(`🔄 Opposite mode (${resolveStrategyDisplayLabel(signal.strategyName, signal.strategyName || "Strategy")}): reversed ${signal.dir} → ${effectiveDir}`);
   } else if (signal.source === "breakout" && autoTradeBreakoutOpposite) {
     effectiveDir = signal.dir === "BULL" ? "BEAR" : "BULL";
     addLog(`🔄 Opposite mode (Breakout): reversed ${signal.dir} → ${effectiveDir}`);
@@ -19202,10 +19274,18 @@ function detectLondonAsianSweep() {
     if (c.high > aH && c.close <= aH) {
       londonSweepSignal = { dir: "HIGH", candleIdx: i, price: c.high };
 
-      /* Compute trade levels: Entry at candle close, SL above the sweep wick,
+      /* Compute trade levels: Entry at candle close, SL above the sweep wick
+         (plus a small ATR buffer — every other strategy pads its SL past the
+         raw swing/zone level, e.g. PO3's `sweepPrice ± atrValue * 0.15` and
+         ORB's `_orbSessionHigh + retestTol`; Session Range previously used
+         the bare wick with zero buffer, which routinely landed inside the
+         broker's minimum stop distance and made ITGuruMt5Bridge.mq5's
+         ValidateStopLevels() silently reject the order — the signal fired in
+         the web app but never resulted in a live MT5 trade),
          TP based on user-inputted R:R ratio below entry */
+      const slBuffer = Number.isFinite(atrValue) && atrValue > 0 ? atrValue * 0.15 : 0;
       const entry = c.close;
-      const sl    = c.high;                        /* SL above the sweep wick */
+      const sl    = c.high + slBuffer;              /* SL above the sweep wick + buffer */
       const risk  = Math.abs(sl - entry);
       if (risk > 0) {
         /* Min Confluence Gate — override any per-strategy hardcoded threshold when enabled */
@@ -19268,10 +19348,13 @@ function detectLondonAsianSweep() {
     if (c.low < aL && c.close >= aL) {
       londonSweepSignal = { dir: "LOW", candleIdx: i, price: c.low };
 
-      /* Compute trade levels: Entry at candle close, SL below the sweep wick,
+      /* Compute trade levels: Entry at candle close, SL below the sweep wick
+         (plus a small ATR buffer — see the matching comment in the HIGH-sweep
+         branch above for why this buffer is required),
          TP based on user-inputted R:R ratio above entry */
+      const slBuffer = Number.isFinite(atrValue) && atrValue > 0 ? atrValue * 0.15 : 0;
       const entry = c.close;
-      const sl    = c.low;                         /* SL below the sweep wick */
+      const sl    = c.low - slBuffer;              /* SL below the sweep wick - buffer */
       const risk  = Math.abs(entry - sl);
       if (risk > 0) {
         /* Min Confluence Gate — override any per-strategy hardcoded threshold when enabled */
@@ -20792,7 +20875,7 @@ function saveSettings() {
       mt5MaxLot,
       mt5StatusPollingEnabled,
       autoTradeScalpOpposite,
-      autoTradeStrategyOpposite,
+      autoTradeStrategyOppositeMap,
       autoTradeBreakoutOpposite,
       autoTradeLiquiditySweep,
       autoTradeStopLossHunt,
@@ -21238,11 +21321,22 @@ function restoreSettings() {
     if (UI.mt5StatusPollingToggle) UI.mt5StatusPollingToggle.checked = mt5StatusPollingEnabled;
     updateAutoTradeCurrentStakeUI();
     if (s.autoTradeScalpOpposite != null) autoTradeScalpOpposite = s.autoTradeScalpOpposite;
-    if (s.autoTradeStrategyOpposite != null) autoTradeStrategyOpposite = s.autoTradeStrategyOpposite;
     if (s.autoTradeBreakoutOpposite != null) autoTradeBreakoutOpposite = s.autoTradeBreakoutOpposite;
+    if (s.autoTradeStrategyOppositeMap && typeof s.autoTradeStrategyOppositeMap === "object") {
+      Object.assign(autoTradeStrategyOppositeMap, s.autoTradeStrategyOppositeMap);
+    } else if (s.autoTradeStrategyOpposite != null) {
+      /* Migrate the old single shared toggle: apply its value to every
+         per-strategy flag the first time settings saved under the old
+         format are loaded. */
+      for (const k of Object.keys(autoTradeStrategyOppositeMap)) {
+        autoTradeStrategyOppositeMap[k] = !!s.autoTradeStrategyOpposite;
+      }
+    }
     if (UI.autoTradeScalpOppositeToggle) UI.autoTradeScalpOppositeToggle.checked = autoTradeScalpOpposite;
-    if (UI.autoTradeStrategyOppositeToggle) UI.autoTradeStrategyOppositeToggle.checked = autoTradeStrategyOpposite;
     if (UI.autoTradeBreakoutOppositeToggle) UI.autoTradeBreakoutOppositeToggle.checked = autoTradeBreakoutOpposite;
+    for (const [key, ref] of Object.entries(STRATEGY_OPPOSITE_TOGGLE_REFS)) {
+      if (UI[ref]) UI[ref].checked = !!autoTradeStrategyOppositeMap[key];
+    }
     /* Per-strategy auto-trade sub-toggles */
     if (s.autoTradeLiquiditySweep != null) autoTradeLiquiditySweep = s.autoTradeLiquiditySweep;
     if (s.autoTradeStopLossHunt != null)   autoTradeStopLossHunt   = s.autoTradeStopLossHunt;
@@ -31163,19 +31257,25 @@ document.addEventListener("DOMContentLoaded", () => {
       saveSettings();
     });
   }
-  if (UI.autoTradeStrategyOppositeToggle) {
-    UI.autoTradeStrategyOppositeToggle.addEventListener("change", () => {
-      autoTradeStrategyOpposite = UI.autoTradeStrategyOppositeToggle.checked;
-      addLog(`🔄 Strategy opposite mode: ${autoTradeStrategyOpposite ? "ON — signals will be reversed" : "OFF"}`);
-      saveSettings();
-    });
-  }
   if (UI.autoTradeBreakoutOppositeToggle) {
     UI.autoTradeBreakoutOppositeToggle.addEventListener("change", () => {
       autoTradeBreakoutOpposite = UI.autoTradeBreakoutOppositeToggle.checked;
       addLog(`🔄 Breakout opposite mode: ${autoTradeBreakoutOpposite ? "ON — signals will be reversed" : "OFF"}`);
       saveSettings();
     });
+  }
+  /* Per-strategy Opposite Mode sub-toggles — one flag per strategy
+     (replaces the old single shared "Opposite Mode (Strategy)" toggle so
+     reversing one strategy's direction no longer reverses every other
+     strategy's trades too). */
+  for (const [key, ref] of Object.entries(STRATEGY_OPPOSITE_TOGGLE_REFS)) {
+    if (UI[ref]) {
+      UI[ref].addEventListener("change", () => {
+        autoTradeStrategyOppositeMap[key] = UI[ref].checked;
+        addLog(`🔄 ${resolveStrategyDisplayLabel(key, key)} opposite mode: ${UI[ref].checked ? "ON — signals will be reversed" : "OFF"}`);
+        saveSettings();
+      });
+    }
   }
   /* Per-strategy auto-trade sub-toggles */
   const strategySubToggles = [

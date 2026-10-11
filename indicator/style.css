@@ -2773,6 +2773,19 @@ body.light-theme .ms-card-footer {
   border: 1px dashed var(--glass-border);
 }
 
+/* ---- Per-Strategy Opposite Mode Sub-Toggle (nested one level deeper under
+   its parent strategy's own sub-toggle, e.g. under Session Range) ---- */
+.toggle-row-sub2 {
+  margin-left: 44px;
+  margin-top: -2px;
+  font-size: var(--fs-sm);
+  opacity: 0.75;
+  background: var(--bg-base);
+  padding: 3px 8px;
+  border-radius: var(--radius-xs);
+  border: 1px dashed var(--glass-border);
+}
+
 /* ---- Auto-Trade History ---- */
 .auto-trade-history-section {
   max-height: 220px;
