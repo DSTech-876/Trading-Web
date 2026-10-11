@@ -16694,6 +16694,11 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
     orderType,
     source: signal.source || "breakout",
     strategyName: signal.strategyName || null,
+    /* True when effectiveDir was flipped from the original signal direction
+       (opposite/grid-scalper-opposite mode). ITGuruMt5Bridge.mq5 tags the
+       broker trade comment with this ("opp"/"norm") so the two are
+       distinguishable directly in the MT5 terminal's History tab. */
+    isOpposite: effectiveDir !== signal.dir,
     idempotencyKey,
     constraints: {
       minStopPoints: mt5MinStopPoints,

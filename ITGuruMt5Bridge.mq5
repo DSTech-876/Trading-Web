@@ -83,6 +83,7 @@ struct BridgeOrder
    long   createdAt; // unix epoch seconds, from server
    string source;       // e.g. "breakout" — matches the web app's signal source
    string strategyName; // e.g. "orb", "grid_scalper_ma" — which strategy fired this trade
+   bool   isOpposite;    // true when the web app flipped the trade direction (opposite/grid-scalper-opposite mode)
 };
 
 // Per-strategy magic numbers: every order this EA places uses InpMagic as a
@@ -112,6 +113,43 @@ long EffectiveMagic(const string source, const string strategyName)
    for(int i = 0; i < len; i++)
       hash = hash * 31 + (uint)StringGetCharacter(key, i);
    return InpMagic + (long)(hash % MAGIC_STRATEGY_RANGE);
+}
+
+// Trade comments double as (a) a human-readable "opposite vs normal" tag in
+// the MT5 terminal's Trade/History tab, and (b) the only way this EA tells
+// one of its own positions/orders apart from another (ScanOpenState(),
+// ReconcileLegacyStatus(), OnTradeTransaction() all key off the comment).
+// api/mt5/signal.php mints orderId as "mt5_" + 14-digit UTC timestamp + "_" +
+// 8 hex chars = always exactly MT5_ORDER_ID_LEN (27) characters, so the
+// orderId is written as the FIRST 27 characters of the comment and the
+// opp/norm tag is appended after it. A broker's comment length cap (commonly
+// 31 chars) can truncate the tag itself in the worst case, but can never
+// truncate the orderId portion (27+3="orderId"+"opp"=30, 27+4="orderId"+
+// "norm"=31 — both within that limit), so orderId round-trips reliably
+// through CommentMatchesOrderId()/ExtractOrderIdFromComment() regardless.
+#define MT5_ORDER_ID_LEN 27
+
+string BuildTradeComment(const string orderId, const bool isOpposite)
+{
+   return orderId + (isOpposite ? "opp" : "norm");
+}
+
+// Recovers the orderId from a trade comment that may or may not carry an
+// opp/norm tag (older positions placed before this feature was added have no
+// tag at all). Safe even if a broker truncated the tag, since the orderId is
+// always the leading MT5_ORDER_ID_LEN characters.
+string ExtractOrderIdFromComment(const string comment)
+{
+   if(StringLen(comment) <= MT5_ORDER_ID_LEN) return comment;
+   return StringSubstr(comment, 0, MT5_ORDER_ID_LEN);
+}
+
+// Starts-with comparison used everywhere this EA checks "does this
+// position/order's comment belong to this orderId" — tolerant of the
+// opp/norm tag (or no tag at all) following the orderId.
+bool CommentMatchesOrderId(const string comment, const string orderId)
+{
+   return ExtractOrderIdFromComment(comment) == orderId;
 }
 
 //================================= Globals ===================================
@@ -357,7 +395,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
       ulong t=PositionGetTicket(i);
       if(t==0 || !PositionSelectByTicket(t)) continue;
       if(!IsOwnMagic((long)PositionGetInteger(POSITION_MAGIC))) continue;
-      if(PositionGetString(POSITION_COMMENT)!=o.orderId) continue;
+      if(!CommentMatchesOrderId(PositionGetString(POSITION_COMMENT), o.orderId)) continue;
       status="FILLED";
       ticket=(string)t;
       price=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -370,7 +408,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
       ulong t=OrderGetTicket(i);
       if(t==0 || !OrderSelect(t)) continue;
       if(!IsOwnMagic((long)OrderGetInteger(ORDER_MAGIC))) continue;
-      if(OrderGetString(ORDER_COMMENT)!=o.orderId) continue;
+      if(!CommentMatchesOrderId(OrderGetString(ORDER_COMMENT), o.orderId)) continue;
       status="RECEIVED";
       ticket=(string)t;
       price=0.0;
@@ -390,7 +428,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
       if((long)HistoryDealGetInteger(dealTicket, DEAL_ENTRY)!=DEAL_ENTRY_IN) continue;
       ulong orderTicket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_ORDER);
       if(orderTicket==0 || !HistoryOrderSelect(orderTicket)) continue;
-      if(HistoryOrderGetString(orderTicket, ORDER_COMMENT)!=o.orderId) continue;
+      if(!CommentMatchesOrderId(HistoryOrderGetString(orderTicket, ORDER_COMMENT), o.orderId)) continue;
       status="FILLED";
       ticket=(string)orderTicket;
       price=HistoryDealGetDouble(dealTicket, DEAL_PRICE);
@@ -415,7 +453,7 @@ bool ReconcileLegacyStatus(const BridgeOrder &o, string &status, string &ticket,
       ulong orderTicket = HistoryOrderGetTicket(i);
       if(orderTicket==0) continue;
       if(!IsOwnMagic((long)HistoryOrderGetInteger(orderTicket, ORDER_MAGIC))) continue;
-      if(HistoryOrderGetString(orderTicket, ORDER_COMMENT)!=o.orderId) continue;
+      if(!CommentMatchesOrderId(HistoryOrderGetString(orderTicket, ORDER_COMMENT), o.orderId)) continue;
       long state = HistoryOrderGetInteger(orderTicket, ORDER_STATE);
       if(state==ORDER_STATE_EXPIRED)       status="EXPIRED";
       else if(state==ORDER_STATE_REJECTED) status="REJECTED";
@@ -626,6 +664,7 @@ int ParseOrders(string json, BridgeOrder &out[])
       o.createdAt = JsonGetLong(obj,"createdAt",0);
       o.source       = JsonGetString(obj,"source");
       o.strategyName = JsonGetString(obj,"strategyName");
+      o.isOpposite   = JsonGetBool(obj,"isOpposite",false);
 
       if(o.orderId!="" && o.symbol!="" && o.orderType!="" && o.lot>0)
       {
@@ -1007,7 +1046,7 @@ void ScanOpenState(string symbol, string orderId,
          long type = PositionGetInteger(POSITION_TYPE);
          if(type==POSITION_TYPE_BUY) hasBuy = true;
          if(type==POSITION_TYPE_SELL) hasSell = true;
-         if(PositionGetString(POSITION_COMMENT)==orderId) alreadyPlaced = true;
+         if(CommentMatchesOrderId(PositionGetString(POSITION_COMMENT), orderId)) alreadyPlaced = true;
       }
    }
 
@@ -1028,7 +1067,7 @@ void ScanOpenState(string symbol, string orderId,
          long type = OrderGetInteger(ORDER_TYPE);
          if(type==ORDER_TYPE_BUY_LIMIT || type==ORDER_TYPE_BUY_STOP) hasBuy = true;
          if(type==ORDER_TYPE_SELL_LIMIT || type==ORDER_TYPE_SELL_STOP) hasSell = true;
-         if(OrderGetString(ORDER_COMMENT)==orderId)
+         if(CommentMatchesOrderId(OrderGetString(ORDER_COMMENT), orderId))
          {
             alreadyPlaced = true;
             alreadyPlacedPending = true;
@@ -1579,7 +1618,7 @@ bool SendTrade(BridgeOrder &o)
    req.symbol     = o.symbol;
    req.volume     = lot;
    req.deviation  = InpMaxSlippagePoints;
-   req.comment    = o.orderId;
+   req.comment    = BuildTradeComment(o.orderId, o.isOpposite);
    req.sl         = o.sl;
    req.tp         = o.tp;
 
@@ -1617,7 +1656,7 @@ bool SendTrade(BridgeOrder &o)
             " volume="+DoubleToString(req.volume,2)+" price="+DoubleToString(req.price,reqDigits)+
             " sl="+DoubleToString(req.sl,reqDigits)+" tp="+DoubleToString(req.tp,reqDigits)+
             " deviation="+(string)req.deviation+" magic="+(string)req.magic+
-            " source="+o.source+" strategy="+o.strategyName);
+            " source="+o.source+" strategy="+o.strategyName+" comment="+req.comment);
 
    bool ok=false;
    int attempt=0;
@@ -1841,7 +1880,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                           otype==ORDER_TYPE_BUY_STOP_LIMIT || otype==ORDER_TYPE_SELL_STOP_LIMIT);
       if(!wasPending) return; // market fills already reported synchronously in SendTrade()
 
-      string orderId = HistoryOrderGetString(orderTicket, ORDER_COMMENT);
+      string orderId = ExtractOrderIdFromComment(HistoryOrderGetString(orderTicket, ORDER_COMMENT));
       if(orderId=="") return;
 
       string symbol = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
@@ -1871,7 +1910,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       long state = HistoryOrderGetInteger(trans.order, ORDER_STATE);
       if(state==ORDER_STATE_FILLED) return; // handled via TRADE_TRANSACTION_DEAL_ADD above
 
-      string orderId = HistoryOrderGetString(trans.order, ORDER_COMMENT);
+      string orderId = ExtractOrderIdFromComment(HistoryOrderGetString(trans.order, ORDER_COMMENT));
       if(orderId=="") return;
 
       string status, msg;

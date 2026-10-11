@@ -160,6 +160,7 @@ $public = array_map(static fn(array $o): array => [
     'point' => $o['point'] ?? null,
     'source' => $o['source'] ?? null,
     'strategyName' => $o['strategyName'] ?? null,
+    'isOpposite' => (bool) ($o['isOpposite'] ?? false),
     'idempotencyKey' => $o['idempotencyKey'] ?? '',
     'attempts' => $o['attempts'] ?? 0,
     'createdAt' => $o['createdAt'] ?? null,

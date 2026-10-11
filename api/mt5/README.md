@@ -46,6 +46,7 @@ This document provides minimal request/response templates matching these endpoin
     "lot": 0.01,
     "source": "breakout",
     "strategyName": "",
+    "isOpposite": false,
     "brokerTicket": null,
     "message": null,
     "attempts": 0,
@@ -293,6 +294,17 @@ cross-reference the web dashboard to tell which strategy opened which trade. Eve
 position belong to this EA" check (`IsOwnMagic()`) compares against that whole range rather than
 exact equality to `InpMagic`, so open-trade counting, exposure totals, and duplicate-detection logic
 still recognize all of this EA's own positions regardless of which strategy placed them.
+
+**Opposite vs. normal trade comments** — every trade comment is the order's `orderId` with a short
+tag appended: `opp` when the web app flipped the trade direction (opposite/grid-scalper-opposite
+mode) or `norm` for an ordinary signal, e.g. `mt5_20260516235154_ab12cd34norm`. This makes the two
+distinguishable directly in MT5's History tab without opening the web dashboard. `orderId` is always
+exactly 27 characters (`"mt5_" + 14-digit UTC timestamp + "_" + 8 hex chars`), so it always fits as
+the leading 27 characters of the comment even with the `opp`/`norm` tag appended (30-31 chars total,
+within MT5's ~31-char comment limit); every place the EA matches a position/order back to an
+`orderId` (`CommentMatchesOrderId()`) or recovers one from history (`ExtractOrderIdFromComment()`)
+reads only those leading 27 characters, so the tag can never interfere with — or be mistaken for
+part of — the orderId used for duplicate/position matching.
 
 ---
 

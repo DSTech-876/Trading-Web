@@ -130,6 +130,7 @@ $result = mt5WithStateLock(function (array &$state) use ($userId, $normalized, $
         'constraints' => $normalized['constraints'],
         'source' => $normalized['source'],
         'strategyName' => $normalized['strategyName'],
+        'isOpposite' => $normalized['isOpposite'],
         'idempotencyKey' => $incomingKey,
         'brokerTicket' => null,
         'message' => null,

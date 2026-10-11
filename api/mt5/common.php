@@ -780,6 +780,11 @@ function mt5NormalizeSignalPayload(array $body): array
 
     $source = trim((string) ($body['source'] ?? 'breakout'));
     $strategyName = trim((string) ($body['strategyName'] ?? ''));
+    // True when the client flipped the trade direction from the original
+    // signal (opposite/grid-scalper-opposite mode). Carried through to the
+    // EA so it can tag the broker trade comment ("opp"/"norm"), making the
+    // two distinguishable directly in the MT5 terminal's History tab.
+    $isOpposite = (bool) ($body['isOpposite'] ?? false);
     $idempotencyKey = trim((string) ($body['idempotencyKey'] ?? ''));
     // Correlation id minted by the signal engine when the signal was created
     // (see logMt5SignalEvent() in indicator/indicator.js). Carrying it onto
@@ -817,6 +822,7 @@ function mt5NormalizeSignalPayload(array $body): array
         'constraints' => $constraints,
         'source' => $source,
         'strategyName' => $strategyName,
+        'isOpposite' => $isOpposite,
         'idempotencyKey' => $idempotencyKey,
         'signalId' => $signalId,
         'confidence' => $confidence,
@@ -876,6 +882,7 @@ function mt5PublicOrder(array $order): array
         'lot' => $order['lot'] ?? null,
         'source' => $order['source'] ?? null,
         'strategyName' => $order['strategyName'] ?? null,
+        'isOpposite' => (bool) ($order['isOpposite'] ?? false),
         'brokerTicket' => $order['brokerTicket'] ?? null,
         'message' => $order['message'] ?? null,
         'attempts' => $order['attempts'] ?? 0,
