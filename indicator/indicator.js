@@ -1143,7 +1143,8 @@ const STRATEGY_TYPE_TO_OPPOSITE_KEY = Object.freeze({
   po3_4h: "po3_4h",
   breaker_block: "breaker_block",
   orb: "orb",
-  crt_tbs: "crt_tbs"
+  crt_tbs: "crt_tbs",
+  ote_golden_pocket: "oteGoldenPocket"
 });
 
 /* UI checkbox ids for each per-strategy Opposite Mode sub-toggle, keyed by
@@ -1166,7 +1167,8 @@ const STRATEGY_OPPOSITE_TOGGLE_REFS = Object.freeze({
   po3_4h:         "autoTradePo3_4hOppositeToggle",
   breaker_block:  "autoTradeBreakerBlockOppositeToggle",
   orb:            "autoTradeOrbOppositeToggle",
-  crt_tbs:        "autoTradeCrtTbsOppositeToggle"
+  crt_tbs:        "autoTradeCrtTbsOppositeToggle",
+  oteGoldenPocket: "autoTradeOteGoldenPocketOppositeToggle"
 });
 
 const SIGNAL_FACTOR_DEFAULT_WEIGHTS = Object.freeze({
@@ -2927,7 +2929,8 @@ let autoTradeStrategyOppositeMap = {
   liquiditySweep: false, stopLossHunt: false, failedPinBar: false, fibScalp: false,
   po3: false, tiktok: false, gridScalperV2: false, nyOpenRange: false, sessionRange: false,
   gridScalperMA: false, fvgStrat: false, mtfTopDown: false, candleInterp: false,
-  orderblock: false, po3_4h: false, breaker_block: false, orb: false, crt_tbs: false
+  orderblock: false, po3_4h: false, breaker_block: false, orb: false, crt_tbs: false,
+  oteGoldenPocket: false
 };
 function isStrategyOppositeEnabled(strategyNameOrType) {
   if (!strategyNameOrType) return false;
@@ -8452,7 +8455,7 @@ function processGridScalperMA() {
     /* Grid Scalper MA opposite mode: recalculate SL/TP for the reversed direction
        rather than relying on the naive SL↔TP swap which produces poor R:R on
        Step Index (SL becomes old TP distance = too tight). */
-    if (isStrategyOppositeEnabled("gridScalperMA")) {
+    if (isStrategyOppositeEnabled("gridScalperMA") || (typeof gridScalperMAOppositeEnabled !== "undefined" && gridScalperMAOppositeEnabled)) {
       const oppDir = signal.dir === "BULL" ? "BEAR" : "BULL";
       const risk = Math.abs(signal.entry - signal.sl);
       const oppSl = oppDir === "BULL"
