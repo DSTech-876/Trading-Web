@@ -13578,10 +13578,11 @@ function isHTFAligned(dir) {
  * In a RANGING market (ADX < ADX_RANGING_THRESHOLD) thresholds are tightened by 5
  * to avoid chasing weak mean-reversion moves.
  */
-function isRSIFavorable(dir) {
+function isRSIFavorable(dir, idx) {
   if (!rsiFilterEnabled) return true;
   if (rsiValues.length === 0) return true;
-  const currentRSI = rsiValues[rsiValues.length - 1];
+  const targetIdx = idx != null ? idx : rsiValues.length - 1;
+  const currentRSI = rsiValues[targetIdx];
   if (currentRSI == null) return true;
   /* #12: Adjust thresholds based on market regime */
   let bullMax = RSI_RETEST_BULL_MAX;
@@ -15206,12 +15207,6 @@ function processCandle(idx) {
       setPhase("BREAKOUT");
       return;
     }
-    /* Breakout distance check */
-    if (!isBreakoutDistanceOK(idx)) {
-      addLog(`📏 Breakout distance: price too far from level (>${breakoutDistATR}× ATR) — skipping retest`);
-      return;
-    }
-     
     /* OPTIMIZATION: Scan backwards for historical retests that may have been missed.
        This catches retests that occurred in earlier candles before the distance/decay checks were evaluated. */
     let historicalRetest = null;
@@ -15223,6 +15218,12 @@ function processCandle(idx) {
         addLog(`📌 Historical retest found at candle #${historicalRetest.candleIdx} (${idx - historicalRetest.candleIdx} candles ago)`);
         retestCount++;
       }
+    }
+     
+    /* Breakout distance check — only apply if no historical retest was found */
+    if (!historicalRetest && !isBreakoutDistanceOK(idx)) {
+      addLog(`📏 Breakout distance: price too far from level (>${breakoutDistATR}× ATR) — skipping retest`);
+      return;
     }
      
     const touches = historicalRetest || touchesLevel(c, breakout.level);
@@ -15238,13 +15239,13 @@ function processCandle(idx) {
       }
       /* Apply RSI filter at retest — use the retest candle, not current */
       const retestCandleIdx = historicalRetest ? historicalRetest.candleIdx : idx;
-      if (rsiFilterEnabled && !isRSIFavorable(breakout.dir)) {
-        const rsi = getCurrentRSI();
+      if (rsiFilterEnabled && !isRSIFavorable(breakout.dir, retestCandleIdx)) {
+        const rsi = getCurrentRSI(retestCandleIdx);
         addLog(`Retest at #${retestCandleIdx} — RSI ${fmt(rsi, 1)} not optimal for ${breakout.dir}, but proceeding anyway (permissive mode)`);
         /* Don't block; allow signal through */
       }
       /* Apply momentum divergence filter — be more lenient to allow more signals through */
-      if (divergenceFilterEnabled && !hasMomentumDivergence(breakout.dir)) {
+      if (divergenceFilterEnabled && !hasMomentumDivergence(breakout.dir, retestCandleIdx)) {
         addLog(`Retest at #${retestCandleIdx} — divergence filter not met, but proceeding anyway (permissive mode)`);
         /* Don't return; allow signal through even without perfect divergence */
       }
@@ -15254,7 +15255,7 @@ function processCandle(idx) {
       if (divergenceVisualEnabled) buildDivergenceMarkers();
       addLog(`Retest detected at candle #${retestCandleIdx}${retestCount > 1 ? ` (retest #${retestCount})` : ""}`);
       /* Log RSI at retest */
-      const rsi = getCurrentRSI();
+      const rsi = getCurrentRSI(retestCandleIdx);
       if (rsi != null) {
         addLog(`RSI at retest: ${fmt(rsi, 1)}${rsi <= 30 ? " (oversold)" : rsi >= 70 ? " (overbought)" : ""}`);
       }
@@ -24824,9 +24825,10 @@ function computeRSI() {
   }
 }
 
-function getCurrentRSI() {
+function getCurrentRSI(idx) {
   if (rsiValues.length === 0) return null;
-  return rsiValues[rsiValues.length - 1];
+  const targetIdx = idx != null ? idx : rsiValues.length - 1;
+  return rsiValues[targetIdx];
 }
 
 function computeMACD() {
@@ -25162,14 +25164,14 @@ function isConfirmBarValid(idx) {
   return true;
 }
 
-function hasMomentumDivergence(dir) {
+function hasMomentumDivergence(dir, retestIdx) {
   if (!divergenceFilterEnabled) return true;
-  if (rsiValues.length < 10 || !breakout || !retestInfo) return true;
+  if (rsiValues.length < 10 || !breakout) return true;
 
   /* Find RSI at breakout and at retest */
   const boIdx = breakout.candleIdx;
-  const rtIdx = retestInfo.candleIdx;
-  if (boIdx >= rsiValues.length || rtIdx >= rsiValues.length) return true;
+  const rtIdx = retestIdx != null ? retestIdx : (retestInfo ? retestInfo.candleIdx : null);
+  if (rtIdx == null || boIdx >= rsiValues.length || rtIdx >= rsiValues.length) return true;
   const rsiBO = rsiValues[boIdx];
   const rsRT = rsiValues[rtIdx];
   if (rsiBO == null || rsRT == null) return true;
