@@ -12596,7 +12596,12 @@ function validateSignalExecutionLevels(signal, strategyLabel) {
  * Called from processLiquiditySweep, processStopLossHunt, processFailedPinBar.
  */
 async function sendTelegramStrategyAlert(signal, force = false) {
-  if (!telegramStrategyAutoSend && !force) return;
+  /* Determine which toggle to check based on strategy type.
+     Breakout Retest uses telegramAutoSend, custom strategies use telegramStrategyAutoSend. */
+  const isBreakoutRetest = signal && (signal.type === "breakout_retest" || signal.strategyType === "breakout_retest");
+  const requiredToggle = isBreakoutRetest ? telegramAutoSend : telegramStrategyAutoSend;
+  if (!requiredToggle && !force) return;
+  
   if (signal) {
     if (signal._sentViaTelegram !== true) signal._sentViaTelegram = false;
     if (signal._telegramDelivered !== true) signal._telegramDelivered = false;
@@ -16122,7 +16127,7 @@ function recordSignal(confirmPattern, retestCandleIdx) {
   /* ── Send Telegram notification for Breakout trade ── */
   addLog(`[BREAKOUT GENERATED] Signal ID: ${signal.signalId} | ${signal.dir} @ ${fmt(signal.entry, 4)} | SL: ${fmt(signal.sl, 4)} | TP: ${fmt(signal.tp, 4)}`);
   
-  if (telegramStrategyAutoSend) {
+  if (telegramAutoSend) {
     addLog(`[BREAKOUT QUEUED] Telegram alert queued for delivery`);
     setTimeout(() => {
       sendTelegramStrategyAlert(signal).then(() => {
