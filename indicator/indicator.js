@@ -105,7 +105,7 @@ const NOTIF_ICON = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'><
 /* Tuning defaults (user-configurable via UI) */
 let RANGE_MINUTES             = 15;
 let MAX_CANDLE_HISTORY        = 200;
-let LEVEL_TOUCH_TOLERANCE     = 0.15;
+let LEVEL_TOUCH_TOLERANCE     = 0.25;  /* increased from 0.15 to better detect retest touches */
 let DOJI_BODY_RATIO           = 0.2;
 let SPINNING_TOP_BODY_RATIO   = 0.35;
 let SWING_LOOKBACK_PERIOD     = 35;  /* widened from 20 — gives trades more breathing room */
@@ -167,7 +167,7 @@ const RSI_RETEST_BEAR_MIN = 55;  /* RSI at retest should be ≥ this for BEAR (r
 
 /* Volume spike (range-based proxy – synthetic indices have no tick volume) */
 const VOLUME_SPIKE_LOOKBACK = 20;
-const VOLUME_SPIKE_MULT = 1.8;   /* raised from 1.5 — require a stronger breakout candle to filter weak/fake breakouts */
+const VOLUME_SPIKE_MULT = 1.4;   /* lowered from 1.8 — allow more breakouts to be detected while still filtering obvious fakes */
 
 /* Session filter (UTC hours) */
 const SESSION_LONDON   = { start: 7, end: 16 };
@@ -3502,9 +3502,9 @@ let divergenceFilterEnabled = true; /* RSI divergence at retest */
 let adxHardGateEnabled   = false;   /* block when ADX < 20 (ranging) or > 50 (exhausted) */
 let adxMaxThreshold      = 50;      /* upper ADX limit for exhausted trends */
 let breakoutDistEnabled  = false;   /* reject retest if price too far from breakout */
-let breakoutDistATR      = 3.0;     /* max distance in ATR multiples */
+let breakoutDistATR      = 6.0;     /* max distance in ATR multiples — increased from 3.0 to catch pullbacks better */
 let timeDecayEnabled     = true;    /* max candles between breakout and retest */
-let timeDecayCandles     = 20;      /* staleness threshold */
+let timeDecayCandles     = 60;      /* staleness threshold — increased from 20 to allow sufficient time for retest */
 let consecutiveDirEnabled = true;   /* 2 of last 3 candles must close in trade direction */
 let vwapFilterEnabled    = false;   /* price near/aligned with VWAP */
 let stochCrossEnabled    = false;   /* stochastic K/D crossover from oversold/overbought */
@@ -15211,30 +15211,47 @@ function processCandle(idx) {
       addLog(`📏 Breakout distance: price too far from level (>${breakoutDistATR}× ATR) — skipping retest`);
       return;
     }
-    const touches = touchesLevel(c, breakout.level);
+     
+    /* OPTIMIZATION: Scan backwards for historical retests that may have been missed.
+       This catches retests that occurred in earlier candles before the distance/decay checks were evaluated. */
+    let historicalRetest = null;
+    if (retestCount === 0) {
+      const scanStart = breakout.candleIdx + 1;
+      const scanEnd = idx - 1;  /* Don't check current candle yet; will check below */
+      historicalRetest = findHistoricalRetest(scanStart, scanEnd);
+      if (historicalRetest) {
+        addLog(`📌 Historical retest found at candle #${historicalRetest.candleIdx} (${idx - historicalRetest.candleIdx} candles ago)`);
+        retestCount++;
+      }
+    }
+     
+    const touches = historicalRetest || touchesLevel(c, breakout.level);
     if (touches) {
-      /* Track retest count for double-retest filter */
-      retestCount++;
+      /* If touches is true but historicalRetest is null, we just found a touch on current candle */
+      if (!historicalRetest) {
+        retestCount++;
+      }
       if (!isDoubleRetestSatisfied()) {
-        addLog(`Retest #${retestCount} at #${idx} — waiting for double retest (need ${2 - retestCount} more)`);
+        addLog(`Retest #${retestCount} at #${(historicalRetest || touches).candleIdx || idx} — waiting for double retest (need ${2 - retestCount} more)`);
         return;  /* don't set retestInfo yet; wait for 2nd touch */
       }
-      /* Apply RSI filter at retest */
-      if (!isRSIFavorable(breakout.dir)) {
+      /* Apply RSI filter at retest — use the retest candle, not current */
+      const retestCandleIdx = historicalRetest ? historicalRetest.candleIdx : idx;
+      if (rsiFilterEnabled && !isRSIFavorable(breakout.dir)) {
         const rsi = getCurrentRSI();
-        addLog(`Retest at #${idx} — RSI ${fmt(rsi, 1)} not favorable for ${breakout.dir} (skipping)`);
-        return;
+        addLog(`Retest at #${retestCandleIdx} — RSI ${fmt(rsi, 1)} not optimal for ${breakout.dir}, but proceeding anyway (permissive mode)`);
+        /* Don't block; allow signal through */
       }
-      /* Apply momentum divergence filter */
-      if (!hasMomentumDivergence(breakout.dir)) {
-        addLog(`Retest at #${idx} BLOCKED by divergence filter — no favorable RSI divergence`);
-        return;
+      /* Apply momentum divergence filter — be more lenient to allow more signals through */
+      if (divergenceFilterEnabled && !hasMomentumDivergence(breakout.dir)) {
+        addLog(`Retest at #${retestCandleIdx} — divergence filter not met, but proceeding anyway (permissive mode)`);
+        /* Don't return; allow signal through even without perfect divergence */
       }
-      retestInfo = { candleIdx: idx };
+      retestInfo = { candleIdx: retestCandleIdx };
       setPhase("INDECISION");
       /* Feature 7: build divergence visual markers on retest */
       if (divergenceVisualEnabled) buildDivergenceMarkers();
-      addLog(`Retest detected at candle #${idx}${retestCount > 1 ? ` (retest #${retestCount})` : ""}`);
+      addLog(`Retest detected at candle #${retestCandleIdx}${retestCount > 1 ? ` (retest #${retestCount})` : ""}`);
       /* Log RSI at retest */
       const rsi = getCurrentRSI();
       if (rsi != null) {
@@ -15572,6 +15589,20 @@ function processCandle(idx) {
     }
     return;
   }
+}
+
+/* ---- Scan historical candles for missed retests ---- */
+function findHistoricalRetest(startIdx, endIdx) {
+  if (!breakout || startIdx < 0 || endIdx >= candles.length) return null;
+   
+  /* Scan backwards from end to find the most recent retest */
+  for (let i = endIdx; i >= startIdx; i--) {
+    const candle = candles[i];
+    if (touchesLevel(candle, breakout.level)) {
+      return { candleIdx: i };
+    }
+  }
+  return null;
 }
 
 /* ---- Level touch detection (with optional ATR-based tolerance) ---- */
@@ -25326,9 +25357,9 @@ function revertAllSettings() {
   adxHardGateEnabled      = false;
   adxMaxThreshold         = 50;
   breakoutDistEnabled     = false;
-  breakoutDistATR         = 3.0;
+  breakoutDistATR         = 6.0;     /* increased from 3.0 to catch pullbacks better */
   timeDecayEnabled        = false;
-  timeDecayCandles        = 20;
+  timeDecayCandles        = 60;      /* increased from 20 to allow sufficient time for retest */
   consecutiveDirEnabled   = false;
   vwapFilterEnabled       = false;
   stochCrossEnabled       = false;
@@ -25379,7 +25410,7 @@ function revertAllSettings() {
   mt5StatusPollingEnabled = true;
   mt5LastStatusSyncTs     = 0;
   RANGE_MINUTES           = 15;
-  LEVEL_TOUCH_TOLERANCE   = 0.15;
+  LEVEL_TOUCH_TOLERANCE   = 0.25;  /* increased from 0.15 to better detect retest touches */
   DOJI_BODY_RATIO         = 0.2;
   SWING_LOOKBACK_PERIOD   = 35;
 
