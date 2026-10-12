@@ -16124,24 +16124,8 @@ function recordSignal(confirmPattern, retestCandleIdx) {
   persistSignalHistory();
   updateStatsUI();
 
-  /* ── Send Telegram notification for Breakout trade ── */
+  /* ── Log Breakout trade generation ── */
   addLog(`[BREAKOUT GENERATED] Signal ID: ${signal.signalId} | ${signal.dir} @ ${fmt(signal.entry, 4)} | SL: ${fmt(signal.sl, 4)} | TP: ${fmt(signal.tp, 4)}`);
-  
-  if (telegramAutoSend) {
-    addLog(`[BREAKOUT QUEUED] Telegram alert queued for delivery`);
-    setTimeout(() => {
-      sendTelegramStrategyAlert(signal).then(() => {
-        addLog(`[BREAKOUT SENT] Telegram notification delivered successfully`);
-        if (Number.isFinite(signal.breakoutDetectedAtMs)) {
-          logPipelineDelay("Breakout detected → Telegram sent (auto)", signal.breakoutDetectedAtMs, {
-            signalId: signal.signalId || null, symbol: signal.symbol
-          });
-        }
-      }).catch((err) => {
-        addLog(`[BREAKOUT FAILED] Telegram notification delivery failed: ${err.message}`);
-      });
-    }, CHART_RENDER_DELAY_MS);
-  }
 
   if (notificationsEnabled && "Notification" in window && Notification.permission === "granted") {
     addLog(`[BREAKOUT SENT] Desktop notification delivered`);
