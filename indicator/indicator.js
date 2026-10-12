@@ -23982,6 +23982,7 @@ function remapPendingSignalIndices() {
         tp:    pendingBreakout.tp,
         dir:   pendingBreakout.dir,
         symbol: pendingBreakout.symbol,
+        rr:    pendingBreakout.rr,
         outcomeStartIdx: pendingBreakout.candleIdx || 0
       };
       monitoringTrade = true;
