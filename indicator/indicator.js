@@ -15232,7 +15232,8 @@ function processCandle(idx) {
         retestCount++;
       }
       if (!isDoubleRetestSatisfied()) {
-        addLog(`Retest #${retestCount} at #${(historicalRetest || touches).candleIdx || idx} — waiting for double retest (need ${2 - retestCount} more)`);
+        const retestCandleIdx = historicalRetest ? historicalRetest.candleIdx : idx;
+        addLog(`Retest #${retestCount} at #${retestCandleIdx} — waiting for double retest (need ${2 - retestCount} more)`);
         return;  /* don't set retestInfo yet; wait for 2nd touch */
       }
       /* Apply RSI filter at retest — use the retest candle, not current */
