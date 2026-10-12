@@ -15312,7 +15312,7 @@ function processCandle(idx) {
         }
         if (confirmed) {
           confirmInfo = { candleIdx: idx, pattern: fastPattern };
-          recordConfirmedSignal(fastPattern);
+          recordConfirmedSignal(fastPattern, retestInfo?.candleIdx);
           addLog(`${fastPattern} at #${idx} (lower-TF fast-track)`);
           buildTrade(c, idx);
           if (trade) {
@@ -15329,7 +15329,7 @@ function processCandle(idx) {
             multiRHitLevels = [];
             addLog(`${fastPattern} at #${idx} — TRADE ENTRY (lower-TF)`);
             addLog(`Confluence score: ${confluenceScore}`);
-            recordSignal(fastPattern);
+            recordSignal(fastPattern, retestInfo?.candleIdx);
           } else {
             /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
                min R:R, recent-loss pause, strength requirement, etc.) — clear both
@@ -15561,7 +15561,7 @@ function processCandle(idx) {
     if (confirmed) {
       confirmInfo = { candleIdx: idx, pattern: confirmPattern };
       /* Record a CONFIRMED signal immediately so it appears in the Live Signals banner */
-      recordConfirmedSignal(confirmPattern);
+      recordConfirmedSignal(confirmPattern, retestInfo?.candleIdx);
       addLog(`${confirmPattern} confirmed at #${idx}`);
       buildTrade(c, idx);
       if (trade) {
@@ -15580,7 +15580,7 @@ function processCandle(idx) {
         addLog(`${confirmPattern} at #${idx} — TRADE ENTRY`);
         /* Confluence score was already computed for the min gate check above */
         addLog(`Confluence score: ${confluenceScore}`);
-        recordSignal(confirmPattern);
+        recordSignal(confirmPattern, retestInfo?.candleIdx);
       } else {
         /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
            min R:R, recent-loss pause, strength requirement, symbol eligibility, etc.)
@@ -15965,9 +15965,10 @@ function findSwingHigh(upToIdx) {
    before the trade is built. This makes the signal visible in the Live Signals banner
    at the confirmed stage. If a trade is subsequently built and passes all gates,
    recordSignal() upgrades this entry to "PENDING" with full trade details. */
-function recordConfirmedSignal(confirmPattern) {
+function recordConfirmedSignal(confirmPattern, retestCandleIdx) {
   const pattern = confirmPattern || "engulfing";
   const sym = _multiPanelProcessing || UI.symbolSelect.value;
+  const rsiIdx = retestCandleIdx != null ? retestCandleIdx : (candles.length - 1);
   const signal = {
     time: new Date().toISOString(),
     symbol: sym,
@@ -15988,7 +15989,7 @@ function recordConfirmedSignal(confirmPattern) {
     confluenceScore: null,
     srConfluence: breakout ? hasSRConfluence(breakout.level) : false,
     confirmPattern: pattern,
-    rsiAtRetest: getCurrentRSI(),
+    rsiAtRetest: getCurrentRSI(rsiIdx),
     volumeSpike: breakout ? (breakout.volumeSpike != null ? breakout.volumeSpike : hasVolumeSpikeOnBreakout(breakout.candleIdx)) : null,
     session: getActiveSessionName(),
     fibLevel: null,
@@ -16019,9 +16020,10 @@ function recordConfirmedSignal(confirmPattern) {
   }
 }
 
-function recordSignal(confirmPattern) {
+function recordSignal(confirmPattern, retestCandleIdx) {
   if (!trade) return;
   const pattern = confirmPattern || "engulfing";
+  const rsiIdx = retestCandleIdx != null ? retestCandleIdx : (candles.length - 1);
   const fibResult = breakout ? getFibRetestLevel(breakout.level) : null;
 
   /* Try to upgrade the last CONFIRMED signal instead of creating a duplicate.
@@ -16054,7 +16056,7 @@ function recordSignal(confirmPattern) {
   signal._confFactors    = getActiveConfluenceFactors();
   signal.srConfluence = breakout ? hasSRConfluence(breakout.level) : false;
   signal.confirmPattern = pattern;
-  signal.rsiAtRetest = getCurrentRSI();
+  signal.rsiAtRetest = getCurrentRSI(rsiIdx);
   signal.volumeSpike = breakout ? (breakout.volumeSpike != null ? breakout.volumeSpike : hasVolumeSpikeOnBreakout(breakout.candleIdx)) : null;
   signal.session = getActiveSessionName();
   signal.fibLevel = fibResult ? (fibResult.ratio * 100).toFixed(1) + "%" : null;
