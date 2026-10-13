@@ -669,3 +669,233 @@ test('cleanupPendingSignalsForSymbol evaluates multi-panel signals with price ac
   const panel2 = Array.from(context.multiPanels.values())[1];
   assert.equal(panel2.signalHistory[0].result, 'PENDING');
 });
+
+test('monitorTradeOutcome handles non-scalp timeout (time-stop) with trade reset and finalization', () => {
+  const fnSource = extractFunction('monitorTradeOutcome');
+  const harness = `${fnSource}\nmodule.exports = { monitorTradeOutcome };`;
+  const finalizeCalls = [];
+  const logCalls = [];
+  const lifecycleCalls = [];
+  const phaseChanges = [];
+  const telegramCalls = [];
+  const signalHistoryPersisted = [];
+  const statsUpdated = [];
+  
+  // Create candles with enough entries to trigger timeout (>= 24 candles since entry)
+  const candles = [];
+  for (let i = 0; i < 35; i++) {
+    candles.push({ close: 100 + (i * 0.1), high: 100.5 + (i * 0.1), low: 99.5 + (i * 0.1) });
+  }
+  
+  const context = {
+    module: { exports: {} },
+    monitoringTrade: true,
+    trade: { 
+      symbol: 'R_50', 
+      signalId: 'sig-timeout-1', 
+      entry: 100, 
+      sl: 95, 
+      tp: 105,
+      dir: 'BULL',
+      scalpingMode: false,  // Non-scalp timeout
+      entryIdx: 10  // Entered at candle 10, current is 35, so 25 candles elapsed (>= 24)
+    },
+    signalHistory: [{ 
+      signalId: 'sig-timeout-1', 
+      result: 'PENDING',
+      symbol: 'R_50',
+      entry: 100,
+      sl: 95,
+      tp: 105,
+      dir: 'BULL'
+    }],
+    trailingSL: null,
+    partialTpHit: false,
+    partialTpEnabled: false,  // Disable to skip partial TP checks
+    trailingStopEnabled: false,  // Disable to skip trailing stop checks
+    teslaScalingEnabled: false,  // Disable to skip Tesla scaling checks
+    teslaBEHit: false,
+    teslaT1Hit: false,
+    teslaT2Hit: false,
+    teslaT3Hit: false,
+    phase: 'TRADE',
+    candles: candles,
+    signalWins: 0,
+    signalLosses: 0,
+    signalBreakevens: 0,
+    adaptiveConfluenceEnabled: false,  // Disable to skip confluence checks
+    _historicalProcessing: false,  // Flag for historical vs live processing
+    getActiveSymbol: () => 'R_50',
+    findPendingTradeSignal: () => context.signalHistory[0],
+    logSignalLifecycleEvent: (...args) => lifecycleCalls.push(args),
+    logSignalEngineDebug: () => {},
+    setPhase: (value) => {
+      phaseChanges.push(value);
+      context.phase = value;
+    },
+    sendTradeOutcomeTelegram: (pending) => {
+      telegramCalls.push({ pending, timestamp: Date.now() });
+    },
+    persistSignalHistory: () => {
+      signalHistoryPersisted.push(true);
+    },
+    updateStatsUI: () => {
+      statsUpdated.push(true);
+    },
+    playPhaseAlert: () => {},
+    recordConfluenceOutcome: () => false,
+    addLog: (msg) => logCalls.push(msg),
+    fmt: (n, decimals) => n.toFixed(decimals),
+    fmtPrice: (n, decimals) => n.toFixed(decimals),
+    showToast: () => {},
+    sendPartialTpTelegram: () => {},
+    finalizeBreakoutRetestTrade: (pending, tradeSymbol, currentIdx) => {
+      finalizeCalls.push({ pending, tradeSymbol, currentIdx });
+      context.monitoringTrade = false;
+      context.trade = null;
+      context.trailingSL = null;
+      context.partialTpHit = false;
+    },
+    PRICE_EPSILON: 0.00001,
+    GENERAL_TRADE_STALL_TIMEOUT_CANDLES: 24,
+    SCALP_MAX_CANDLES: 15
+  };
+  
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { monitorTradeOutcome } = context.module.exports;
+
+  // Call monitorTradeOutcome with current candle
+  monitorTradeOutcome(candles[34]);
+  
+  // Verify trade is reset
+  assert.equal(context.monitoringTrade, false, 'monitoringTrade should be false after timeout');
+  assert.equal(context.trade, null, 'trade should be null after timeout');
+  
+  // Verify finalization helper was called (this is the key test for timeout behavior)
+  assert.equal(finalizeCalls.length, 1, 'finalizeBreakoutRetestTrade should be called exactly once for timeout');
+  assert.ok(finalizeCalls[0].pending, 'pending signal should be passed to finalize');
+  assert.equal(finalizeCalls[0].tradeSymbol, 'R_50', 'trade symbol should be passed to finalize');
+  
+  // Verify timeout log message
+  assert.ok(logCalls.some(msg => msg.includes('Time-stop')), 'Time-stop log should be present');
+  
+  // Verify the pending signal result is set (WIN or LOSS based on price)
+  assert.ok(finalizeCalls[0].pending.result === 'WIN' || finalizeCalls[0].pending.result === 'LOSS', 
+    'pending.result should be set to WIN or LOSS');
+});
+
+test('monitorTradeOutcome handles scalp timeout (max candles) with trade reset and finalization', () => {
+  const fnSource = extractFunction('monitorTradeOutcome');
+  const harness = `${fnSource}\nmodule.exports = { monitorTradeOutcome };`;
+  const lifecycleCalls = [];
+  const telegramCalls = [];
+  const logCalls = [];
+  const phaseChanges = [];
+  const statsUpdated = [];
+  const signalHistoryPersisted = [];
+  const finalizeCalls = [];
+  
+  // Create candles with enough entries to trigger scalp timeout (>= 15 candles since entry)
+  const candles = [];
+  for (let i = 0; i < 25; i++) {
+    candles.push({ close: 100 + (i * 0.1), high: 100.5 + (i * 0.1), low: 99.5 + (i * 0.1) });
+  }
+  
+  const context = {
+    module: { exports: {} },
+    monitoringTrade: true,
+    trade: { 
+      symbol: 'R_50', 
+      signalId: 'sig-scalp-timeout-1', 
+      entry: 100, 
+      sl: 98, 
+      tp: 102,
+      dir: 'BULL',
+      scalpingMode: true,  // Scalp timeout
+      entryIdx: 5  // Entered at candle 5, current is 24, so 19 candles elapsed (>= 15)
+    },
+    signalHistory: [{ 
+      signalId: 'sig-scalp-timeout-1', 
+      result: 'PENDING',
+      symbol: 'R_50',
+      entry: 100,
+      sl: 98,
+      tp: 102,
+      dir: 'BULL'
+    }],
+    trailingSL: null,
+    partialTpHit: false,
+    partialTpEnabled: false,  // Disable to skip partial TP checks
+    trailingStopEnabled: false,  // Disable to skip trailing stop checks
+    teslaScalingEnabled: false,  // Disable to skip Tesla scaling checks
+    teslaBEHit: false,
+    teslaT1Hit: false,
+    teslaT2Hit: false,
+    teslaT3Hit: false,
+    phase: 'TRADE',
+    candles: candles,
+    signalWins: 0,
+    signalLosses: 0,
+    signalBreakevens: 0,
+    adaptiveConfluenceEnabled: false,  // Disable to skip confluence checks
+    _historicalProcessing: false,  // Flag for historical vs live processing
+    getActiveSymbol: () => 'R_50',
+    findPendingTradeSignal: () => context.signalHistory[0],
+    logSignalLifecycleEvent: (...args) => lifecycleCalls.push(args),
+    logSignalEngineDebug: () => {},
+    setPhase: (value) => {
+      phaseChanges.push(value);
+      context.phase = value;
+    },
+    sendTradeOutcomeTelegram: (pending) => {
+      telegramCalls.push({ pending, timestamp: Date.now() });
+    },
+    persistSignalHistory: () => {
+      signalHistoryPersisted.push(true);
+    },
+    updateStatsUI: () => {
+      statsUpdated.push(true);
+    },
+    playPhaseAlert: () => {},
+    recordConfluenceOutcome: () => false,
+    addLog: (msg) => logCalls.push(msg),
+    fmt: (n, decimals) => n.toFixed(decimals),
+    fmtPrice: (n, decimals) => n.toFixed(decimals),
+    showToast: () => {},
+    sendPartialTpTelegram: () => {},
+    finalizeBreakoutRetestTrade: (pending, tradeSymbol, currentIdx) => {
+      finalizeCalls.push({ pending, tradeSymbol, currentIdx });
+      context.monitoringTrade = false;
+      context.trade = null;
+      context.trailingSL = null;
+      context.partialTpHit = false;
+    },
+    PRICE_EPSILON: 0.00001,
+    GENERAL_TRADE_STALL_TIMEOUT_CANDLES: 24,
+    SCALP_MAX_CANDLES: 15
+  };
+  
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { monitorTradeOutcome } = context.module.exports;
+
+  // Call monitorTradeOutcome with current candle
+  monitorTradeOutcome(candles[24]);
+  
+  // Verify trade is reset
+  assert.equal(context.monitoringTrade, false, 'monitoringTrade should be false after scalp timeout');
+  assert.equal(context.trade, null, 'trade should be null after scalp timeout');
+  
+  // Verify finalization helper was called (this is the key test for scalp timeout behavior)
+  assert.equal(finalizeCalls.length, 1, 'finalizeBreakoutRetestTrade should be called exactly once for scalp timeout');
+  assert.ok(finalizeCalls[0].pending, 'pending signal should be passed to finalize');
+  assert.equal(finalizeCalls[0].tradeSymbol, 'R_50', 'trade symbol should be passed to finalize');
+  
+  // Verify scalp timeout log message
+  assert.ok(logCalls.some(msg => msg.includes('Scalp TIMEOUT')), 'Scalp TIMEOUT log should be present');
+  
+  // Verify the pending signal result is set (WIN or LOSS based on price)
+  assert.ok(finalizeCalls[0].pending.result === 'WIN' || finalizeCalls[0].pending.result === 'LOSS', 
+    'pending.result should be set to WIN or LOSS');
+});
