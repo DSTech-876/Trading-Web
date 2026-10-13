@@ -1715,6 +1715,9 @@ function cleanupPendingSignalsForSymbol(symbol, strategyType = null, options = {
     ? options.staleAfterMs
     : Math.max(30 * 60 * 1000, getSignalValidityMs() * 3);
   const keepSignalId = options.keepSignalId || null;
+  const currentPrice = candles.length > 0 ? candles[candles.length - 1].close : null;
+  const atr = getAtrReference();
+  const passedThresholdAtr = 1.0;
   const histories = [signalHistory];
   for (const panel of multiPanels.values()) {
     if (panel && panel.symbol === sym && Array.isArray(panel.signalHistory)) histories.push(panel.signalHistory);
@@ -1735,14 +1738,27 @@ function cleanupPendingSignalsForSymbol(symbol, strategyType = null, options = {
       const createdAt = getSignalCreatedAtMs(entry);
       const staleByAge = createdAt > 0 && now - createdAt >= staleAfterMs;
       const staleByOrphan = !monitoringTrade && !trade && createdAt > 0 && now - createdAt >= staleAfterMs;
-      if (!staleByAge && !staleByOrphan) continue;
+      let passedByPrice = false;
+      let passedReason = "stale_pending_cleanup";
+      if (!staleByAge && !staleByOrphan && Number.isFinite(entry.entry) && Number.isFinite(currentPrice) && Number.isFinite(atr) && atr > 0) {
+        const entryLevel = entry.entry;
+        const threshold = atr * passedThresholdAtr;
+        if (entry.dir === "UP" && currentPrice < entryLevel - threshold) {
+          passedByPrice = true;
+          passedReason = "price_passed_entry";
+        } else if (entry.dir === "DOWN" && currentPrice > entryLevel + threshold) {
+          passedByPrice = true;
+          passedReason = "price_passed_entry";
+        }
+      }
+      if (!staleByAge && !staleByOrphan && !passedByPrice) continue;
       entry.result = "EXPIRED";
       entry.outcomeCandleIdx = Array.isArray(candles) ? candles.length - 1 : null;
       ensureAdaptiveTradeResolutionTimestamp(entry);
       if (entry.signalId) unregisterActiveTradeRecord(sym, entry.signalId);
       transitionSignalLifecycleState(sym, "CLOSED", {
         signalId: entry.signalId || null,
-        reason: "stale_pending_cleanup"
+        reason: passedReason
       });
       cleaned++;
     }
