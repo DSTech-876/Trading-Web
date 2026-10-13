@@ -1743,10 +1743,10 @@ function cleanupPendingSignalsForSymbol(symbol, strategyType = null, options = {
       if (!staleByAge && !staleByOrphan && Number.isFinite(entry.entry) && Number.isFinite(currentPrice) && Number.isFinite(atr) && atr > 0) {
         const entryLevel = entry.entry;
         const threshold = atr * passedThresholdAtr;
-        if (entry.dir === "UP" && currentPrice < entryLevel - threshold) {
+        if (entry.dir === "BULL" && currentPrice < entryLevel - threshold) {
           passedByPrice = true;
           passedReason = "price_passed_entry";
-        } else if (entry.dir === "DOWN" && currentPrice > entryLevel + threshold) {
+        } else if (entry.dir === "BEAR" && currentPrice > entryLevel + threshold) {
           passedByPrice = true;
           passedReason = "price_passed_entry";
         }
