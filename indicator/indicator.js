@@ -14819,6 +14819,11 @@ function processLatestCandle() {
     addLog("Auto-reset: scanning for new setup...");
   }
 
+  /* Clean up stale pending signals on each candle so orphaned signals are
+     removed promptly as price moves away from entry level, before any phase-based
+     early returns. Each panel evaluates its own latest price after activation. */
+  cleanupPendingSignalsForSymbol(getActiveSymbol(), "breakout_retest");
+
   /* Session Ranges: rebuild ranges and check for London sweep on each candle.
      Always runs before any phase-based early return so sweeps are never missed
      while the main indicator is in TRADE, WAITING, or RANGE phases. */

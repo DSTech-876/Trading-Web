@@ -433,3 +433,239 @@ test('dynamic min confluence applies regime deltas and clamps to 6-16', () => {
   assert.equal(run(16, 'RANGING', { ranging: 8 }), 16);
   assert.equal(run(8, 'TRANSITIONING', { transitioning: 3 }), 11);
 });
+
+test('cleanupPendingSignalsForSymbol expires BULL signals when price drops below entry - ATR', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-1', symbol: 'R_100' }
+    ],
+    multiPanels: new Map(),
+    candles: [{ close: 97.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 1);
+  assert.equal(context.signalHistory[0].result, 'EXPIRED');
+});
+
+test('cleanupPendingSignalsForSymbol expires BEAR signals when price rises above entry + ATR', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BEAR', createdAtMs: now - 100, signalId: 'sig-2', symbol: 'R_100' }
+    ],
+    multiPanels: new Map(),
+    candles: [{ close: 102.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 1);
+  assert.equal(context.signalHistory[0].result, 'EXPIRED');
+});
+
+test('cleanupPendingSignalsForSymbol preserves signals at boundary price (exactly 1 ATR)', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-3', symbol: 'R_100' }
+    ],
+    multiPanels: new Map(),
+    candles: [{ close: 98.0 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 0);
+  assert.equal(context.signalHistory[0].result, 'PENDING');
+});
+
+test('cleanupPendingSignalsForSymbol skips price cleanup with invalid ATR but respects age cleanup', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-4', symbol: 'R_100' }
+    ],
+    multiPanels: new Map(),
+    candles: [{ close: 97.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => null,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 0);
+  assert.equal(context.signalHistory[0].result, 'PENDING');
+});
+
+test('cleanupPendingSignalsForSymbol preserves keepSignalId and tracked trades', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-keep', symbol: 'R_100' }
+    ],
+    multiPanels: new Map(),
+    candles: [{ close: 97.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: true,
+    trade: { signalId: 'sig-keep', symbol: 'R_100' },
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 0);
+  assert.equal(context.signalHistory[0].result, 'PENDING');
+});
+
+test('cleanupPendingSignalsForSymbol evaluates multi-panel signals with price action', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    signalHistory: [],
+    multiPanels: new Map([
+      ['panel-1', {
+        symbol: 'R_100',
+        signalHistory: [
+          { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-5', symbol: 'R_100' }
+        ]
+      }],
+      ['panel-2', {
+        symbol: 'R_100',
+        signalHistory: [
+          { result: 'PENDING', entry: 100, dir: 'BEAR', createdAtMs: now - 100, signalId: 'sig-6', symbol: 'R_100' }
+        ]
+      }]
+    ]),
+    candles: [{ close: 97.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 1);
+  const panel1 = Array.from(context.multiPanels.values())[0];
+  assert.equal(panel1.signalHistory[0].result, 'EXPIRED');
+  const panel2 = Array.from(context.multiPanels.values())[1];
+  assert.equal(panel2.signalHistory[0].result, 'PENDING');
+});
