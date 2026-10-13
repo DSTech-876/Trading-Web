@@ -417,6 +417,7 @@ test('dynamic min confluence applies regime deltas and clamps to 6-16', () => {
       dynamicConfTrendingDelta: deltas.trending ?? -1,
       dynamicConfTransitioningDelta: deltas.transitioning ?? 0,
       dynamicConfRangingDelta: deltas.ranging ?? 2,
+      DYNAMIC_CONF_MIN_FLOOR: 6,
       getCurrentRegimeTag: () => regime,
       getOptimizationProfile: () => null
     };
