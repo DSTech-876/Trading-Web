@@ -12582,6 +12582,37 @@ function maybeSendBreakoutCancelled(reason) {
 }
 
 /**
+ * Re-announce any Breakout Retest lifecycle stage that was reached while
+ * _historicalProcessing suppressed alerts — i.e. during the silent replay
+ * that rebuilds state from processAllCandles() after a reconnect (including
+ * watchdog-forced reconnects). Without this, a breakout that printed,
+ * retested and even confirmed while the stream was stalled would never be
+ * announced: setPhase() only fires lifecycle alerts on phase *transitions*,
+ * and those transitions all happened silently during the catch-up replay.
+ * Each call is idempotent — maybeSendBreakoutLifecycleAlert() no-ops once a
+ * stage's alert flag has already been set, so this is safe to call after
+ * every reconnect without producing duplicate notifications. */
+function catchUpBreakoutLifecycleAlerts() {
+  if (!breakout) return;
+  const retestOrLater  = phase === "RETEST" || phase === "INDECISION" || phase === "CONFIRM" || phase === "TRADE";
+  const confirmOrLater = phase === "INDECISION" || phase === "CONFIRM" || phase === "TRADE";
+  const tradeReached   = phase === "TRADE";
+  if (retestOrLater) {
+    maybeSendBreakoutLifecycleAlert("setup", { reason: "Breakout printed; waiting for retest." });
+  }
+  if (confirmOrLater) {
+    maybeSendBreakoutLifecycleAlert("approaching", { reason: "Retest held; confirmation is forming near the entry zone." });
+  }
+  if (tradeReached) {
+    maybeSendBreakoutLifecycleAlert("active", {
+      reason: trade && trade.entryMode === "aggressive_intrabar"
+        ? "Entry activated intrabar after a strong reclaim from the retest zone."
+        : "Entry activated on the confirmation candle."
+    });
+  }
+}
+
+/**
  * Universal guard applied to every strategy — including MTF Top-Down — before
  * a "new trade signal" notification is allowed to go out. A signal must never
  * be delivered without a stop loss and take profit, regardless of which
@@ -24283,6 +24314,11 @@ function connect() {
       /* After reconnect, remap any surviving PENDING signals to the new candle
          indices so their outcome (WIN/LOSS) can still be tracked and sent via Telegram. */
       remapPendingSignalIndices();
+      /* processAllCandles() rebuilds state silently (_historicalProcessing=true),
+         so any Breakout Retest stage reached during the replay (setup/approaching/
+         active) never got its lifecycle alert. Fire whichever stages are now
+         live so the signal isn't "detected late" or missed entirely. */
+      catchUpBreakoutLifecycleAlerts();
       drawChart();
       startCandleCountdown();
     }
@@ -30518,6 +30554,11 @@ function connectPanel(p) {
       computeEMAs();
       processAllCandles();
       remapPendingSignalIndices();
+      /* processAllCandles() rebuilds state silently (_historicalProcessing=true),
+         so any Breakout Retest stage reached during the replay (setup/approaching/
+         active) never got its lifecycle alert. Fire whichever stages are now
+         live so the signal isn't "detected late" or missed entirely. */
+      catchUpBreakoutLifecycleAlerts();
     }
 
     /* Streaming OHLC — use else-if so the historical batch's numeric ohlc flag
