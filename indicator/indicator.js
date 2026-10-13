@@ -18084,6 +18084,62 @@ function restoreAutoTradeHistory() {
   } catch (e) { /* storage not available */ }
 }
 
+/**
+ * Shared close-out logic for a resolved breakout-retest trade (WIN/LOSS/BREAKEVEN).
+ * Used by every resolution path (SL/TP hit, time-stop, scalp timeout) so that
+ * notifications are always sent and the engine always resets to look for the
+ * next setup — regardless of which path resolved the trade.
+ */
+function finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx) {
+  pending.outcomeCandleIdx = currentIdx;
+  monitoringTrade = false;
+  persistSignalHistory();
+  updateStatsUI();
+  playPhaseAlert(pending.result === "WIN" ? "TRADE" : "RANGE");
+  sendTradeOutcomeTelegram(pending);
+  logSignalLifecycleEvent(pending.symbol || tradeSymbol, "Trade Closed", {
+    signalId: pending.signalId || (trade && trade.signalId) || null,
+    result: pending.result,
+    exitPrice: pending.exitPrice != null ? pending.exitPrice : null
+  });
+  /* Feature 13: record confluence factor outcome for adaptive weighting */
+  if (adaptiveConfluenceEnabled && pending._confFactors && !pending._confRecorded) {
+    if (recordConfluenceOutcome(pending._confFactors, pending.result, pending.adaptiveScopeKey)) {
+      pending._confRecorded = true;
+    }
+  }
+  if (!_historicalProcessing) rebuildWalkForwardProfilesFromHistory();
+  logSignalEngineDebug("TRADE_CLOSE", {
+    signalId: pending.signalId || (trade && trade.signalId) || null,
+    result: pending.result,
+    symbol: pending.symbol || (trade && trade.symbol) || getActiveSymbol(),
+    exitPrice: pending.exitPrice != null ? pending.exitPrice : null
+  });
+  if (!_historicalProcessing && autoResetEnabled) {
+    logSignalEngineDebug("SYMBOL_RELEASE", {
+      signalId: pending.signalId || null,
+      reason: "trade_resolved_auto_reset",
+      symbol: pending.symbol || (trade && trade.symbol) || getActiveSymbol()
+    });
+    resetForNextSetup();
+  } else {
+    trade = null;
+    trailingSL = null;
+    partialTpHit = false;
+    logSignalLifecycleEvent(pending.symbol || tradeSymbol, "State Reset Complete", {
+      signalId: pending.signalId || null,
+      reason: "trade_resolved"
+    });
+  }
+  cleanupPendingSignalsForSymbol(pending.symbol || tradeSymbol, "breakout_retest", { keepSignalId: pending.signalId || null });
+  const eligibleAfterClose = isSymbolEligibleForNewSignal(pending.symbol || getActiveSymbol(), "breakout_retest");
+  logSignalEngineDebug("NEW_SIGNAL_ELIGIBILITY", {
+    signalId: pending.signalId || null,
+    symbol: pending.symbol || getActiveSymbol(),
+    eligible: eligibleAfterClose
+  });
+}
+
 function monitorTradeOutcome(candle) {
   if (!monitoringTrade || !trade) return;
   const releasedTrade = trade;
@@ -18281,11 +18337,7 @@ function monitorTradeOutcome(candle) {
         signalLosses++;
       }
       addLog(`⏱ Time-stop (${GENERAL_TRADE_STALL_TIMEOUT_CANDLES} candles) — exit at ${fmt(exitPrice, 4)} → ${pending.result}`);
-      monitoringTrade = false;
-      persistSignalHistory();
-      updateStatsUI();
-      playPhaseAlert(inProfit ? "TRADE" : "RANGE");
-      sendTradeOutcomeTelegram(pending);
+      finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx);
       return;
     }
   }
@@ -18310,11 +18362,7 @@ function monitorTradeOutcome(candle) {
         signalLosses++;
       }
       addLog(`⏱ Scalp TIMEOUT (${SCALP_MAX_CANDLES} candles) — exit at ${fmt(exitPrice, 4)} → ${pending.result}`);
-      monitoringTrade = false;
-      persistSignalHistory();
-      updateStatsUI();
-      playPhaseAlert(inProfit ? "TRADE" : "RANGE");
-      sendTradeOutcomeTelegram(pending);
+      finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx);
       return;
     }
   }
@@ -18428,53 +18476,7 @@ function monitorTradeOutcome(candle) {
   }
 
   if (resolved) {
-    pending.outcomeCandleIdx = currentIdx;
-    monitoringTrade = false;
-    persistSignalHistory();
-    updateStatsUI();
-    playPhaseAlert(pending.result === "WIN" ? "TRADE" : "RANGE");
-    sendTradeOutcomeTelegram(pending);
-    logSignalLifecycleEvent(pending.symbol || tradeSymbol, "Trade Closed", {
-      signalId: pending.signalId || trade.signalId || null,
-      result: pending.result,
-      exitPrice: pending.exitPrice != null ? pending.exitPrice : null
-    });
-    /* Feature 13: record confluence factor outcome for adaptive weighting */
-    if (adaptiveConfluenceEnabled && pending._confFactors && !pending._confRecorded) {
-      if (recordConfluenceOutcome(pending._confFactors, pending.result, pending.adaptiveScopeKey)) {
-        pending._confRecorded = true;
-      }
-    }
-    if (!_historicalProcessing) rebuildWalkForwardProfilesFromHistory();
-    logSignalEngineDebug("TRADE_CLOSE", {
-      signalId: pending.signalId || trade.signalId || null,
-      result: pending.result,
-      symbol: pending.symbol || trade.symbol || getActiveSymbol(),
-      exitPrice: pending.exitPrice != null ? pending.exitPrice : null
-    });
-    if (!_historicalProcessing && autoResetEnabled) {
-      logSignalEngineDebug("SYMBOL_RELEASE", {
-        signalId: pending.signalId || trade.signalId || null,
-        reason: "trade_resolved_auto_reset",
-        symbol: pending.symbol || trade.symbol || getActiveSymbol()
-      });
-      resetForNextSetup();
-    } else {
-      trade = null;
-      trailingSL = null;
-      partialTpHit = false;
-      logSignalLifecycleEvent(pending.symbol || tradeSymbol, "State Reset Complete", {
-        signalId: pending.signalId || null,
-        reason: "trade_resolved"
-      });
-    }
-    cleanupPendingSignalsForSymbol(pending.symbol || tradeSymbol, "breakout_retest", { keepSignalId: pending.signalId || null });
-    const eligibleAfterClose = isSymbolEligibleForNewSignal(pending.symbol || getActiveSymbol(), "breakout_retest");
-    logSignalEngineDebug("NEW_SIGNAL_ELIGIBILITY", {
-      signalId: pending.signalId || null,
-      symbol: pending.symbol || getActiveSymbol(),
-      eligible: eligibleAfterClose
-    });
+    finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx);
   }
 }
 
