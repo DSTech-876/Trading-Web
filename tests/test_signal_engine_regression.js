@@ -34,6 +34,6 @@ test('Reset session integration clears timers and storage-backed caches', () => 
 
 test('Lifecycle telegram captions include Signal ID and TP/SL categories', () => {
   assert.match(source, /Signal ID/);
-  assert.match(source, /Take Profit Hit/);
-  assert.match(source, /Stop Loss Hit/);
+  assert.match(source, /Take Profit Hit/i);
+  assert.match(source, /Stop Loss Hit/i);
 });

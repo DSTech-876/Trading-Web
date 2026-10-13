@@ -238,6 +238,12 @@ const WALK_FORWARD_MIN_SAMPLES   = 12;
 const DYNAMIC_CONF_TRENDING_DELTA_DEFAULT      = -1;
 const DYNAMIC_CONF_TRANSITIONING_DELTA_DEFAULT = 0;
 const DYNAMIC_CONF_RANGING_DELTA_DEFAULT       = +2;
+/* Floor for the dynamic confluence threshold. Regardless of how negative the
+   TRENDING delta is configured, the effective minimum confluence required to
+   allow a breakout-retest trade must never drop below this value — a lower
+   floor would let very weak setups qualify for entry/Telegram notification
+   during strong trends, undermining signal quality. */
+const DYNAMIC_CONF_MIN_FLOOR = 6;
 let dynamicConfTrendingDelta      = DYNAMIC_CONF_TRENDING_DELTA_DEFAULT;
 let dynamicConfTransitioningDelta = DYNAMIC_CONF_TRANSITIONING_DELTA_DEFAULT;
 let dynamicConfRangingDelta       = DYNAMIC_CONF_RANGING_DELTA_DEFAULT;
@@ -25044,7 +25050,7 @@ function getDynamicMinConfluence(symbol, granSec, regime) {
   if (profile && Number.isFinite(profile.requiredConfluence)) {
     threshold = Math.max(threshold, profile.requiredConfluence);
   }
-  return Math.max(0, Math.min(16, threshold));
+  return Math.max(DYNAMIC_CONF_MIN_FLOOR, Math.min(16, threshold));
 }
 
 function requiresStrongBreakoutNow(symbol, granSec, regime) {
