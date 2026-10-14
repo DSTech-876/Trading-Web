@@ -2645,8 +2645,16 @@ let pingTimer = null;
 /* Stream watchdog — detect stale connections that stop delivering OHLC data.
    If no candle/tick data arrives within WATCHDOG_TIMEOUT_MS, force a reconnect.
    This addresses the issue where WebSocket connections stay "open" but the
-   Deriv server stops sending market data after extended periods. */
-const WATCHDOG_TIMEOUT_MS = 120000; /* 2 minutes without data → reconnect */
+   Deriv server stops sending market data after extended periods.
+   Kept tight (45s timeout, checked every WATCHDOG_CHECK_INTERVAL_MS) because
+   every second of undetected stall directly delays breakout detection: the
+   old 2-minute timeout checked only every 30s, so a stalled stream could sit
+   unnoticed for up to ~150s before the reconnect/replay even started, making
+   breakout signals arrive minutes late. Deriv OHLC subscriptions emit an
+   update on every tick (~1-2s for synthetics), so 45s of silence on an open
+   socket reliably indicates a stalled feed rather than a quiet market. */
+const WATCHDOG_TIMEOUT_MS = 45000; /* 45s without data → reconnect */
+const WATCHDOG_CHECK_INTERVAL_MS = 5000; /* how often the stall check runs */
 let watchdogTimer = null;
 let lastDataTimestamp = 0;  /* epoch ms of last OHLC message on the main WS */
 
@@ -23944,7 +23952,7 @@ function startWatchdog() {
       intentionalClose = false;
       ws.close();
     }
-  }, 30000); /* check every 30s */
+  }, WATCHDOG_CHECK_INTERVAL_MS);
 }
 
 function stopWatchdog() {
@@ -23969,7 +23977,7 @@ function startPanelWatchdog(p) {
       p.intentionalClose = false;
       p.ws.close();
     }
-  }, 30000);
+  }, WATCHDOG_CHECK_INTERVAL_MS);
 }
 
 function stopPanelWatchdog(p) {

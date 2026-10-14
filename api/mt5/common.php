@@ -68,9 +68,25 @@ function mt5WithStateLock(callable $callback): mixed
     $state = mt5DecodeState(is_string($raw) ? $raw : '', $path);
 
     if (!empty($state['__corrupt'])) {
-        flock($fh, LOCK_UN);
-        fclose($fh);
-        throw new RuntimeException('Refusing to mutate MT5 bridge state: stored payload is corrupt');
+        // The corrupt payload has already been archived to "$path.corrupt" and
+        // logged as STATE_CORRUPT by mt5DecodeState(). Previously this threw,
+        // which turned one corrupt write (partial write, disk-full truncation)
+        // into a PERMANENT outage: every pull.php/status.php/signal.php call
+        // 500'd forever — the EA could never connect again — until an operator
+        // manually deleted the state file. Self-heal instead: start from a
+        // fresh state (forensics are preserved in the .corrupt copy), record
+        // the reset in the event ledger, and let this request proceed so the
+        // bridge comes back on its own.
+        unset($state['__corrupt']);
+        mt5RecordEvent($state, 'STATE_RESET', [
+            'reason' => 'Corrupt state payload archived and reinitialized',
+            'archivedCopy' => $path . '.corrupt',
+        ]);
+        mt5LogDiagnostic('state', [
+            'event' => 'STATE_RESET',
+            'path' => $path,
+            'archivedCopy' => $path . '.corrupt',
+        ]);
     }
 
     $result = $callback($state);

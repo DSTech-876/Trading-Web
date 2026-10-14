@@ -260,5 +260,37 @@ check(
 check('terminal key length is capped', MT5_TERMINAL_KEY_MAX_LEN > 0, true);
 check('pull stats terminal count is capped', MT5_PULL_STATS_MAX_TERMINALS > 0, true);
 
+/* ── Corrupt state file self-heals instead of failing forever ───────── */
+// A single corrupt write (partial write, disk-full truncation) used to make
+// mt5WithStateLock() throw on every subsequent request, so pull.php/
+// status.php/signal.php 500'd permanently and the EA could never reconnect
+// until an operator deleted the state file by hand. The lock path must now
+// archive the corrupt payload to "<state>.corrupt" and reinitialize.
+$statePath = mt5StoragePath();
+$originalRaw = is_file($statePath) ? (string) @file_get_contents($statePath) : null;
+file_put_contents($statePath, '{"orders": {TRUNCATED');
+try {
+    $healed = mt5WithStateLock(function (array &$state): bool {
+        return !isset($state['__corrupt']) && $state['orders'] === [];
+    });
+    check('corrupt state is reinitialized and the request proceeds', $healed, true);
+} catch (\Throwable $e) {
+    check('corrupt state does not throw (' . $e->getMessage() . ')', false, true);
+}
+check('corrupt payload is archived for forensics', is_file($statePath . '.corrupt'), true);
+$rewritten = json_decode((string) @file_get_contents($statePath), true);
+check('state file is valid JSON again after self-heal', is_array($rewritten), true);
+check(
+    'self-heal is recorded in the event ledger',
+    is_array($rewritten) && in_array('STATE_RESET', array_column($rewritten['events'] ?? [], 'event'), true),
+    true
+);
+@unlink($statePath . '.corrupt');
+if ($originalRaw !== null) {
+    file_put_contents($statePath, $originalRaw);
+} else {
+    @unlink($statePath);
+}
+
 echo $failures === 0 ? "\nAll checks passed.\n" : "\n$failures check(s) failed.\n";
 exit($failures === 0 ? 0 : 1);

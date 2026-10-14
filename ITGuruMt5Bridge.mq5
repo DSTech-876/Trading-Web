@@ -1930,8 +1930,8 @@ int OnInit()
 {
    if(StringLen(InpBridgeKey) < 16)
    {
-      Print("FATAL: InpBridgeKey is empty or too short. Set a strong secret matching the server MT5_BRIDGE_KEY. EA will not poll.");
-      Comment("ITGuruMt5Bridge: NOT RUNNING - InpBridgeKey not configured.");
+      Print("FATAL: InpBridgeKey is empty or too short. Set it to YOUR OWN personal bridge key from the web app's MT5 Bridge settings panel (Reveal/Regenerate) — not the server's MT5_BRIDGE_KEY env var. EA will not poll.");
+      Comment("ITGuruMt5Bridge: NOT RUNNING - InpBridgeKey not configured (use your personal key from the MT5 Bridge settings panel).");
       return(INIT_FAILED);
    }
 
