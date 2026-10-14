@@ -876,7 +876,7 @@ const PING_INTERVAL_MS = 30000;
 let pingTimer = null;
 
 /* Stream watchdog – force-close stale connections if no OHLC/candle data arrives */
-const STREAM_WATCHDOG_TIMEOUT_MS = 120000; /* 2 minutes */
+const STREAM_WATCHDOG_TIMEOUT_MS = 45000; /* 45s without data → reconnect (kept tight so breakout detection isn't delayed by an undetected stream stall) */
 let streamWatchdogTimer = null;
 
 /* Debounce */
@@ -6838,14 +6838,14 @@ function stopPing() {
 /* ================= STREAM WATCHDOG ================= */
 /**
  * Monitors whether OHLC/candle data is flowing on the main WebSocket.
- * If no candle data arrives within STREAM_WATCHDOG_TIMEOUT_MS (2 min),
+ * If no candle data arrives within STREAM_WATCHDOG_TIMEOUT_MS (45s),
  * force-closes the connection which triggers the auto-reconnect logic.
  */
 function startStreamWatchdog() {
   stopStreamWatchdog();
   streamWatchdogTimer = setTimeout(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      addLog("⚠️ Stream watchdog: no candle data for 2 min – force-closing connection");
+      addLog(`⚠️ Stream watchdog: no candle data for ${Math.round(STREAM_WATCHDOG_TIMEOUT_MS / 1000)}s – force-closing connection`);
       ws.close(); /* triggers onclose → scheduleReconnect */
     }
   }, STREAM_WATCHDOG_TIMEOUT_MS);
