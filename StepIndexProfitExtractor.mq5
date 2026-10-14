@@ -75,6 +75,7 @@ input double InpLotSize              = 0.10;
 input long   InpMagic                = 90210001;
 input int    InpMaxSlippagePoints    = 20;
 input double InpProtectiveSLAtrMult  = 2.5;      // hard protective stop = ATR * this (never widened, never grid/martingale)
+input double InpMaxRiskRewardMult    = 2.0;      // cap: protective SL distance <= this many multiples of the TP distance (keeps losers from dwarfing a string of small wins)
 input int    InpMaxOrderRetries      = 2;
 input int    InpRetryDelayMs         = 300;
 
@@ -930,11 +931,19 @@ bool ExecuteTrade(int direction, int qualityScore, ENTRY_CONFIRM_MODE modeUsed)
    }
 
    double price = (direction>0) ? tick.ask : tick.bid;
-   double slDistance = atr * InpProtectiveSLAtrMult;
-   double sl = (direction>0) ? (price - slDistance) : (price + slDistance);
 
    double tpPoints = InpUseAtrTarget ? (atr / PointValue()) * (InpAtrTargetPct/100.0) : InpTakeProfitPoints;
    double tp = (direction>0) ? (price + PointsToPrice(tpPoints)) : (price - PointsToPrice(tpPoints));
+
+   // Protective stop is normally ATR-based, but is capped to a bounded multiple
+   // of the TP distance. Without this cap a tiny fixed TP (e.g. 15pts) combined
+   // with a much larger ATR-derived SL means a single loss can exceed the sum
+   // of many small wins, destroying the EA's win-rate edge.
+   double slDistance = atr * InpProtectiveSLAtrMult;
+   double maxSlDistance = PointsToPrice(tpPoints) * InpMaxRiskRewardMult;
+   if(maxSlDistance > 0.0 && slDistance > maxSlDistance)
+      slDistance = maxSlDistance;
+   double sl = (direction>0) ? (price - slDistance) : (price + slDistance);
 
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    sl = NormalizeDouble(sl, digits);
