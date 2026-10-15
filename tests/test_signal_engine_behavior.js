@@ -712,6 +712,7 @@ test('monitorTradeOutcome handles non-scalp timeout (time-stop) with trade reset
     }],
     trailingSL: null,
     partialTpHit: false,
+    _deferredOutcomeCandleIdx: null,
     partialTpEnabled: false,  // Disable to skip partial TP checks
     trailingStopEnabled: false,  // Disable to skip trailing stop checks
     teslaScalingEnabled: false,  // Disable to skip Tesla scaling checks
@@ -827,6 +828,7 @@ test('monitorTradeOutcome handles scalp timeout (max candles) with trade reset a
     }],
     trailingSL: null,
     partialTpHit: false,
+    _deferredOutcomeCandleIdx: null,
     partialTpEnabled: false,  // Disable to skip partial TP checks
     trailingStopEnabled: false,  // Disable to skip trailing stop checks
     teslaScalingEnabled: false,  // Disable to skip Tesla scaling checks
