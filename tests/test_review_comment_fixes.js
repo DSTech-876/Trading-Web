@@ -2748,26 +2748,45 @@ if (file_exists($tmp . '.corrupt')) unlink($tmp . '.corrupt');
   assert.equal(parsed.preservedCopyExists, true);
 });
 
-test('mt5WithStateLock throws instead of overwriting a corrupt state file', () => {
+test('mt5WithStateLock self-heals a corrupt state file instead of failing forever', () => {
   const phpCode = `
 require ${JSON.stringify(path.resolve(__dirname, '../api/mt5/common.php'))};
 $path = mt5StoragePath();
 file_put_contents($path, '{still not valid json');
+$outcome = 'NO_EXCEPTION';
 try {
   mt5WithStateLock(function (array &$state) { return true; });
-  echo 'NO_EXCEPTION';
 } catch (RuntimeException $e) {
-  echo 'THREW:' . $e->getMessage();
+  $outcome = 'THREW:' . $e->getMessage();
 }
-echo '|RAW:' . file_get_contents($path);
+$state = json_decode(file_get_contents($path), true);
+$resetEvents = array_values(array_filter($state['events'] ?? [], function ($e) {
+  return ($e['event'] ?? '') === 'STATE_RESET';
+}));
+echo json_encode([
+  'outcome' => $outcome,
+  'stateIsArray' => is_array($state),
+  'ordersIsArray' => is_array($state['orders'] ?? null),
+  'resetEventCount' => count($resetEvents),
+  'archivedCopyExists' => file_exists($path . '.corrupt'),
+  'archivedBytes' => file_exists($path . '.corrupt') ? file_get_contents($path . '.corrupt') : null,
+  'corruptFlagLeaked' => array_key_exists('__corrupt', $state ?? []),
+]);
 unlink($path);
 if (file_exists($path . '.corrupt')) unlink($path . '.corrupt');
 `;
   const stdout = execFileSync('php', ['-r', phpCode], { encoding: 'utf8' });
-  assert.match(stdout, /^THREW:/);
-  // The original corrupt bytes must still be on disk: the file must NOT have
-  // been truncated to an empty/initialized state.
-  assert.match(stdout, /RAW:\{still not valid json$/);
+  const parsed = JSON.parse(stdout);
+  // A single corrupt write must not become a permanent bridge outage.
+  assert.equal(parsed.outcome, 'NO_EXCEPTION');
+  assert.equal(parsed.stateIsArray, true);
+  assert.equal(parsed.ordersIsArray, true);
+  assert.equal(parsed.corruptFlagLeaked, false);
+  // The reset must be attributable in the event ledger...
+  assert.equal(parsed.resetEventCount, 1);
+  // ...and the original corrupt bytes must be preserved for forensics.
+  assert.equal(parsed.archivedCopyExists, true);
+  assert.equal(parsed.archivedBytes, '{still not valid json');
 });
 
 test('mt5SummarizeNotDispatched caps the per-order sample and groups by reason', () => {
