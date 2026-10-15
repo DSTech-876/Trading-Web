@@ -2776,6 +2776,11 @@ let _atrCandleCount = 0;    /* candles.length when _atrPrev was computed */
 let trailingSL    = null;
 let partialTpHit  = false;
 
+/* Candle index on which a partial-TP/Tesla level deferred SL/TP evaluation to the
+   next candle. Guards against the same candle being re-processed intrabar and
+   resolving a later stage (or the final SL/TP) before the deferral actually elapses. */
+let _deferredOutcomeCandleIdx = null;
+
 /* Tesla 3–6–9 Scaling Model state (reset with each new trade) */
 let teslaT1Hit  = false;
 let teslaT2Hit  = false;
@@ -14779,6 +14784,7 @@ function processAllCandles() {
   teslaT2Hit = false;
   teslaT3Hit = false;
   teslaBEHit = false;
+  _deferredOutcomeCandleIdx = null;
   retestCount  = 0;
   setPhase("WAITING");
 
@@ -16106,6 +16112,7 @@ function buildTrade(confirmCandle, confirmIdx) {
   teslaT2Hit = false;
   teslaT3Hit = false;
   teslaBEHit = false;
+  _deferredOutcomeCandleIdx = null;
 }
 
 /* ---- True swing point detection ---- */
@@ -18284,6 +18291,7 @@ function releaseBreakoutRetestTradeState(symbol, signalId, reason) {
   teslaT2Hit = false;
   teslaT3Hit = false;
   teslaBEHit = false;
+  _deferredOutcomeCandleIdx = null;
   monitoringTrade = false;
   multiRHitLevels = [];
   unregisterActiveTradeRecord(sym, signalId || null);
@@ -18313,9 +18321,10 @@ function enforceTradeLifecycleIntegrity(reason = "per_candle_failsafe") {
     return true;
   }
 
-  const record = signalId
+  const recordById = signalId
     ? signalHistory.findLast(sig => sig && sig.signalId === signalId)
-    : signalHistory.findLast(sig => sig
+    : null;
+  const record = recordById || signalHistory.findLast(sig => sig
         && (sig.symbol || sym) === sym
         && (sig.strategyType || sig.type || "breakout_retest") === "breakout_retest"
         && Number.isFinite(sig.entry) && Number.isFinite(trade.entry)
@@ -18415,6 +18424,7 @@ function monitorTradeOutcome(candle) {
     teslaT2Hit = false;
     teslaT3Hit = false;
     teslaBEHit = false;
+    _deferredOutcomeCandleIdx = null;
     if (typeof unregisterActiveTradeRecord === "function") {
       unregisterActiveTradeRecord(tradeSymbol, releasedTrade.signalId || null);
     }
@@ -18429,6 +18439,10 @@ function monitorTradeOutcome(candle) {
   const effectiveSL = trailingSL != null ? trailingSL : trade.sl;
   const currentIdx = candles.length - 1;
   if (trade.outcomeStartIdx != null && currentIdx < trade.outcomeStartIdx) return;
+  /* A partial-TP/Tesla level deferred evaluation on this same candle — honor that
+     deferral on every subsequent same-candle call (e.g. further intrabar ticks)
+     instead of letting the next guarded stage or the final SL/TP resolve early. */
+  if (_deferredOutcomeCandleIdx === currentIdx) return;
   if (!pending._openedLogged) {
     pending._openedLogged = true;
     logSignalLifecycleEvent(pending.symbol || tradeSymbol, "Trade Opened", {
@@ -18451,6 +18465,7 @@ function monitorTradeOutcome(candle) {
         sendPartialTpTelegram(pending, partialLevel);
         /* Defer SL/TP check to next candle to avoid dual-resolution on the
            same candle that triggered the partial TP alert. */
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     } else {
@@ -18462,6 +18477,7 @@ function monitorTradeOutcome(candle) {
         showToast("🔔 Partial TP Hit", `1:1 reached (${fmt(partialLevel, 4)}) — profits noted, trade continues to full TP`, "trade", 8000);
         sendPartialTpTelegram(pending, partialLevel);
         /* Defer SL/TP check to next candle — same reasoning as BULL case above. */
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     }
@@ -18496,6 +18512,7 @@ function monitorTradeOutcome(candle) {
            or low (BULL) may still be at entry because the candle opened there before the
            trade moved in our favour.  Checking the SL now would fire an immediate false
            LOSS — wait for the next tick where price data reflects the SL movement. */
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     }
@@ -18513,6 +18530,7 @@ function monitorTradeOutcome(candle) {
         addLog(`⚡ Tesla 3–6–9: T1 (3R) reached @ ${fmtPrice(t1Level, pending.symbol)} — ${action}`);
         showToast("⚡ Tesla T1 (3R) ✓", `${action} | Next: T2 at ${TESLA_T2_R}R`, "trade", 8000);
         sendTeslaLevelTelegram(pending, "T1 (3R)", t1Level, teslaScalingPlan);
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     }
@@ -18528,6 +18546,7 @@ function monitorTradeOutcome(candle) {
         addLog(`⚡ Tesla 3–6–9: T2 (6R) reached @ ${fmtPrice(t2Level, pending.symbol)} — ${action}`);
         showToast("⚡ Tesla T2 (6R) ✓", `${action} | Next: T3 at ${TESLA_T3_R}R`, "trade", 8000);
         sendTeslaLevelTelegram(pending, "T2 (6R)", t2Level, teslaScalingPlan);
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     }
@@ -18543,6 +18562,7 @@ function monitorTradeOutcome(candle) {
         addLog(`⚡ Tesla 3–6–9: T3 (9R) reached @ ${fmtPrice(t3Level, pending.symbol)} — ${action}`);
         showToast("⚡ Tesla T3 (9R) ✓", `${action}`, "trade", 10000);
         sendTeslaLevelTelegram(pending, "T3 (9R)", t3Level, teslaScalingPlan);
+        _deferredOutcomeCandleIdx = currentIdx;
         return;
       }
     }
@@ -18662,6 +18682,7 @@ function monitorTradeOutcome(candle) {
       }
       resolved = true;
       addLog(`Signal ${pending.result} — both levels hit (${pending.result === "WIN" ? "TP/breakeven" : "SL"} closer)`);
+      logTradeLevelHit(pending.result === "WIN" ? "TP" : "SL", pending, pending.exitPrice, currentIdx);
     } else if (slHit) {
       /* SL hit: only count as WIN if stop locked in genuine profit (strictly above entry). */
       if (effectiveSL > trade.entry) {
@@ -18670,6 +18691,7 @@ function monitorTradeOutcome(candle) {
         signalWins++;
         resolved = true;
         addLog(`Signal WIN — trailing stop hit at ${fmt(effectiveSL, 4)} (above entry, profit locked${partialTpHit ? " after partial TP alert" : ""})`);
+        logTradeLevelHit("SL", pending, effectiveSL, currentIdx);
       } else {
         pending.result = "LOSS";
         pending.exitPrice = effectiveSL;
@@ -18708,6 +18730,7 @@ function monitorTradeOutcome(candle) {
       }
       resolved = true;
       addLog(`Signal ${pending.result} — both levels hit (${pending.result === "WIN" ? "TP/breakeven" : "SL"} closer)`);
+      logTradeLevelHit(pending.result === "WIN" ? "TP" : "SL", pending, pending.exitPrice, currentIdx);
     } else if (slHit) {
       if (effectiveSL < trade.entry) {
         pending.result = "WIN";
@@ -18715,6 +18738,7 @@ function monitorTradeOutcome(candle) {
         signalWins++;
         resolved = true;
         addLog(`Signal WIN — trailing stop hit at ${fmt(effectiveSL, 4)} (below entry, profit locked${partialTpHit ? " after partial TP alert" : ""})`);
+        logTradeLevelHit("SL", pending, effectiveSL, currentIdx);
       } else {
         pending.result = "LOSS";
         pending.exitPrice = effectiveSL;
@@ -23412,6 +23436,7 @@ function initStrategyStateRegistry() {
       teslaT2Hit = false;
       teslaT3Hit = false;
       teslaBEHit = false;
+      _deferredOutcomeCandleIdx = null;
       retestCount = 0;
       mtfSetupState = null;
       mtfTerminalBreakoutEpoch = null;
@@ -31359,7 +31384,7 @@ function removeSymbolPanel(symbol) {
     bbUpper = []; bbLower = []; bbMiddle = []; bbWidth = [];
     adxValue = 0; adxDiPlus = 0; adxDiMinus = 0;
     stochK = []; stochD = [];
-    trailingSL = null; partialTpHit = false; confluenceScore = 0;
+    trailingSL = null; partialTpHit = false; confluenceScore = 0; _deferredOutcomeCandleIdx = null;
     signalHistory = []; signalWins = 0; signalLosses = 0; signalBreakevens = 0;
     liveScalpHistory = []; lastScalpCandleIdx = -999;
 
