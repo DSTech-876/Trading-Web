@@ -10,14 +10,40 @@
  * - Database persistence
  */
 
-const assert = require('assert');
+const { describe, it } = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+
+const indicatorSource = fs.readFileSync(path.resolve(__dirname, '../indicator/indicator.js'), 'utf8');
+
+/** Load a single top-level function from indicator.js into an isolated context. */
+function loadIndicatorFunction(name) {
+  const start = indicatorSource.indexOf(`function ${name}(`);
+  if (start === -1) throw new Error(`Missing function ${name}`);
+  let i = indicatorSource.indexOf('{', indicatorSource.indexOf(')', start));
+  let depth = 0;
+  for (; i < indicatorSource.length; i++) {
+    const ch = indicatorSource[i];
+    if (ch === '{') depth++;
+    if (ch === '}' && --depth === 0) break;
+  }
+  const context = { module: { exports: {} } };
+  vm.createContext(context);
+  vm.runInContext(`${indicatorSource.slice(start, i + 1)}\nmodule.exports = ${name};`, context);
+  return context.module.exports;
+}
 
 describe('Trade Lifecycle Fixes', () => {
 
   describe('1. Signal ID Generation', () => {
     it('should generate unique signal IDs for each trade', () => {
-      const id1 = generateSignalId?.() || 'GSMA_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-      const id2 = generateSignalId?.() || 'GSMA_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      const makeId = typeof generateSignalId === 'function'
+        ? generateSignalId
+        : () => 'GSMA_' + Date.now() + '_' + Math.random().toString(36).slice(2, 11);
+      const id1 = makeId();
+      const id2 = makeId();
       assert.notStrictEqual(id1, id2, 'Signal IDs should be unique');
     });
 
@@ -137,23 +163,35 @@ describe('Trade Lifecycle Fixes', () => {
     });
 
     it('should resolve both-hit using distance comparison', () => {
-      const signal = {
-        dir: 'BULL',
-        entry: 100.00,
-        sl: 99.00,
-        tp: 101.00
-      };
-      const candle = { high: 101.50, low: 98.50 }; // Both hit
-      
-      const slDist = Math.abs(signal.entry - signal.sl); // 1.00
-      const tpDist = Math.abs(signal.tp - signal.entry); // 1.00
-      
-      // Using candle distance:
-      const distToSL = Math.abs(signal.entry - candle.low); // 2.00
-      const distToTP = Math.abs(candle.high - signal.entry); // 1.50
-      
-      const resolved = distToSL <= distToTP ? 'LOSS' : 'WIN';
-      assert.strictEqual(resolved, 'WIN', 'TP is closer, should be WIN');
+      const resolveBothHitFixed = loadIndicatorFunction('resolveBothHitFixed');
+      const bull = { dir: 'BULL', entry: 100.00, sl: 99.00, tp: 101.00 };
+
+      // TP (1.00 from entry) is closer than the SL excursion (2.00) → TP first.
+      assert.strictEqual(
+        resolveBothHitFixed(bull, { high: 101.00, low: 98.00 }), 'WIN',
+        'TP is closer, should be WIN');
+      // SL (1.00 from entry) is closer than the TP excursion (1.50) → SL first.
+      assert.strictEqual(
+        resolveBothHitFixed(bull, { high: 101.50, low: 99.00 }), 'LOSS',
+        'SL is closer, should be LOSS');
+      // Ambiguous (equal excursions) resolves conservatively to LOSS.
+      assert.strictEqual(
+        resolveBothHitFixed(bull, { high: 101.50, low: 98.50 }), 'LOSS',
+        'Equal distances resolve conservatively');
+      // A prior partial TP always wins, regardless of distances.
+      assert.strictEqual(
+        resolveBothHitFixed({ ...bull, partialTpHit: true }, { high: 101.50, low: 99.00 }), 'WIN',
+        'Partial TP already banked should resolve WIN');
+
+      const bear = { dir: 'BEAR', entry: 100.00, sl: 101.00, tp: 99.00 };
+      // BEAR: TP (1.00 below entry) is closer than the SL excursion (2.00) → WIN.
+      assert.strictEqual(
+        resolveBothHitFixed(bear, { high: 102.00, low: 99.00 }), 'WIN',
+        'BEAR: TP is closer, should be WIN');
+      // BEAR: SL (1.00 above entry) is closer than the TP excursion (1.50) → LOSS.
+      assert.strictEqual(
+        resolveBothHitFixed(bear, { high: 101.00, low: 98.50 }), 'LOSS',
+        'BEAR: SL is closer, should be LOSS');
     });
 
     it('should mark EXPIRED after 50 candles', () => {

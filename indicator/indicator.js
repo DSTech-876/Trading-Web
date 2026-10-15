@@ -466,7 +466,7 @@ const SCALP_MAX_CANDLES         = 15;    /* auto-timeout: close trade monitoring
  * On faster time frames the ATR is smaller and market noise is relatively larger,
  * so the SL buffer and the fast-track confirmation threshold are scaled by gran. */
 const LOWER_TF_1M_SEC           = 60;    /* 1-minute granularity (seconds) */
-const LOWER_TF_5M_SEC           = 300;   /* 5-minute granularity (seconds); also used as fast-track upper bound */
+const LOWER_TF_5M_SEC           = 300;   /* 5-minute granularity (seconds) */
 const SL_ATR_BUF_1M             = 0.5;   /* SL ATR buffer for 1M — wider to survive 1M noise */
 const SL_ATR_BUF_5M             = 0.4;   /* SL ATR buffer for 5M */
 const SL_ATR_BUF_DEFAULT        = 0.3;   /* SL ATR buffer for higher TFs (original behaviour) */
@@ -14761,6 +14761,10 @@ function getActiveConfluenceFactors(overrideDir, overrideLevel, overrideCandleId
 
 /* ================= STRATEGY LOGIC ================= */
 
+/* Max phase transitions evaluated for a single candle (retest → indecision →
+   confirmation can all occur on one candle). */
+const MAX_PHASE_ADVANCES_PER_CANDLE = 5;
+
 function processAllCandles() {
   _historicalProcessing = true;
   openingRange = null;
@@ -14802,7 +14806,16 @@ function processAllCandles() {
 
   if (openingRange) {
     for (let i = openingRange.endIdx + 1; i < candles.length; i++) {
-      processCandle(i);
+      /* Allow several phase transitions on the same candle (retest → indecision →
+         confirmation) exactly like the live path does.  Processing a candle only
+         once per phase made every historical/replayed setup lag the real retest by
+         one candle per stage. */
+      let replayPhase = phase;
+      for (let attempt = 0; attempt < MAX_PHASE_ADVANCES_PER_CANDLE; attempt++) {
+        processCandle(i);
+        if (phase === replayPhase || phase === "TRADE") break;
+        replayPhase = phase;
+      }
       if (trade) {
         if (autoResetEnabled) {
           /* Simulate the live auto-reset so subsequent setups can be discovered
@@ -14858,6 +14871,10 @@ function processAllCandles() {
 }
 
 function processLatestCandle() {
+  /* Fail-safe: drop any trade whose outcome is already resolved before any
+     phase logic runs, so a closed trade can never block the next signal. */
+  enforceTradeLifecycleIntegrity("per_candle_failsafe");
+
   /* When monitoring a resolved trade with auto-reset, skip the short-circuit */
   if (phase === "TRADE" && !monitoringTrade && autoResetEnabled) {
     resetForNextSetup();
@@ -14897,7 +14914,12 @@ function processLatestCandle() {
        breakouts (and subsequent phases) that formed while we were in RANGE. */
     if (openingRange) {
       for (let i = openingRange.endIdx + 1; i < candles.length; i++) {
-        processCandle(i);
+        let catchUpPhase = phase;
+        for (let attempt = 0; attempt < MAX_PHASE_ADVANCES_PER_CANDLE; attempt++) {
+          processCandle(i);
+          if (phase === catchUpPhase || phase === "TRADE") break;
+          catchUpPhase = phase;
+        }
         if (trade) break;
       }
     }
@@ -14911,8 +14933,7 @@ function processLatestCandle() {
      that is also indecision).  Cap the loop to avoid infinite spins.
      TRADE is the terminal phase — once a trade is built, stop advancing. */
   let prevPhase = phase;
-  const MAX_ADVANCES = 5;
-  for (let attempt = 0; attempt < MAX_ADVANCES; attempt++) {
+  for (let attempt = 0; attempt < MAX_PHASE_ADVANCES_PER_CANDLE; attempt++) {
     processCandle(idx);
     if (phase === prevPhase || phase === "TRADE") break;
     prevPhase = phase;
@@ -14930,7 +14951,17 @@ function processLatestCandle() {
 }
 
 function runIntrabarTimingOptimizations(currentCandle) {
-  if (!aggressiveEntryEnabled || !candleCloseOnlyEnabled || _historicalProcessing) return;
+  if (_historicalProcessing) return;
+
+  /* Candle-close-only mode still has to resolve TP/SL intrabar: TP and SL are
+     price-touch events, not close events.  Without this an open trade stayed
+     "active" (and kept the symbol locked) until the candle finished forming. */
+  if (currentCandle && monitoringTrade && trade) {
+    monitorTradeOutcome(currentCandle);
+  }
+  enforceTradeLifecycleIntegrity("intrabar_failsafe");
+
+  if (!aggressiveEntryEnabled || !candleCloseOnlyEnabled) return;
   if (!currentCandle || candles.length < 2) return;
 
   const idx = candles.length - 1;
@@ -14986,6 +15017,11 @@ function resetForNextSetup() {
   trade          = null;
   trailingSL     = null;
   partialTpHit   = false;
+  teslaT1Hit     = false;
+  teslaT2Hit     = false;
+  teslaT3Hit     = false;
+  teslaBEHit     = false;
+  multiRHitLevels = [];
   retestCount    = 0;
   /* Reset NY Open Range alongside main strategy */
   resetNyOpenRange();
@@ -15250,6 +15286,23 @@ function processCandle(idx) {
     return;
   }
 
+  /* Freeze the breakout level: it must never be recalculated after the breakout.
+     If anything mutated it (range rebuild, panel restore, state merge) restore the
+     level captured at breakout time so the retest is measured against the original
+     structure. */
+  if (breakout.lockedLevel == null) {
+    breakout.lockedLevel = breakout.level;
+  } else if (breakout.level !== breakout.lockedLevel) {
+    addLog(`⚠ Breakout level drift detected — restoring frozen level ${fmt(breakout.lockedLevel, 4)} (was ${fmt(breakout.level, 4)})`);
+    logSignalEngineDebug("BREAKOUT_LEVEL_DRIFT", {
+      symbol: getActiveSymbol(),
+      breakoutCandleIdx: breakout.candleIdx,
+      drifted: breakout.level,
+      restored: breakout.lockedLevel
+    });
+    breakout.level = breakout.lockedLevel;
+  }
+
   /* FALSE BREAKOUT DETECTION: invalidate if price returns inside range */
   if (!retestInfo && isFalseBreakout(idx)) {
     addLog(`⚠ FALSE BREAKOUT detected — ${FALSE_BREAKOUT_CANDLES} candles closed back inside range. Resetting.`);
@@ -15322,6 +15375,15 @@ function processCandle(idx) {
       }
       retestInfo = { candleIdx: retestCandleIdx };
       setPhase("INDECISION");
+      logSignalEngineDebug("RETEST_DETECTED", {
+        symbol: getActiveSymbol(),
+        breakoutCandleIdx: breakout.candleIdx,
+        breakoutLevel: breakout.level,
+        retestCandleIdx,
+        currentCandleIdx: idx,
+        detectionLagCandles: idx - retestCandleIdx,
+        firstTouch: retestCount <= 1
+      });
       /* Feature 7: build divergence visual markers on retest */
       if (divergenceVisualEnabled) buildDivergenceMarkers();
       addLog(`Retest detected at candle #${retestCandleIdx}${retestCount > 1 ? ` (retest #${retestCount})` : ""}`);
@@ -15351,40 +15413,51 @@ function processCandle(idx) {
     /* Allow the retest candle itself to also be indecision */
     if (idx < retestInfo.candleIdx) return;
 
-    /* Lower-TF fast-track: on 1M/5M (gran ≤ LOWER_TF_5M_SEC) a strong engulfing candle at the
-     * retest zone acts as a combined indecision+confirmation, cutting the pipeline by
-     * one candle and preventing stale entries on fast-moving lower time frames. */
-    if (getCurrentGranularitySec() <= LOWER_TF_5M_SEC && idx > 0) {
+    /* Retest-rejection fast-track (all timeframes): a strong engulfing candle or a
+     * rejection wick at the retest level acts as a combined indecision+confirmation.
+     * The previous implementation only ran on 1M/5M, so every other timeframe had to
+     * wait for a separate doji/indecision candle *and* a later confirmation candle —
+     * the main source of entries firing several candles after the actual retest.
+     * All downstream quality filters below are unchanged, so this removes latency
+     * without loosening validation. */
+    if (idx > 0) {
       const prev = candles[idx - 1];
       let fastPattern = "";
       if (breakout.dir === "BULL" && isBullishEngulfing(prev, c)) {
         fastPattern = "fast-track bullish engulfing";
       } else if (breakout.dir === "BEAR" && isBearishEngulfing(prev, c)) {
         fastPattern = "fast-track bearish engulfing";
+      } else if (isRetestRejection(c)) {
+        fastPattern = `fast-track ${breakout.dir === "BULL" ? "bullish" : "bearish"} retest rejection`;
       }
       if (fastPattern) {
         indecisionInfo = { candleIdx: idx };
+        noteEarliestValidSignalCandle(idx);
         let confirmed = true;
         if (!hasConsecutiveDirection(idx, breakout.dir)) {
           addLog(`${fastPattern} at #${idx} BLOCKED — consecutive direction filter`);
+          noteBreakoutRetestDelay("consecutive direction filter", idx);
           confirmed = false;
         }
         if (confirmed && !isVWAPAligned(breakout.dir)) {
           addLog(`${fastPattern} at #${idx} BLOCKED — VWAP filter`);
+          noteBreakoutRetestDelay("VWAP filter", idx);
           confirmed = false;
         }
         if (confirmed && !hasStochCrossover(breakout.dir)) {
           addLog(`${fastPattern} at #${idx} BLOCKED — stochastic crossover filter`);
+          noteBreakoutRetestDelay("stochastic crossover filter", idx);
           confirmed = false;
         }
         if (confirmed && !isConfirmBarValid(idx)) {
           addLog(`${fastPattern} at #${idx} BLOCKED — confirm bar filter`);
+          noteBreakoutRetestDelay("confirm bar filter", idx);
           confirmed = false;
         }
         if (confirmed) {
           confirmInfo = { candleIdx: idx, pattern: fastPattern };
           recordConfirmedSignal(fastPattern, retestInfo?.candleIdx);
-          addLog(`${fastPattern} at #${idx} (lower-TF fast-track)`);
+          addLog(`${fastPattern} at #${idx} (retest fast-track)`);
           buildTrade(c, idx);
           if (trade) {
             confluenceScore = computeConfluenceScore();
@@ -15398,8 +15471,9 @@ function processCandle(idx) {
             }
             setPhase("TRADE");
             multiRHitLevels = [];
-            addLog(`${fastPattern} at #${idx} — TRADE ENTRY (lower-TF)`);
+            addLog(`${fastPattern} at #${idx} — TRADE ENTRY (retest fast-track)`);
             addLog(`Confluence score: ${confluenceScore}`);
+            logBreakoutRetestTiming(idx, fastPattern);
             recordSignal(fastPattern, retestInfo?.candleIdx);
           } else {
             /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
@@ -15608,23 +15682,28 @@ function processCandle(idx) {
 
     if (confirmed) {
       /* Apply consecutive direction filter */
+      noteEarliestValidSignalCandle(idx);
       if (!hasConsecutiveDirection(idx, breakout.dir)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — consecutive direction filter (momentum not aligned)`);
+        noteBreakoutRetestDelay("consecutive direction filter", idx);
         confirmed = false;
       }
       /* Apply VWAP alignment filter */
       if (confirmed && !isVWAPAligned(breakout.dir)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — VWAP filter (price wrong side of VWAP)`);
+        noteBreakoutRetestDelay("VWAP filter", idx);
         confirmed = false;
       }
       /* Apply stochastic crossover filter */
       if (confirmed && !hasStochCrossover(breakout.dir)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — stochastic crossover filter (no K/D cross)`);
+        noteBreakoutRetestDelay("stochastic crossover filter", idx);
         confirmed = false;
       }
       /* Apply confirmation bar filter (next candle must close in direction) */
       if (confirmed && !isConfirmBarValid(idx)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — confirm bar filter (candle didn't close in ${breakout.dir} direction)`);
+        noteBreakoutRetestDelay("confirm bar filter", idx);
         confirmed = false;
       }
     }
@@ -15651,6 +15730,7 @@ function processCandle(idx) {
         addLog(`${confirmPattern} at #${idx} — TRADE ENTRY`);
         /* Confluence score was already computed for the min gate check above */
         addLog(`Confluence score: ${confluenceScore}`);
+        logBreakoutRetestTiming(idx, confirmPattern);
         recordSignal(confirmPattern, retestInfo?.candleIdx);
       } else {
         /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
@@ -15664,12 +15744,72 @@ function processCandle(idx) {
   }
 }
 
+/* ---- Retest rejection: first touch of the breakout level that is rejected ----
+ * A valid rejection touches the frozen breakout level and closes back beyond it in
+ * the breakout direction with a dominant rejection wick.  This is the earliest
+ * structurally valid entry trigger, so it is accepted as a combined
+ * indecision+confirmation instead of waiting for extra candles. */
+function isRetestRejection(c) {
+  if (!breakout || !c) return false;
+  if (!touchesLevel(c, breakout.level)) return false;
+  if (!isPinBar(c, breakout.dir)) return false;
+  if (breakout.dir === "BULL") return c.close > breakout.level && c.close >= c.open;
+  if (breakout.dir === "BEAR") return c.close < breakout.level && c.close <= c.open;
+  return false;
+}
+
+/* ---- Breakout → retest → signal timing diagnostics ---- */
+function noteEarliestValidSignalCandle(idx) {
+  if (!breakout || !Number.isFinite(idx)) return;
+  if (breakout._earliestValidSignalIdx == null) breakout._earliestValidSignalIdx = idx;
+}
+
+function noteBreakoutRetestDelay(reason, idx) {
+  if (!breakout || !reason) return;
+  if (!Array.isArray(breakout._delayReasons)) breakout._delayReasons = [];
+  const entry = `#${idx}: ${reason}`;
+  if (breakout._delayReasons.includes(entry)) return;
+  breakout._delayReasons.push(entry);
+  if (breakout._delayReasons.length > 10) breakout._delayReasons.shift();
+}
+
+function logBreakoutRetestTiming(signalIdx, pattern) {
+  if (!breakout) return;
+  const breakoutIdx = breakout.candleIdx;
+  const retestIdx = retestInfo ? retestInfo.candleIdx : null;
+  const earliestValidIdx = breakout._earliestValidSignalIdx != null
+    ? breakout._earliestValidSignalIdx
+    : (retestIdx != null ? retestIdx : signalIdx);
+  const delayFromRetest = retestIdx != null ? signalIdx - retestIdx : null;
+  const delayFromEarliest = signalIdx - earliestValidIdx;
+  const reasons = Array.isArray(breakout._delayReasons) && breakout._delayReasons.length > 0
+    ? breakout._delayReasons.join("; ")
+    : "none — signal fired on the first valid rejection";
+  addLog(`⏱ Entry timing — breakout #${breakoutIdx} → retest ${retestIdx != null ? `#${retestIdx}` : "n/a"} → signal #${signalIdx} (${pattern})`);
+  addLog(`⏱ Delay: ${delayFromRetest != null ? delayFromRetest : "n/a"} candle(s) after retest, ${delayFromEarliest} candle(s) after the earliest valid signal candle #${earliestValidIdx}`);
+  addLog(`⏱ Delay cause: ${reasons}`);
+  logSignalEngineDebug("BREAKOUT_RETEST_TIMING", {
+    symbol: getActiveSymbol(),
+    pattern,
+    breakoutCandleIdx: breakoutIdx,
+    breakoutLevel: breakout.level,
+    retestCandleIdx: retestIdx,
+    signalCandleIdx: signalIdx,
+    earliestValidSignalIdx: earliestValidIdx,
+    delayCandlesFromRetest: delayFromRetest,
+    delayCandlesFromEarliestValid: delayFromEarliest,
+    delayReasons: Array.isArray(breakout._delayReasons) ? breakout._delayReasons : []
+  });
+}
+
 /* ---- Scan historical candles for missed retests ---- */
 function findHistoricalRetest(startIdx, endIdx) {
   if (!breakout || startIdx < 0 || endIdx >= candles.length) return null;
    
-  /* Scan backwards from end to find the most recent retest */
-  for (let i = endIdx; i >= startIdx; i--) {
+  /* Scan forward so the FIRST touch of the breakout level is used.  Scanning
+     backwards returned the most recent touch, which pushed the retest (and
+     therefore the entry) several candles past the real retest. */
+  for (let i = startIdx; i <= endIdx; i++) {
     const candle = candles[i];
     if (touchesLevel(candle, breakout.level)) {
       return { candleIdx: i };
@@ -15948,6 +16088,7 @@ function buildTrade(confirmCandle, confirmIdx) {
   if (trade) {
     trade.strategyType = "breakout_retest";
     stampSignalLifecycle(trade);
+    addLog(`[${trade.symbol || getActiveSymbol()}] Trade Created — ${trade.dir} entry ${fmt(trade.entry, 4)} SL ${fmt(trade.sl, 4)} TP ${trade.tp != null ? fmt(trade.tp, 4) : "trailing"} (candle #${confirmIdx})`);
     logSignalEngineDebug("TRADE_OPEN", {
       signalId: trade.signalId || null,
       symbol: trade.symbol || getActiveSymbol(),
@@ -18130,6 +18271,66 @@ function restoreAutoTradeHistory() {
 }
 
 /**
+ * Force-release every piece of breakout-retest trade state for a symbol.
+ * Used by the per-candle fail-safe and by the resolved-trade cleanup paths so a
+ * closed trade can never keep the symbol locked.
+ */
+function releaseBreakoutRetestTradeState(symbol, signalId, reason) {
+  const sym = symbol || getActiveSymbol();
+  trade = null;
+  trailingSL = null;
+  partialTpHit = false;
+  teslaT1Hit = false;
+  teslaT2Hit = false;
+  teslaT3Hit = false;
+  teslaBEHit = false;
+  monitoringTrade = false;
+  multiRHitLevels = [];
+  unregisterActiveTradeRecord(sym, signalId || null);
+  cleanupPendingSignalsForSymbol(sym, "breakout_retest");
+  logSignalLifecycleEvent(sym, "Trade Removed", { signalId: signalId || null, reason });
+  logSignalEngineDebug("TRADE_REMOVED", { symbol: sym, signalId: signalId || null, reason });
+  logSignalEngineDebug("SYMBOL_RELEASE", { symbol: sym, signalId: signalId || null, reason });
+}
+
+/**
+ * Fail-safe executed on every candle: if the active trade's signal record is already
+ * resolved (WIN / LOSS / BREAKEVEN / EXPIRED / CANCELLED), or monitoring is flagged
+ * without a trade object, force-remove the trade, release the symbol lock and let the
+ * engine hunt for the next setup.  Prevents resolved trades from staying "active".
+ */
+function enforceTradeLifecycleIntegrity(reason = "per_candle_failsafe") {
+  if (!trade && !monitoringTrade) return false;
+  const sym = (trade && trade.symbol) || getActiveSymbol();
+  const signalId = trade && trade.signalId ? trade.signalId : null;
+
+  /* Orphan: monitoring flag set but the trade object is gone. */
+  if (!trade && monitoringTrade) {
+    releaseBreakoutRetestTradeState(sym, signalId, `${reason}:orphaned_monitoring_flag`);
+    if (phase === "TRADE") {
+      if (autoResetEnabled) resetForNextSetup(); else setPhase("BREAKOUT");
+    }
+    return true;
+  }
+
+  const record = signalId
+    ? signalHistory.findLast(sig => sig && sig.signalId === signalId)
+    : signalHistory.findLast(sig => sig
+        && (sig.symbol || sym) === sym
+        && (sig.strategyType || sig.type || "breakout_retest") === "breakout_retest"
+        && Number.isFinite(sig.entry) && Number.isFinite(trade.entry)
+        && Math.abs(sig.entry - trade.entry) < PRICE_EPSILON);
+  if (!record || record.result === "PENDING") return false;
+
+  addLog(`🧹 Fail-safe: trade already closed (${record.result}) — removing it from active trades and releasing ${sym}`);
+  releaseBreakoutRetestTradeState(sym, signalId || record.signalId || null, `${reason}:${String(record.result).toLowerCase()}`);
+  if (phase === "TRADE") {
+    if (autoResetEnabled) resetForNextSetup(); else setPhase("BREAKOUT");
+  }
+  return true;
+}
+
+/**
  * Shared close-out logic for a resolved breakout-retest trade (WIN/LOSS/BREAKEVEN).
  * Used by every resolution path (SL/TP hit, time-stop, scalp timeout) so that
  * notifications are always sent and the engine always resets to look for the
@@ -18160,19 +18361,15 @@ function finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx) {
     symbol: pending.symbol || (trade && trade.symbol) || getActiveSymbol(),
     exitPrice: pending.exitPrice != null ? pending.exitPrice : null
   });
+  const closedSymbol = pending.symbol || (trade && trade.symbol) || tradeSymbol || getActiveSymbol();
+  const closedSignalId = pending.signalId || (trade && trade.signalId) || null;
   if (!_historicalProcessing && autoResetEnabled) {
-    logSignalEngineDebug("SYMBOL_RELEASE", {
-      signalId: pending.signalId || null,
-      reason: "trade_resolved_auto_reset",
-      symbol: pending.symbol || (trade && trade.symbol) || getActiveSymbol()
-    });
+    releaseBreakoutRetestTradeState(closedSymbol, closedSignalId, "trade_resolved_auto_reset");
     resetForNextSetup();
   } else {
-    trade = null;
-    trailingSL = null;
-    partialTpHit = false;
-    logSignalLifecycleEvent(pending.symbol || tradeSymbol, "State Reset Complete", {
-      signalId: pending.signalId || null,
+    releaseBreakoutRetestTradeState(closedSymbol, closedSignalId, "trade_resolved");
+    logSignalLifecycleEvent(closedSymbol, "State Reset Complete", {
+      signalId: closedSignalId,
       reason: "trade_resolved"
     });
   }
@@ -18182,6 +18379,17 @@ function finalizeBreakoutRetestTrade(pending, tradeSymbol, currentIdx) {
     signalId: pending.signalId || null,
     symbol: pending.symbol || getActiveSymbol(),
     eligible: eligibleAfterClose
+  });
+}
+
+function logTradeLevelHit(kind, pending, level, candleIdx) {
+  const sym = (pending && pending.symbol) || (trade && trade.symbol) || getActiveSymbol();
+  addLog(`[${sym}] ${kind} HIT at ${fmt(level, 4)} (candle #${candleIdx}) — closing trade`);
+  logSignalEngineDebug(`TRADE_${kind}_HIT`, {
+    symbol: sym,
+    signalId: (pending && pending.signalId) || (trade && trade.signalId) || null,
+    level,
+    candleIdx
   });
 }
 
@@ -18203,6 +18411,13 @@ function monitorTradeOutcome(candle) {
     trade = null;
     trailingSL = null;
     partialTpHit = false;
+    teslaT1Hit = false;
+    teslaT2Hit = false;
+    teslaT3Hit = false;
+    teslaBEHit = false;
+    if (typeof unregisterActiveTradeRecord === "function") {
+      unregisterActiveTradeRecord(tradeSymbol, releasedTrade.signalId || null);
+    }
     logSignalLifecycleEvent(tradeSymbol, "State Reset Complete", {
       signalId: releasedTrade.signalId || null,
       reason: "missing_pending_signal_record"
@@ -18467,6 +18682,7 @@ function monitorTradeOutcome(candle) {
         resolved = true;
         const exitNote = trailingSL != null ? " (trailing)" : "";
         addLog(`Signal ${pending._breakeven ? "BREAKEVEN" : "LOSS"} — price hit SL at ${fmt(effectiveSL, 4)}${exitNote}`);
+        logTradeLevelHit("SL", pending, effectiveSL, currentIdx);
       }
     } else if (tpHit) {
       pending.result = "WIN";
@@ -18474,6 +18690,7 @@ function monitorTradeOutcome(candle) {
       signalWins++;
       resolved = true;
       addLog(`Signal WIN — price hit TP at ${fmt(trade.tp, 4)}`);
+      logTradeLevelHit("TP", pending, trade.tp, currentIdx);
     }
   } else {
     const slHit = atBreakeven ? candle.close >= effectiveSL : candle.high >= effectiveSL;
@@ -18510,6 +18727,7 @@ function monitorTradeOutcome(candle) {
         resolved = true;
         const exitNote = trailingSL != null ? " (trailing)" : "";
         addLog(`Signal ${pending._breakeven ? "BREAKEVEN" : "LOSS"} — price hit SL at ${fmt(effectiveSL, 4)}${exitNote}`);
+        logTradeLevelHit("SL", pending, effectiveSL, currentIdx);
       }
     } else if (tpHit) {
       pending.result = "WIN";
@@ -18517,6 +18735,7 @@ function monitorTradeOutcome(candle) {
       signalWins++;
       resolved = true;
       addLog(`Signal WIN — price hit TP at ${fmt(trade.tp, 4)}`);
+      logTradeLevelHit("TP", pending, trade.tp, currentIdx);
     }
   }
 
@@ -24704,6 +24923,15 @@ function adjustIndicesAfterSlice(removed) {
   if (indecisionInfo) indecisionInfo.candleIdx = Math.max(0, indecisionInfo.candleIdx - removed);
   if (confirmInfo) confirmInfo.candleIdx = Math.max(0, confirmInfo.candleIdx - removed);
 
+  /* Active breakout-retest trade indices MUST be shifted too.  Without this the
+     stale (too large) outcomeStartIdx made monitorTradeOutcome() return early on
+     every candle, so the trade never resolved after TP/SL and permanently blocked
+     new signals; entryIdx drift also disabled the time-stop safety net. */
+  if (trade) {
+    if (trade.entryIdx != null) trade.entryIdx = Math.max(0, trade.entryIdx - removed);
+    if (trade.outcomeStartIdx != null) trade.outcomeStartIdx = Math.max(0, trade.outcomeStartIdx - removed);
+  }
+
   /* Adjust strategy signal indices and cooldown trackers */
   lastLiquiditySweepIdx = Math.max(-999, lastLiquiditySweepIdx - removed);
   lastStopLossHuntIdx   = Math.max(-999, lastStopLossHuntIdx - removed);
@@ -24714,7 +24942,7 @@ function adjustIndicesAfterSlice(removed) {
   lastScalpCandleIdx    = Math.max(-999, lastScalpCandleIdx - removed);
   lastMtfTopDownIdx     = Math.max(-999, lastMtfTopDownIdx - removed);
 
-  for (const h of [liquiditySweepHistory, stopLossHuntHistory, failedPinBarHistory, fibScalpHistory, po3History, gridScalperMAHistory, liveScalpHistory, nyOpenRangeHistory, sessionRangeHistory, mtfTopDownHistory]) {
+  for (const h of [signalHistory, liquiditySweepHistory, stopLossHuntHistory, failedPinBarHistory, fibScalpHistory, po3History, gridScalperMAHistory, liveScalpHistory, nyOpenRangeHistory, sessionRangeHistory, mtfTopDownHistory]) {
     for (const s of h) {
       if (s.candleIdx != null) s.candleIdx = Math.max(0, s.candleIdx - removed);
     }
