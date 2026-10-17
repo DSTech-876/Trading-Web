@@ -125,3 +125,73 @@ test('repeat guard expires after the block window and never blocks other dirs/sy
   api.rememberResolvedBreakoutSetup('R_75', 'BULL', 100, 10);
   assert.equal(api.isRepeatBreakoutSetup('R_75', 'BULL', 100, 40, 1), false);
 });
+
+test('resetIndicator only drops the active symbol repeat-setup guard, leaving other panels intact', () => {
+  const context = {
+    module: { exports: {} },
+    Map,
+    getActiveSymbol: () => 'R_75',
+    initStrategyStateRegistry: () => {},
+    resetStrategyStateContracts: () => {},
+    updateStateUI: () => {},
+    candles: [], rangeStartEpoch: 0,
+    _lastRepeatSetupLogKey: 'x',
+    emaFast: [], emaSlow: [], emaHTF: [],
+    atrValue: 1, atrValues: [1], _atrPrev: 1, _atrCandleCount: 1,
+    rsiValues: [1], macdLine: [1], macdSignal: [1], macdHistogram: [1],
+    bbUpper: [1], bbLower: [1], bbMiddle: [1], bbWidth: [1], _bbValidWidths: [1],
+    adxValue: 1, adxDiPlus: 1, adxDiMinus: 1,
+    stochK: [1], stochD: [1],
+    emaMTF: [1], vwapValues: [1],
+    resolvedBreakoutSetups: new Map([
+      ['R_75', { dir: 'BULL', level: 100, closedAtIdx: 10 }],
+      ['R_100', { dir: 'BULL', level: 50, closedAtIdx: 10 }]
+    ])
+  };
+  const harness = `${extractFunction('resetIndicator')}\nmodule.exports = { resetIndicator };`;
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  context.module.exports.resetIndicator();
+  assert.equal(context.resolvedBreakoutSetups.has('R_75'), false);
+  assert.equal(context.resolvedBreakoutSetups.has('R_100'), true);
+});
+
+test('remapPendingSignalIndices remaps the repeat-setup guard by epoch against the replacement buffer', () => {
+  const context = {
+    module: { exports: {} },
+    Map,
+    addLog: () => {},
+    fmt: (v) => v,
+    getActiveSymbol: () => 'R_75',
+    /* Replacement history after reconnect: same epochs, but now at different
+       array positions than when the guard was recorded. */
+    candles: [
+      { epoch: 1000 }, { epoch: 1060 }, { epoch: 1120 }, { epoch: 1180 }, { epoch: 1240 }
+    ],
+    liquiditySweepHistory: [], stopLossHuntHistory: [], failedPinBarHistory: [],
+    fibScalpHistory: [], po3History: [], gridScalperMAHistory: [], gridScalperV2History: [],
+    liveScalpHistory: [], nyOpenRangeHistory: [], sessionRangeHistory: [], mtfTopDownHistory: [],
+    tiktokHistory: [], orderblockHistory: [], fvgStratHistory: [], candleInterpHistory: [],
+    po3_4hHistory: [], breakerBlockHistory: [], oteGoldenPocketHistory: [],
+    signalHistory: [],
+    trade: null, monitoringTrade: false,
+    _reconnectSavedNyTrade: null, _reconnectSavedSessionTrade: null,
+    nyOpenRangeTrade: null, sessionRangeTrade: null,
+    lastScalpCandleIdx: -999, lastLiquiditySweepIdx: -999, lastStopLossHuntIdx: -999,
+    lastFailedPinBarIdx: -999, lastFibScalpIdx: -999, lastPo3Idx: -999,
+    lastGridScalperMAIdx: -999, lastGridScalperV2Idx: -999, lastFvgStratIdx: -999,
+    lastMtfTopDownIdx: -999, lastCandleInterpIdx: -999, lastOrderblockIdx: -999,
+    lastTiktokIdx: -999, lastPo3_4hIdx: -999, lastBreakerBlockIdx: -999,
+    lastOteGoldenPocketIdx: -999,
+    resolvedBreakoutSetups: new Map([
+      ['R_75', { dir: 'BULL', level: 100, closedAtIdx: 1, closedAtEpoch: 1120 }]
+    ])
+  };
+  const harness = `${extractFunction('remapPendingSignalIndices')}\nmodule.exports = { remapPendingSignalIndices };`;
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  context.module.exports.remapPendingSignalIndices();
+  /* Epoch 1120 is now at index 2 in the replacement buffer — the stale
+     index 1 must be corrected, not left pointing at the wrong candle. */
+  assert.equal(context.resolvedBreakoutSetups.get('R_75').closedAtIdx, 2);
+});
