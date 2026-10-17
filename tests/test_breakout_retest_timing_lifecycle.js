@@ -92,7 +92,11 @@ test('adjustIndicesAfterSlice shifts active trade indices so TP/SL monitoring ke
     nyOpenRangeHistory: [], sessionRangeHistory: [], mtfTopDownHistory: [],
     gridScalperMALossReversalWatch: [],
     gridScalperMAPendingSetup: null,
-    resolvedBreakoutSetups: new Map([['R_75', { dir: 'BULL', level: 100, closedAtIdx: 30 }]])
+    getActiveSymbol: () => 'R_75',
+    resolvedBreakoutSetups: new Map([
+      ['R_75', { dir: 'BULL', level: 100, closedAtIdx: 30 }],
+      ['R_100', { dir: 'BULL', level: 50, closedAtIdx: 30 }]
+    ])
   };
   const { adjustIndicesAfterSlice } = run(['adjustIndicesAfterSlice'], context);
   adjustIndicesAfterSlice(10);
@@ -100,6 +104,9 @@ test('adjustIndicesAfterSlice shifts active trade indices so TP/SL monitoring ke
   assert.equal(context.trade.outcomeStartIdx, 25);
   assert.equal(context.signalHistory[0].candleIdx, 24);
   assert.equal(context.resolvedBreakoutSetups.get('R_75').closedAtIdx, 20);
+  /* A different symbol's record references an independent candle buffer that
+     was not trimmed, so it must stay untouched. */
+  assert.equal(context.resolvedBreakoutSetups.get('R_100').closedAtIdx, 30);
 });
 
 test('enforceTradeLifecycleIntegrity force-removes a trade whose signal already resolved', () => {

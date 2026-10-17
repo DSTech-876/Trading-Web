@@ -18384,16 +18384,23 @@ function restoreAutoTradeHistory() {
  * until price has moved a meaningful distance away (or enough candles passed). */
 const REPEAT_SETUP_BLOCK_CANDLES = 30;   /* max candles a resolved level stays blocked */
 const REPEAT_SETUP_LEVEL_ATR     = 0.5;  /* levels closer than this (×ATR) count as the same setup */
-const resolvedBreakoutSetups = new Map();  /* symbol -> { dir, level, closedAtIdx } */
+const resolvedBreakoutSetups = new Map();  /* symbol -> { dir, level, closedAtIdx, closedAtEpoch } */
 let _lastRepeatSetupLogKey = "";           /* throttles the "same level" skip log */
 
 function rememberResolvedBreakoutSetup(symbol, dir, level, candleIdx) {
   const sym = symbol || getActiveSymbol();
   if (!sym || !Number.isFinite(level)) return;
+  const idx = Number.isFinite(candleIdx) ? candleIdx : (candles.length - 1);
+  const closedCandle = candles && candles[idx];
   resolvedBreakoutSetups.set(sym, {
     dir: dir === "BULL" ? "BULL" : "BEAR",
     level,
-    closedAtIdx: Number.isFinite(candleIdx) ? candleIdx : (candles.length - 1)
+    closedAtIdx: idx,
+    /* Candle indices are only meaningful for the candle buffer they were taken
+       from. A reconnect replaces that buffer (see remapPendingSignalIndices()),
+       so the epoch is kept alongside the index to re-derive the correct index
+       against the replacement history instead of comparing stale positions. */
+    closedAtEpoch: closedCandle ? closedCandle.epoch : null
   });
 }
 
@@ -23644,9 +23651,11 @@ function resetIndicator() {
   initStrategyStateRegistry();
   candles = [];
   rangeStartEpoch = null;
-  /* Candle indices restart from scratch — drop the repeat-setup guard records
-     so they can't block (or mis-time) setups on the reloaded candle buffer. */
-  resolvedBreakoutSetups.clear();
+  /* Candle indices restart from scratch — drop this symbol's repeat-setup
+     guard record so it can't block (or mis-time) setups on the reloaded
+     candle buffer. `candles` is a per-panel buffer (see multiPanels), so
+     clearing the whole map would wipe unrelated running panels' guards. */
+  resolvedBreakoutSetups.delete(getActiveSymbol());
   _lastRepeatSetupLogKey = "";
   resetStrategyStateContracts("core");
   /* Note: do NOT clear per-symbol autoTradeSlots here — resetIndicator is
@@ -24473,6 +24482,20 @@ function remapPendingSignalIndices() {
     addLog(`🔄 Restored pending Session Range trade after reconnect`);
   }
 
+  /* Remap the active symbol's repeat-setup guard so it keeps pointing at the
+     same closed candle in the replacement buffer (see rememberResolvedBreakoutSetup). */
+  const _guardSym = getActiveSymbol();
+  const _guardEntry = _guardSym ? resolvedBreakoutSetups.get(_guardSym) : null;
+  if (_guardEntry) {
+    if (_guardEntry.closedAtEpoch != null) {
+      _guardEntry.closedAtIdx = findIdx(_guardEntry.closedAtEpoch);
+    } else {
+      /* No epoch to remap against — drop the guard rather than risk comparing
+         its stale index against the unrelated replacement buffer. */
+      resolvedBreakoutSetups.delete(_guardSym);
+    }
+  }
+
   if (remapped > 0) {
     addLog(`🔄 Reconnect: remapped ${remapped} pending signal(s) to new candle indices`);
   }
@@ -25111,9 +25134,14 @@ function adjustIndicesAfterSlice(removed) {
     if (trade.outcomeStartIdx != null) trade.outcomeStartIdx = Math.max(0, trade.outcomeStartIdx - removed);
   }
 
-  /* Adjust strategy signal indices and cooldown trackers */
-  for (const entry of resolvedBreakoutSetups.values()) {
-    if (entry && entry.closedAtIdx != null) entry.closedAtIdx = Math.max(0, entry.closedAtIdx - removed);
+  /* Adjust strategy signal indices and cooldown trackers. Only shift the
+     active symbol's repeat-setup guard — `removed` reflects a trim of the
+     active symbol's own candle buffer, and other symbols' records reference
+     their own independent buffers (see multiPanels) that were not trimmed. */
+  const _sliceSym = getActiveSymbol();
+  const _sliceEntry = _sliceSym ? resolvedBreakoutSetups.get(_sliceSym) : null;
+  if (_sliceEntry && _sliceEntry.closedAtIdx != null) {
+    _sliceEntry.closedAtIdx = Math.max(0, _sliceEntry.closedAtIdx - removed);
   }
   lastLiquiditySweepIdx = Math.max(-999, lastLiquiditySweepIdx - removed);
   lastStopLossHuntIdx   = Math.max(-999, lastStopLossHuntIdx - removed);
