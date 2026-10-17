@@ -798,7 +798,7 @@ function mt5NormalizeSignalPayload(array $body): array
     $strategyName = trim((string) ($body['strategyName'] ?? ''));
     // True when the client flipped the trade direction from the original
     // signal (opposite/grid-scalper-opposite mode). Carried through to the
-    // EA so it can tag the broker trade comment ("opp"/"norm"), making the
+    // EA so it can tag the broker trade comment ("<code>o"/"<code>n"), making the
     // two distinguishable directly in the MT5 terminal's History tab.
     $isOpposite = (bool) ($body['isOpposite'] ?? false);
     $idempotencyKey = trim((string) ($body['idempotencyKey'] ?? ''));

@@ -115,28 +115,89 @@ long EffectiveMagic(const string source, const string strategyName)
    return InpMagic + (long)(hash % MAGIC_STRATEGY_RANGE);
 }
 
-// Trade comments double as (a) a human-readable "opposite vs normal" tag in
-// the MT5 terminal's Trade/History tab, and (b) the only way this EA tells
-// one of its own positions/orders apart from another (ScanOpenState(),
-// ReconcileLegacyStatus(), OnTradeTransaction() all key off the comment).
+// Trade comments double as (a) a human-readable "which strategy fired this,
+// opposite or normal" tag in the MT5 terminal's Trade/History tab, and (b) the
+// only way this EA tells one of its own positions/orders apart from another
+// (ScanOpenState(), ReconcileLegacyStatus(), OnTradeTransaction() all key off
+// the comment).
 // api/mt5/signal.php mints orderId as "mt5_" + 14-digit UTC timestamp + "_" +
 // 8 hex chars = always exactly MT5_ORDER_ID_LEN (27) characters, so the
-// orderId is written as the FIRST 27 characters of the comment and the
-// opp/norm tag is appended after it. A broker's comment length cap (commonly
-// 31 chars) can truncate the tag itself in the worst case, but can never
-// truncate the orderId portion (27+3="orderId"+"opp"=30, 27+4="orderId"+
-// "norm"=31 — both within that limit), so orderId round-trips reliably
-// through CommentMatchesOrderId()/ExtractOrderIdFromComment() regardless.
+// orderId is written as the FIRST 27 characters of the comment and the tag is
+// appended after it. A broker's comment length cap (commonly 31 chars) leaves
+// exactly 4 tag characters, which is why the tag is a 3-character strategy
+// code (see StrategyCode()) plus a single direction character ("o" = opposite,
+// "n" = normal) — e.g. "<orderId>ORBn". A broker truncating further can cut the
+// tag but never the orderId portion, so orderId round-trips reliably through
+// CommentMatchesOrderId()/ExtractOrderIdFromComment() regardless. Legacy
+// positions tagged with the older "opp"/"norm" suffix keep matching for the
+// same reason.
 #define MT5_ORDER_ID_LEN 27
+#define MT5_STRATEGY_CODE_LEN 3
 
-string BuildTradeComment(const string orderId, const bool isOpposite)
+// Compact, human-readable strategy identifier placed in the broker trade
+// comment so the strategy that fired a trade is visible in the MT5 terminal
+// itself, not only in the EA log. Keyed off strategyName when the signal
+// engine sent one ("strategy"-sourced signals) and off source otherwise
+// (e.g. the breakout-retest engine sends source="breakout" with no
+// strategyName). Unknown names degrade to their first 3 alphanumeric
+// characters, uppercased, so a newly added strategy is still distinguishable
+// without touching this EA.
+string StrategyCode(const string source, const string strategyName)
 {
-   return orderId + (isOpposite ? "opp" : "norm");
+   string key = strategyName;
+   StringTrimLeft(key); StringTrimRight(key);
+   if(key == "")
+   {
+      key = source;
+      StringTrimLeft(key); StringTrimRight(key);
+   }
+   string lower = key;
+   StringToLower(lower);
+
+   if(lower=="breakout" || lower=="breakout_retest") return "BRK";
+   if(lower=="scalp" || lower=="livescalp")          return "SCP";
+   if(lower=="po3")                                  return "PO3";
+   if(lower=="po3_4h")                               return "P4H";
+   if(lower=="breaker_block")                        return "BBK";
+   if(lower=="ote_golden_pocket")                    return "OTE";
+   if(lower=="orb")                                  return "ORB";
+   if(lower=="crt_tbs")                              return "CRT";
+   if(lower=="gridscalperma")                        return "GSM";
+   if(lower=="gridscalperv2")                        return "GS2";
+   if(lower=="fvgstrat")                             return "FVG";
+   if(lower=="mtftopdown")                           return "MTF";
+   if(lower=="candleinterp")                         return "CDI";
+   if(lower=="orderblock")                           return "OBK";
+   if(lower=="nyopenrange")                          return "NYR";
+   if(lower=="sessionrange")                         return "SSR";
+   if(lower=="liquiditysweep")                       return "LQS";
+   if(lower=="stoplosshunt")                         return "SLH";
+   if(lower=="failedpinbar")                         return "FPB";
+   if(lower=="fibscalp")                             return "FIB";
+   if(lower=="tiktok")                               return "TIK";
+
+   string code = "";
+   int len = StringLen(key);
+   for(int i = 0; i < len && StringLen(code) < MT5_STRATEGY_CODE_LEN; i++)
+   {
+      ushort ch = StringGetCharacter(key, i);
+      bool isAlnum = (ch>='0' && ch<='9') || (ch>='a' && ch<='z') || (ch>='A' && ch<='Z');
+      if(isAlnum) code += ShortToString(ch);
+   }
+   StringToUpper(code);
+   if(code == "") return "GEN";
+   return code;
 }
 
-// Recovers the orderId from a trade comment that may or may not carry an
-// opp/norm tag (older positions placed before this feature was added have no
-// tag at all). Safe even if a broker truncated the tag, since the orderId is
+string BuildTradeComment(const string orderId, const bool isOpposite,
+                         const string source, const string strategyName)
+{
+   return orderId + StrategyCode(source, strategyName) + (isOpposite ? "o" : "n");
+}
+
+// Recovers the orderId from a trade comment that may or may not carry a
+// strategy/direction tag (older positions placed before tagging existed have
+// no tag at all, and legacy ones carry the previous "opp"/"norm" suffix). Safe even if a broker truncated the tag, since the orderId is
 // always the leading MT5_ORDER_ID_LEN characters.
 string ExtractOrderIdFromComment(const string comment)
 {
@@ -145,8 +206,8 @@ string ExtractOrderIdFromComment(const string comment)
 }
 
 // Starts-with comparison used everywhere this EA checks "does this
-// position/order's comment belong to this orderId" — tolerant of the
-// opp/norm tag (or no tag at all) following the orderId.
+// position/order's comment belong to this orderId" — tolerant of any tag
+// (strategy code, legacy opp/norm, or none at all) following the orderId.
 bool CommentMatchesOrderId(const string comment, const string orderId)
 {
    return ExtractOrderIdFromComment(comment) == orderId;
@@ -1618,7 +1679,7 @@ bool SendTrade(BridgeOrder &o)
    req.symbol     = o.symbol;
    req.volume     = lot;
    req.deviation  = InpMaxSlippagePoints;
-   req.comment    = BuildTradeComment(o.orderId, o.isOpposite);
+   req.comment    = BuildTradeComment(o.orderId, o.isOpposite, o.source, o.strategyName);
    req.sl         = o.sl;
    req.tp         = o.tp;
 

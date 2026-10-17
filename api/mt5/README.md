@@ -295,16 +295,21 @@ position belong to this EA" check (`IsOwnMagic()`) compares against that whole r
 exact equality to `InpMagic`, so open-trade counting, exposure totals, and duplicate-detection logic
 still recognize all of this EA's own positions regardless of which strategy placed them.
 
-**Opposite vs. normal trade comments** — every trade comment is the order's `orderId` with a short
-tag appended: `opp` when the web app flipped the trade direction (opposite/grid-scalper-opposite
-mode) or `norm` for an ordinary signal, e.g. `mt5_20260516235154_ab12cd34norm`. This makes the two
-distinguishable directly in MT5's History tab without opening the web dashboard. `orderId` is always
-exactly 27 characters (`"mt5_" + 14-digit UTC timestamp + "_" + 8 hex chars`), so it always fits as
-the leading 27 characters of the comment even with the `opp`/`norm` tag appended (30-31 chars total,
-within MT5's ~31-char comment limit); every place the EA matches a position/order back to an
-`orderId` (`CommentMatchesOrderId()`) or recovers one from history (`ExtractOrderIdFromComment()`)
-reads only those leading 27 characters, so the tag can never interfere with — or be mistaken for
-part of — the orderId used for duplicate/position matching.
+**Strategy & direction trade comments** — every trade comment is the order's `orderId` followed by a
+4-character tag: a 3-character strategy code (`StrategyCode()`, e.g. `ORB`, `GSM`, `MTF`, `BRK` for
+the breakout-retest engine) plus `o` when the web app flipped the trade direction
+(opposite/grid-scalper-opposite mode) or `n` for an ordinary signal — e.g.
+`mt5_20260516235154_ab12cd34ORBn`. This makes *which strategy fired the trade* and whether it was
+taken in opposite mode visible directly in MT5's History tab, instead of only in the EA/web logs.
+Strategies with no explicit mapping fall back to the first three alphanumeric characters of their
+name (uppercased), so a newly added strategy is still distinguishable without an EA change.
+`orderId` is always exactly 27 characters (`"mt5_" + 14-digit UTC timestamp + "_" + 8 hex chars`),
+so it always fits as the leading 27 characters of the comment with the 4-character tag appended (31
+chars total, within MT5's ~31-char comment limit); every place the EA matches a position/order back
+to an `orderId` (`CommentMatchesOrderId()`) or recovers one from history
+(`ExtractOrderIdFromComment()`) reads only those leading 27 characters, so the tag — including the
+legacy `opp`/`norm` tag on positions opened before this change — can never interfere with, or be
+mistaken for part of, the orderId used for duplicate/position matching.
 
 ---
 
