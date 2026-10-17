@@ -145,7 +145,10 @@ test('monitorTradeOutcome keeps deferring SL/TP resolution across repeated calls
 test('enforceTradeLifecycleIntegrity resolves a stale signalId by falling back to the symbol+entry lookup', () => {
   const lifecycle = [];
   const context = {
-    trade: { symbol: 'R_75', signalId: 'stale-signal-id', entry: 100 },
+    trade: { symbol: 'R_75', signalId: 'stale-signal-id', entry: 100, dir: 'BULL' },
+    breakout: null,
+    candles: [],
+    rememberResolvedBreakoutSetup: () => {},
     monitoringTrade: true,
     trailingSL: null,
     partialTpHit: false,

@@ -12896,16 +12896,23 @@ function buildOpeningRange() {
   const effectiveRangeMin = scalpingModeEnabled ? SCALP_RANGE_MINUTES : RANGE_MINUTES;
   const rangeEndEpoch = rangeStartEpoch + effectiveRangeMin * 60;
   let high = -Infinity, low = Infinity;
-  let startIdx = 0, endIdx = 0;
+  let startIdx = -1, endIdx = -1;
 
+  /* Only candles inside [rangeStartEpoch, rangeEndEpoch] belong to the range.
+     Including earlier candles made every post-trade reset rebuild the extremes
+     of the whole candle buffer, so the same old breakout level (and therefore
+     the same trade) kept being re-detected after each TP/SL. */
   for (let i = 0; i < candles.length; i++) {
-    if (candles[i].epoch > rangeEndEpoch) break;
+    const epoch = candles[i].epoch;
+    if (epoch < rangeStartEpoch) continue;
+    if (epoch > rangeEndEpoch) break;
+    if (startIdx === -1) startIdx = i;
     if (candles[i].high > high) high = candles[i].high;
     if (candles[i].low < low)   low = candles[i].low;
     endIdx = i;
   }
 
-  if (high === -Infinity || candles.length === 0) return;
+  if (high === -Infinity || startIdx === -1 || candles.length === 0) return;
 
   openingRange = { high, low, startIdx, endIdx };
 

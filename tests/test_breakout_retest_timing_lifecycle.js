@@ -91,20 +91,26 @@ test('adjustIndicesAfterSlice shifts active trade indices so TP/SL monitoring ke
     fibScalpHistory: [], po3History: [], gridScalperMAHistory: [], liveScalpHistory: [],
     nyOpenRangeHistory: [], sessionRangeHistory: [], mtfTopDownHistory: [],
     gridScalperMALossReversalWatch: [],
-    gridScalperMAPendingSetup: null
+    gridScalperMAPendingSetup: null,
+    resolvedBreakoutSetups: new Map([['R_75', { dir: 'BULL', level: 100, closedAtIdx: 30 }]])
   };
   const { adjustIndicesAfterSlice } = run(['adjustIndicesAfterSlice'], context);
   adjustIndicesAfterSlice(10);
   assert.equal(context.trade.entryIdx, 24);
   assert.equal(context.trade.outcomeStartIdx, 25);
   assert.equal(context.signalHistory[0].candleIdx, 24);
+  assert.equal(context.resolvedBreakoutSetups.get('R_75').closedAtIdx, 20);
 });
 
 test('enforceTradeLifecycleIntegrity force-removes a trade whose signal already resolved', () => {
   const logs = [];
   const lifecycle = [];
   const context = {
-    trade: { symbol: 'R_75', signalId: 'sig-1', entry: 100 },
+    trade: { symbol: 'R_75', signalId: 'sig-1', entry: 100, dir: 'BULL' },
+    breakout: { level: 100 },
+    candles: [],
+    resolvedBreakoutSetups: new Map(),
+    rememberResolvedBreakoutSetup: () => {},
     monitoringTrade: true,
     trailingSL: 99,
     partialTpHit: true,
