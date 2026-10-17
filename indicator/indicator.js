@@ -15886,6 +15886,60 @@ function isBearishEngulfing(prev, curr) {
     curr.open >= Math.max(prev.open, prev.close);
 }
 
+/**
+ * Resolve the structural stop anchor for a breakout-retest trade.
+ *
+ * The retest/indecision zone extreme is the primary anchor, with the swing
+ * point as fallback when the zone-based risk is unrealistically tight.  On top
+ * of that the anchor is always pushed to (at least) the broken breakout level:
+ * the setup is only invalidated once price trades back through the level it
+ * broke, so a stop parked *inside* the retest zone is routinely swept by the
+ * deeper retest wick moments before price continues to target — the "SL first,
+ * TP afterwards" pattern.  Keeping the anchor at/beyond the level makes the
+ * stop match the actual invalidation point.
+ *
+ * @param {{dir: string, entry: number, zoneExtreme: ?number, swingAnchor: ?number,
+ *          breakoutLevel: ?number, atrRef: number, bufferAtr: number}} opts
+ * @returns {{anchor: ?number, anchorSource: string, zoneTooTight: boolean, levelExtended: boolean}}
+ */
+function resolveBreakoutRetestStopAnchor(opts) {
+  const o = opts || {};
+  const dir = o.dir === "BULL" ? "BULL" : "BEAR";
+  const atrRef = Number.isFinite(o.atrRef) && o.atrRef > 0 ? o.atrRef : 0;
+  const buffer = atrRef * (Number.isFinite(o.bufferAtr) ? o.bufferAtr : 0);
+  const hasZone = Number.isFinite(o.zoneExtreme);
+  const hasSwing = Number.isFinite(o.swingAnchor);
+
+  let anchor = hasZone ? o.zoneExtreme : (hasSwing ? o.swingAnchor : null);
+  let anchorSource = hasZone ? "zone" : (hasSwing ? "swing" : "none");
+  let zoneTooTight = false;
+
+  if (anchor === null) return { anchor: null, anchorSource, zoneTooTight, levelExtended: false };
+
+  /* Zone stop too tight to be realistic → fall back to the swing anchor. */
+  if (hasZone && hasSwing && atrRef > 0 && Number.isFinite(o.entry)) {
+    const zoneRisk = dir === "BULL" ? o.entry - (anchor - buffer) : (anchor + buffer) - o.entry;
+    if (zoneRisk > 0 && zoneRisk < atrRef * STRUCTURAL_SL_MIN_RISK_ATR) {
+      anchor = o.swingAnchor;
+      anchorSource = "swing";
+      zoneTooTight = true;
+    }
+  }
+
+  /* Never leave the stop on the wrong side of the broken level. */
+  let levelExtended = false;
+  if (Number.isFinite(o.breakoutLevel)) {
+    const beyondLevel = dir === "BULL" ? o.breakoutLevel < anchor : o.breakoutLevel > anchor;
+    if (beyondLevel) {
+      anchor = o.breakoutLevel;
+      anchorSource = "breakout_level";
+      levelExtended = true;
+    }
+  }
+
+  return { anchor, anchorSource, zoneTooTight, levelExtended };
+}
+
 /* ---- Trade setup builder ---- */
 function buildTrade(confirmCandle, confirmIdx) {
   /* Feature 11: News pause gate — block new trades during high-impact events */
@@ -15995,17 +16049,26 @@ function buildTrade(confirmCandle, confirmIdx) {
       return;
     }
 
-    /* SL anchor: lowest low of the retest/indecision zone; fall back to swing */
+    /* SL anchor: lowest low of the retest/indecision zone; fall back to swing,
+       and never above the broken breakout level (retest-wick stop hunts). */
     const zoneLows = [rtCandle, inCandle].filter(Boolean).map(c => c.low);
-    const swingAnchor = findSwingLow(confirmIdx);
-    let slAnchor = zoneLows.length > 0 ? Math.min(...zoneLows) : swingAnchor;
-    if (zoneLows.length > 0) {
-      const zoneRisk = entry - (slAnchor - atrRef * (slAtrBuf + extraStopAtr));
-      if (zoneRisk > 0 && zoneRisk < atrRef * STRUCTURAL_SL_MIN_RISK_ATR) {
-        slAnchor = swingAnchor;
-        addLog(`ℹ️ SL fallback: zone risk ${fmt(zoneRisk, 4)} too tight (< ${fmt(STRUCTURAL_SL_MIN_RISK_ATR, 1)} ATR), using swing low.`);
-      }
+    const anchorInfo = resolveBreakoutRetestStopAnchor({
+      dir: "BULL",
+      entry,
+      zoneExtreme: zoneLows.length > 0 ? Math.min(...zoneLows) : null,
+      swingAnchor: findSwingLow(confirmIdx),
+      breakoutLevel: breakout.level,
+      atrRef,
+      bufferAtr: slAtrBuf + extraStopAtr
+    });
+    const slAnchor = anchorInfo.anchor;
+    if (anchorInfo.zoneTooTight) {
+      addLog(`ℹ️ SL fallback: zone risk too tight (< ${fmt(STRUCTURAL_SL_MIN_RISK_ATR, 1)} ATR), using swing low.`);
     }
+    if (anchorInfo.levelExtended) {
+      addLog(`ℹ️ SL extended to the broken level ${fmt(breakout.level, 4)} — a stop inside the retest zone is swept before continuation.`);
+    }
+    if (!Number.isFinite(slAnchor)) return;
     const sl = slAnchor - atrRef * (slAtrBuf + extraStopAtr);
 
     const risk = entry - sl;
@@ -16022,6 +16085,7 @@ function buildTrade(confirmCandle, confirmIdx) {
       entry, sl, tp, dir: "BULL", rr: actualRR, scalpingMode: scalpingModeEnabled,
       entryIdx: confirmIdx, outcomeStartIdx: confirmIdx + 1, symbol: getActiveSymbol(),
       atrAtEntry: atrRef, stopBufferAtr: slAtrBuf + extraStopAtr, entryDriftAtr,
+      slAnchorSource: anchorInfo.anchorSource,
       validUntilMs: Date.now() + getSignalValidityMs(), maxEntryDistanceAtr: getSignalDistanceLimitAtr(),
       entryMode, entryProgressAtr: timingQuality.progressAtr, entryBodyAtr: timingQuality.bodyAtr,
       entryCloseLocation: timingQuality.closeLocation
@@ -16044,17 +16108,26 @@ function buildTrade(confirmCandle, confirmIdx) {
       return;
     }
 
-    /* SL anchor: highest high of the retest/indecision zone; fall back to swing */
+    /* SL anchor: highest high of the retest/indecision zone; fall back to swing,
+       and never below the broken breakout level (retest-wick stop hunts). */
     const zoneHighs = [rtCandle, inCandle].filter(Boolean).map(c => c.high);
-    const swingAnchor = findSwingHigh(confirmIdx);
-    let slAnchor = zoneHighs.length > 0 ? Math.max(...zoneHighs) : swingAnchor;
-    if (zoneHighs.length > 0) {
-      const zoneRisk = (slAnchor + atrRef * (slAtrBuf + extraStopAtr)) - entry;
-      if (zoneRisk > 0 && zoneRisk < atrRef * STRUCTURAL_SL_MIN_RISK_ATR) {
-        slAnchor = swingAnchor;
-        addLog(`ℹ️ SL fallback: zone risk ${fmt(zoneRisk, 4)} too tight (< ${fmt(STRUCTURAL_SL_MIN_RISK_ATR, 1)} ATR), using swing high.`);
-      }
+    const anchorInfo = resolveBreakoutRetestStopAnchor({
+      dir: "BEAR",
+      entry,
+      zoneExtreme: zoneHighs.length > 0 ? Math.max(...zoneHighs) : null,
+      swingAnchor: findSwingHigh(confirmIdx),
+      breakoutLevel: breakout.level,
+      atrRef,
+      bufferAtr: slAtrBuf + extraStopAtr
+    });
+    const slAnchor = anchorInfo.anchor;
+    if (anchorInfo.zoneTooTight) {
+      addLog(`ℹ️ SL fallback: zone risk too tight (< ${fmt(STRUCTURAL_SL_MIN_RISK_ATR, 1)} ATR), using swing high.`);
     }
+    if (anchorInfo.levelExtended) {
+      addLog(`ℹ️ SL extended to the broken level ${fmt(breakout.level, 4)} — a stop inside the retest zone is swept before continuation.`);
+    }
+    if (!Number.isFinite(slAnchor)) return;
     const sl = slAnchor + atrRef * (slAtrBuf + extraStopAtr);
 
     const risk = sl - entry;
@@ -16071,6 +16144,7 @@ function buildTrade(confirmCandle, confirmIdx) {
       entry, sl, tp, dir: "BEAR", rr: actualRR, scalpingMode: scalpingModeEnabled,
       entryIdx: confirmIdx, outcomeStartIdx: confirmIdx + 1, symbol: getActiveSymbol(),
       atrAtEntry: atrRef, stopBufferAtr: slAtrBuf + extraStopAtr, entryDriftAtr,
+      slAnchorSource: anchorInfo.anchorSource,
       validUntilMs: Date.now() + getSignalValidityMs(), maxEntryDistanceAtr: getSignalDistanceLimitAtr(),
       entryMode, entryProgressAtr: timingQuality.progressAtr, entryBodyAtr: timingQuality.bodyAtr,
       entryCloseLocation: timingQuality.closeLocation
@@ -17019,7 +17093,7 @@ function buildMt5BridgePayload(signal, effectiveDir, tradeSl, tradeTp, symbol, s
     strategyName: signal.strategyName || null,
     /* True when effectiveDir was flipped from the original signal direction
        (opposite/grid-scalper-opposite mode). ITGuruMt5Bridge.mq5 tags the
-       broker trade comment with this ("opp"/"norm") so the two are
+       broker trade comment with this (strategy code + "o"/"n") so the two are
        distinguishable directly in the MT5 terminal's History tab. */
     isOpposite: effectiveDir !== signal.dir,
     idempotencyKey,
