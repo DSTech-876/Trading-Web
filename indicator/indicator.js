@@ -15047,16 +15047,23 @@ function buildOpeningRange() {
   const effectiveRangeMin = scalpingModeEnabled ? SCALP_RANGE_MINUTES : RANGE_MINUTES;
   const rangeEndEpoch = rangeStartEpoch + effectiveRangeMin * 60;
   let high = -Infinity, low = Infinity;
-  let startIdx = 0, endIdx = 0;
+  let startIdx = -1, endIdx = -1;
 
+  /* Only candles inside [rangeStartEpoch, rangeEndEpoch] belong to the range.
+     Including earlier candles would make every post-trade reset rebuild the
+     extremes of the whole candle buffer, so the "new" breakout level was the
+     same old level and the exact same setup kept being re-detected. */
   for (let i = 0; i < candles.length; i++) {
-    if (candles[i].epoch > rangeEndEpoch) break;
+    const epoch = candles[i].epoch;
+    if (epoch < rangeStartEpoch) continue;
+    if (epoch > rangeEndEpoch) break;
+    if (startIdx === -1) startIdx = i;
     if (candles[i].high > high) high = candles[i].high;
     if (candles[i].low < low)   low = candles[i].low;
     endIdx = i;
   }
 
-  if (high === -Infinity) return;
+  if (high === -Infinity || startIdx === -1) return;
 
   openingRange = { high, low, startIdx, endIdx };
 
@@ -15197,6 +15204,23 @@ function processCandle(idx) {
     /* ADX Hard Gate — block in ranging or exhausted markets */
     if (!isADXInRange()) {
       return;  /* silently skip — ADX checked each candle */
+    }
+    /* Repeat-setup guard: after a trade resolves at TP/SL the same structural
+       level is usually still right next to price.  Re-arming it would re-detect
+       the identical trade over and over, so skip it until price moves away. */
+    const candidateDir = c.close > openingRange.high ? "BULL"
+                       : c.close < openingRange.low  ? "BEAR" : null;
+    if (candidateDir) {
+      const candidateLevel = candidateDir === "BULL" ? openingRange.high : openingRange.low;
+      if (isRepeatBreakoutSetup(getActiveSymbol(), candidateDir, candidateLevel, idx)) {
+        const logKey = `${candidateDir}|${fmt(candidateLevel, 6)}`;
+        if (_lastRepeatSetupLogKey !== logKey) {
+          _lastRepeatSetupLogKey = logKey;
+          addLog(`⏸ ${candidateDir} breakout at #${idx} SKIPPED — same level as the trade that just closed; waiting for a fresh setup`);
+        }
+        return;
+      }
+      _lastRepeatSetupLogKey = "";
     }
     /* Market-type direction filter: Boom prefers BULL, Crash prefers BEAR.
        Counter-trend breakouts on spike markets are much less reliable. */
@@ -18351,6 +18375,52 @@ function restoreAutoTradeHistory() {
   } catch (e) { /* storage not available */ }
 }
 
+/* ===== Repeat-setup guard =====
+ * When a breakout-retest trade closes at TP/SL the engine resets and immediately
+ * hunts for the next setup.  Without a guard the very same structural level is
+ * still sitting right next to price, so the identical breakout/retest/entry was
+ * re-detected over and over.  After every resolution we remember the level and
+ * direction that was just traded and refuse to re-arm an equivalent breakout
+ * until price has moved a meaningful distance away (or enough candles passed). */
+const REPEAT_SETUP_BLOCK_CANDLES = 30;   /* max candles a resolved level stays blocked */
+const REPEAT_SETUP_LEVEL_ATR     = 0.5;  /* levels closer than this (×ATR) count as the same setup */
+const resolvedBreakoutSetups = new Map();  /* symbol -> { dir, level, closedAtIdx } */
+let _lastRepeatSetupLogKey = "";           /* throttles the "same level" skip log */
+
+function rememberResolvedBreakoutSetup(symbol, dir, level, candleIdx) {
+  const sym = symbol || getActiveSymbol();
+  if (!sym || !Number.isFinite(level)) return;
+  resolvedBreakoutSetups.set(sym, {
+    dir: dir === "BULL" ? "BULL" : "BEAR",
+    level,
+    closedAtIdx: Number.isFinite(candleIdx) ? candleIdx : (candles.length - 1)
+  });
+}
+
+/**
+ * True when `level`/`dir` is effectively the setup that was just closed out on
+ * this symbol, and price has not yet moved far enough (or waited long enough)
+ * for it to be a genuinely new opportunity.
+ */
+function isRepeatBreakoutSetup(symbol, dir, level, candleIdx, atrRef) {
+  const sym = symbol || getActiveSymbol();
+  const last = resolvedBreakoutSetups.get(sym);
+  if (!last || !Number.isFinite(level)) return false;
+  if (last.dir !== (dir === "BULL" ? "BULL" : "BEAR")) return false;
+  const idx = Number.isFinite(candleIdx) ? candleIdx : (candles.length - 1);
+  if (idx - last.closedAtIdx >= REPEAT_SETUP_BLOCK_CANDLES) {
+    resolvedBreakoutSetups.delete(sym);
+    return false;
+  }
+  const atr = Number.isFinite(atrRef) && atrRef > 0 ? atrRef : getAtrReference();
+  const tolerance = atr > 0 ? atr * REPEAT_SETUP_LEVEL_ATR : PRICE_EPSILON;
+  if (Math.abs(level - last.level) > tolerance) {
+    resolvedBreakoutSetups.delete(sym);
+    return false;
+  }
+  return true;
+}
+
 /**
  * Force-release every piece of breakout-retest trade state for a symbol.
  * Used by the per-candle fail-safe and by the resolved-trade cleanup paths so a
@@ -18358,6 +18428,12 @@ function restoreAutoTradeHistory() {
  */
 function releaseBreakoutRetestTradeState(symbol, signalId, reason) {
   const sym = symbol || getActiveSymbol();
+  /* Remember the level/direction that was just traded so the engine does not
+     immediately re-detect the identical setup after the reset. */
+  if (trade) {
+    const closedLevel = breakout && Number.isFinite(breakout.level) ? breakout.level : trade.entry;
+    rememberResolvedBreakoutSetup(sym, trade.dir, closedLevel, candles.length - 1);
+  }
   trade = null;
   trailingSL = null;
   partialTpHit = false;
@@ -23568,6 +23644,10 @@ function resetIndicator() {
   initStrategyStateRegistry();
   candles = [];
   rangeStartEpoch = null;
+  /* Candle indices restart from scratch — drop the repeat-setup guard records
+     so they can't block (or mis-time) setups on the reloaded candle buffer. */
+  resolvedBreakoutSetups.clear();
+  _lastRepeatSetupLogKey = "";
   resetStrategyStateContracts("core");
   /* Note: do NOT clear per-symbol autoTradeSlots here — resetIndicator is
      called during reconnect, and we need pending contract IDs to survive
@@ -25032,6 +25112,9 @@ function adjustIndicesAfterSlice(removed) {
   }
 
   /* Adjust strategy signal indices and cooldown trackers */
+  for (const entry of resolvedBreakoutSetups.values()) {
+    if (entry && entry.closedAtIdx != null) entry.closedAtIdx = Math.max(0, entry.closedAtIdx - removed);
+  }
   lastLiquiditySweepIdx = Math.max(-999, lastLiquiditySweepIdx - removed);
   lastStopLossHuntIdx   = Math.max(-999, lastStopLossHuntIdx - removed);
   lastFailedPinBarIdx   = Math.max(-999, lastFailedPinBarIdx - removed);
