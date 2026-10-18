@@ -14770,6 +14770,40 @@ function getActiveConfluenceFactors(overrideDir, overrideLevel, overrideCandleId
    confirmation can all occur on one candle). */
 const MAX_PHASE_ADVANCES_PER_CANDLE = 5;
 
+/* Set by processCandle() when a retest is adopted from an EARLIER candle; the
+   candles between that retest and the live candle were skipped by the live
+   "latest candle only" loop, so they are replayed before the live candle is
+   judged.  Without this the entry trigger that already printed on a skipped
+   candle is never seen and the signal waits for a brand-new pattern. */
+let _retestCatchUpFromIdx = null;
+let _retestCatchUpActive = false;
+
+/* Replay the candles skipped between a historical retest and the live candle so
+   the earliest valid entry trigger fires instead of being missed. Same rules —
+   processCandle() is unchanged, it is only fed the candles it never saw. */
+function replaySkippedRetestCandles(fromIdx, toIdx) {
+  if (!Number.isFinite(fromIdx) || _retestCatchUpActive) return;
+  _retestCatchUpActive = true;
+  try {
+    replaySkippedRetestCandlesInner(fromIdx, toIdx);
+  } finally {
+    _retestCatchUpActive = false;
+    _retestCatchUpFromIdx = null;
+  }
+}
+
+function replaySkippedRetestCandlesInner(fromIdx, toIdx) {
+  for (let i = Math.max(0, fromIdx); i < toIdx; i++) {
+    let catchUpPhase = phase;
+    for (let attempt = 0; attempt < MAX_PHASE_ADVANCES_PER_CANDLE; attempt++) {
+      processCandle(i);
+      if (phase === catchUpPhase || phase === "TRADE") break;
+      catchUpPhase = phase;
+    }
+    if (trade || phase === "TRADE") break;
+  }
+}
+
 function processAllCandles() {
   _historicalProcessing = true;
   openingRange = null;
@@ -14928,6 +14962,9 @@ function processLatestCandle() {
         }
         if (trade) break;
       }
+      /* Every post-range candle was just processed in order, so there is no
+         skipped window to replay. */
+      _retestCatchUpFromIdx = null;
     }
     updateStateUI();
     return;
@@ -14941,6 +14978,9 @@ function processLatestCandle() {
   let prevPhase = phase;
   for (let attempt = 0; attempt < MAX_PHASE_ADVANCES_PER_CANDLE; attempt++) {
     processCandle(idx);
+    if (_retestCatchUpFromIdx != null) {
+      replaySkippedRetestCandles(_retestCatchUpFromIdx, idx);
+    }
     if (phase === prevPhase || phase === "TRADE") break;
     prevPhase = phase;
   }
@@ -15261,7 +15301,8 @@ function processCandle(idx) {
         addLog(`Bullish breakout at #${idx} BLOCKED by volume spike filter (candle range too small)`);
         return;
       }
-      breakout = { dir: "BULL", candleIdx: idx, level: openingRange.high, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now() };
+      breakout = { dir: "BULL", candleIdx: idx, level: openingRange.high, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now(), detectedEpoch: c.epoch };
+      addLog(`⏱ Breakout detected: ${fmtBarTime(c.epoch)} | Bar ${idx}`);
       retestCount = 0;  /* reset retest counter for double-retest filter */
       setPhase("RETEST");
       addLog(`BULLISH breakout at candle #${idx}, level ${fmt(openingRange.high, 4)}${conviction ? " (STRONG)" : " (WEAK)"}${volumeSpike ? " 📈 Vol Spike" : ""}`);
@@ -15305,7 +15346,8 @@ function processCandle(idx) {
         addLog(`Bearish breakout at #${idx} BLOCKED by volume spike filter (candle range too small)`);
         return;
       }
-      breakout = { dir: "BEAR", candleIdx: idx, level: openingRange.low, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now() };
+      breakout = { dir: "BEAR", candleIdx: idx, level: openingRange.low, strong: conviction, volumeSpike, signalId: generateSignalId("breakout"), detectedAtMs: Date.now(), detectedEpoch: c.epoch };
+      addLog(`⏱ Breakout detected: ${fmtBarTime(c.epoch)} | Bar ${idx}`);
       retestCount = 0;  /* reset retest counter for double-retest filter */
       setPhase("RETEST");
       addLog(`BEARISH breakout at candle #${idx}, level ${fmt(openingRange.low, 4)}${conviction ? " (STRONG)" : " (WEAK)"}${volumeSpike ? " 📈 Vol Spike" : ""}`);
@@ -15441,17 +15483,25 @@ function processCandle(idx) {
         addLog(`Retest at #${retestCandleIdx} — divergence filter not met, but proceeding anyway (permissive mode)`);
         /* Don't return; allow signal through even without perfect divergence */
       }
-      retestInfo = { candleIdx: retestCandleIdx };
+      retestInfo = { candleIdx: retestCandleIdx, epoch: getBarEpoch(retestCandleIdx) };
       setPhase("INDECISION");
+      addLog(`⏱ Retest detected: ${fmtBarTime(retestInfo.epoch)} | Bar ${retestCandleIdx}`);
       logSignalEngineDebug("RETEST_DETECTED", {
         symbol: getActiveSymbol(),
         breakoutCandleIdx: breakout.candleIdx,
         breakoutLevel: breakout.level,
         retestCandleIdx,
+        retestTime: fmtBarTime(retestInfo.epoch),
         currentCandleIdx: idx,
         detectionLagCandles: idx - retestCandleIdx,
         firstTouch: retestCount <= 1
       });
+      /* A retest found on an EARLIER candle means the candles between it and the
+         live candle were never evaluated for the entry trigger — that skipped
+         window is pure detection latency, so replay it (same rules) below. */
+      if (!_historicalProcessing && !_retestCatchUpActive && retestCandleIdx < idx) {
+        _retestCatchUpFromIdx = retestCandleIdx;
+      }
       /* Feature 7: build divergence visual markers on retest */
       if (divergenceVisualEnabled) buildDivergenceMarkers();
       addLog(`Retest detected at candle #${retestCandleIdx}${retestCount > 1 ? ` (retest #${retestCount})` : ""}`);
@@ -15851,9 +15901,34 @@ function isRetestRejection(c) {
 }
 
 /* ---- Breakout → retest → signal timing diagnostics ---- */
+/* MT5-style timestamp (UTC) so indicator logs line up with terminal/EA logs. */
+function fmtBarTime(epoch) {
+  if (!Number.isFinite(epoch)) return "n/a";
+  const d = new Date(epoch * 1000);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}.${p(d.getUTCMonth() + 1)}.${p(d.getUTCDate())} ` +
+         `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+
+function getBarEpoch(idx) {
+  return (Number.isFinite(idx) && candles[idx]) ? candles[idx].epoch : null;
+}
+
 function noteEarliestValidSignalCandle(idx) {
   if (!breakout || !Number.isFinite(idx)) return;
-  if (breakout._earliestValidSignalIdx == null) breakout._earliestValidSignalIdx = idx;
+  if (breakout._earliestValidSignalIdx != null) return;
+  breakout._earliestValidSignalIdx = idx;
+  breakout._earliestValidSignalEpoch = getBarEpoch(idx);
+  addLog(`⏱ Setup became valid: ${fmtBarTime(breakout._earliestValidSignalEpoch)} | Bar ${idx}`);
+  logSignalEngineDebug("SETUP_VALID", {
+    symbol: getActiveSymbol(),
+    dir: breakout.dir,
+    level: breakout.level,
+    validCandleIdx: idx,
+    validTime: fmtBarTime(breakout._earliestValidSignalEpoch),
+    breakoutCandleIdx: breakout.candleIdx,
+    retestCandleIdx: retestInfo ? retestInfo.candleIdx : null
+  });
 }
 
 function noteBreakoutRetestDelay(reason, idx) {
@@ -15874,20 +15949,39 @@ function logBreakoutRetestTiming(signalIdx, pattern) {
     : (retestIdx != null ? retestIdx : signalIdx);
   const delayFromRetest = retestIdx != null ? signalIdx - retestIdx : null;
   const delayFromEarliest = signalIdx - earliestValidIdx;
+  const breakoutEpoch = breakout.detectedEpoch != null ? breakout.detectedEpoch : getBarEpoch(breakoutIdx);
+  const retestEpoch = retestInfo && retestInfo.epoch != null ? retestInfo.epoch : getBarEpoch(retestIdx);
+  const validEpoch = breakout._earliestValidSignalEpoch != null
+    ? breakout._earliestValidSignalEpoch
+    : getBarEpoch(earliestValidIdx);
+  const signalEpoch = getBarEpoch(signalIdx);
+  const delaySeconds = (Number.isFinite(validEpoch) && Number.isFinite(signalEpoch))
+    ? signalEpoch - validEpoch
+    : null;
   const reasons = Array.isArray(breakout._delayReasons) && breakout._delayReasons.length > 0
     ? breakout._delayReasons.join("; ")
     : "none — signal fired on the first valid rejection";
   addLog(`⏱ Entry timing — breakout #${breakoutIdx} → retest ${retestIdx != null ? `#${retestIdx}` : "n/a"} → signal #${signalIdx} (${pattern})`);
-  addLog(`⏱ Delay: ${delayFromRetest != null ? delayFromRetest : "n/a"} candle(s) after retest, ${delayFromEarliest} candle(s) after the earliest valid signal candle #${earliestValidIdx}`);
+  addLog(`⏱ Breakout detected: ${fmtBarTime(breakoutEpoch)} | Bar ${breakoutIdx}`);
+  addLog(`⏱ Retest detected: ${fmtBarTime(retestEpoch)} | Bar ${retestIdx != null ? retestIdx : "n/a"}`);
+  addLog(`⏱ Setup valid: ${fmtBarTime(validEpoch)} | Bar ${earliestValidIdx}`);
+  addLog(`⏱ Signal generated: ${fmtBarTime(signalEpoch)} | Bar ${signalIdx}`);
+  addLog(`⏱ Detection delay: ${delaySeconds != null ? delaySeconds : "n/a"} second(s), ${delayFromEarliest} candle(s) after the earliest valid signal candle #${earliestValidIdx}`);
+  addLog(`⏱ Delay: ${delayFromRetest != null ? delayFromRetest : "n/a"} candle(s) after retest`);
   addLog(`⏱ Delay cause: ${reasons}`);
   logSignalEngineDebug("BREAKOUT_RETEST_TIMING", {
     symbol: getActiveSymbol(),
     pattern,
     breakoutCandleIdx: breakoutIdx,
+    breakoutTime: fmtBarTime(breakoutEpoch),
     breakoutLevel: breakout.level,
     retestCandleIdx: retestIdx,
+    retestTime: fmtBarTime(retestEpoch),
     signalCandleIdx: signalIdx,
+    signalTime: fmtBarTime(signalEpoch),
     earliestValidSignalIdx: earliestValidIdx,
+    earliestValidSignalTime: fmtBarTime(validEpoch),
+    delaySeconds,
     delayCandlesFromRetest: delayFromRetest,
     delayCandlesFromEarliestValid: delayFromEarliest,
     delayReasons: Array.isArray(breakout._delayReasons) ? breakout._delayReasons : []

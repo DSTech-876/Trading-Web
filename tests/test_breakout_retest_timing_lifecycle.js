@@ -218,9 +218,10 @@ test('logBreakoutRetestTiming reports breakout/retest/signal indices and the del
     retestInfo: { candleIdx: 12 },
     getActiveSymbol: () => 'R_100',
     addLog: (m) => logs.push(m),
-    logSignalEngineDebug: (stage, details) => debug.push([stage, details])
+    logSignalEngineDebug: (stage, details) => debug.push([stage, details]),
+    candles: []
   };
-  const { logBreakoutRetestTiming } = run(['logBreakoutRetestTiming'], context);
+  const { logBreakoutRetestTiming } = run(['logBreakoutRetestTiming', 'fmtBarTime', 'getBarEpoch'], context);
   logBreakoutRetestTiming(15, 'bullish engulfing');
 
   const [stage, details] = debug[0];
