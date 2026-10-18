@@ -210,3 +210,103 @@ test('fast-track CONFIRMED signal is recorded once per setup/candle even when bu
   assert.equal(buildTradeCalls, 3);
   assert.equal(recordConfirmedCalls, 1);
 });
+
+test('with only follow-through enabled, a retest touch on the forming follow-through candle defers', () => {
+  const context = baseContext({
+    breakout: { dir: 'BULL', candleIdx: 0, level: 100, lockedLevel: 100 },
+    candles: [
+      { epoch: 0,  open: 95,  close: 101, high: 102, low: 94 },   /* 0: breakout candle */
+      { epoch: 60, open: 100.4, close: 100.6, high: 101, low: 99 } /* 1: forming, touches level 100 intrabar */
+    ],
+    touchesLevel,
+    falseBreakoutEnabled: false,
+    followThroughEnabled: true,
+    getCurrentEntryMode: () => 'aggressive_intrabar'
+  });
+  const { processCandle, isFalseBreakout, hasFollowThrough, findHistoricalRetest } =
+    run(['processCandle', 'isFalseBreakout', 'hasFollowThrough', 'findHistoricalRetest'], context);
+  context.isFalseBreakout = isFalseBreakout;
+  context.hasFollowThrough = hasFollowThrough;
+  context.findHistoricalRetest = findHistoricalRetest;
+
+  processCandle(1);
+
+  /* retestInfo must NOT be set yet — waiting for the follow-through candle close */
+  assert.equal(context.retestInfo, null);
+  assert.equal(context.phase, 'RETEST');
+  assert.ok(context.logs.some(l => /waiting for candle close/.test(l)));
+});
+
+test('with both false-breakout and follow-through disabled, a retest touch on the forming candle does not defer', () => {
+  const context = baseContext({
+    breakout: { dir: 'BULL', candleIdx: 0, level: 100, lockedLevel: 100 },
+    candles: [
+      { epoch: 0,  open: 95,  close: 101, high: 102, low: 94 },   /* 0: breakout candle */
+      { epoch: 60, open: 100.4, close: 100.6, high: 101, low: 99 } /* 1: forming, touches level 100 intrabar */
+    ],
+    touchesLevel,
+    falseBreakoutEnabled: false,
+    followThroughEnabled: false,
+    isDoubleRetestSatisfied: () => false,
+    getCurrentEntryMode: () => 'aggressive_intrabar'
+  });
+  const { processCandle, isFalseBreakout, hasFollowThrough, findHistoricalRetest } =
+    run(['processCandle', 'isFalseBreakout', 'hasFollowThrough', 'findHistoricalRetest'], context);
+  context.isFalseBreakout = isFalseBreakout;
+  context.hasFollowThrough = hasFollowThrough;
+  context.findHistoricalRetest = findHistoricalRetest;
+
+  processCandle(1);
+
+  /* retestInfo should NOT be set yet — waiting for double retest since both features are disabled
+     (no deferral guard applies, but double retest requirement blocks confirmation) */
+  assert.equal(context.retestInfo, null);
+  assert.equal(context.phase, 'RETEST');
+  assert.ok(context.logs.some(l => /waiting for double retest/.test(l)));
+});
+
+test('regular confirmation path CONFIRMED signal is recorded once per setup/candle even when buildTrade rejects entry on every retry tick', () => {
+  let buildTradeCalls = 0;
+  let recordConfirmedCalls = 0;
+  const context = baseContext({
+    breakout: { dir: 'BULL', candleIdx: 0, level: 100, lockedLevel: 100, strong: true },
+    retestInfo: { candleIdx: 1 },
+    indecisionInfo: { candleIdx: 1 },
+    candles: [
+      { epoch: 0,  open: 95,  close: 101, high: 102, low: 94 },
+      { epoch: 60, open: 100.4, close: 100.6, high: 101, low: 99 },
+      { epoch: 120, open: 100.6, close: 100.8, high: 101, low: 100.5 }
+    ],
+    phase: 'CONFIRM',
+    isDragonflyDoji: () => true,
+    isBullishEngulfing: () => false,
+    isMorningStar: () => false,
+    isEveningStar: () => false,
+    isPiercingLine: () => false,
+    isDarkCloudCover: () => false,
+    isTweezers: () => null,
+    isRailwayTrack: () => null,
+    detectMomentumImpulse: () => null,
+    detectSupplyDemandZone: () => null,
+    detectTrendlineTouch: () => null,
+    detectMABounce: () => null,
+    getStepRunLength: () => 0,
+    detectDriftSwitchRegime: () => null,
+    getDailyResetPreferredDir: () => null,
+    detectSpikeRejection: () => null,
+    detectInsideBarFalseBreakout: () => null,
+    getMarketType: () => 'default',
+    buildTrade: () => { buildTradeCalls++; context.trade = null; },
+    recordConfirmedSignal: () => { recordConfirmedCalls++; }
+  });
+  const { processCandle } = run(['processCandle'], context);
+
+  /* Simulate three retry ticks for the same candle, all rejected by buildTrade.
+     This tests the regular confirmation path (dragonfly doji), not the fast-track engulfing path. */
+  processCandle(2);
+  processCandle(2);
+  processCandle(2);
+
+  assert.equal(buildTradeCalls, 3);
+  assert.equal(recordConfirmedCalls, 1);
+});
