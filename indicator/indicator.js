@@ -2060,7 +2060,12 @@ function getSignalDistanceLimitAtr() {
   return getAdaptiveAppliedNumber("maxEntryDistanceAtr", fallback);
 }
 
-function getAtrReference() {
+function getAtrReference(idx) {
+  /* If index is provided (during replay), use historical ATR at that bar */
+  if (Number.isFinite(idx) && idx >= 0 && atrValues && atrValues[idx] && atrValues[idx] > 0) {
+    return atrValues[idx];
+  }
+  /* Otherwise use current ATR */
   if (Number.isFinite(atrValue) && atrValue > 0) return atrValue;
   const valid = (atrValues || []).filter(v => Number.isFinite(v) && v > 0);
   return valid.length ? valid[valid.length - 1] : 0;
@@ -14777,6 +14782,7 @@ const MAX_PHASE_ADVANCES_PER_CANDLE = 5;
    candle is never seen and the signal waits for a brand-new pattern. */
 let _retestCatchUpFromIdx = null;
 let _retestCatchUpActive = false;
+let _retestCatchUpGenerationIdx = null;  /* Live bar index during replay; used for signal timing */
 
 /* Replay the candles skipped between a historical retest and the live candle so
    the earliest valid entry trigger fires instead of being missed. Same rules —
@@ -14784,11 +14790,13 @@ let _retestCatchUpActive = false;
 function replaySkippedRetestCandles(fromIdx, toIdx) {
   if (!Number.isFinite(fromIdx) || _retestCatchUpActive) return;
   _retestCatchUpActive = true;
+  _retestCatchUpGenerationIdx = toIdx;  /* Track the live bar for timing calculations */
   try {
     replaySkippedRetestCandlesInner(fromIdx, toIdx);
   } finally {
     _retestCatchUpActive = false;
     _retestCatchUpFromIdx = null;
+    _retestCatchUpGenerationIdx = null;
   }
 }
 
@@ -15554,9 +15562,9 @@ function processCandle(idx) {
         let blockReason = "";
         if (!hasConsecutiveDirection(idx, breakout.dir)) {
           blockReason = "consecutive direction filter";
-        } else if (!isVWAPAligned(breakout.dir)) {
+        } else if (!isVWAPAligned(breakout.dir, idx)) {
           blockReason = "VWAP filter";
-        } else if (!hasStochCrossover(breakout.dir)) {
+        } else if (!hasStochCrossover(breakout.dir, idx)) {
           blockReason = "stochastic crossover filter";
         } else if (!isConfirmBarValid(idx)) {
           blockReason = "confirm bar filter";
@@ -15602,7 +15610,8 @@ function processCandle(idx) {
             multiRHitLevels = [];
             addLog(`${fastPattern} at #${idx} — TRADE ENTRY (retest fast-track)`);
             addLog(`Confluence score: ${confluenceScore}`);
-            logBreakoutRetestTiming(idx, fastPattern);
+            const generationIdx = _retestCatchUpGenerationIdx != null ? _retestCatchUpGenerationIdx : idx;
+            logBreakoutRetestTiming(generationIdx, fastPattern);
             recordSignal(fastPattern, retestInfo?.candleIdx);
           } else {
             /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
@@ -15822,13 +15831,13 @@ function processCandle(idx) {
         confirmed = false;
       }
       /* Apply VWAP alignment filter */
-      if (confirmed && !isVWAPAligned(breakout.dir)) {
+      if (confirmed && !isVWAPAligned(breakout.dir, idx)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — VWAP filter (price wrong side of VWAP)`);
         noteBreakoutRetestDelay("VWAP filter", idx);
         confirmed = false;
       }
       /* Apply stochastic crossover filter */
-      if (confirmed && !hasStochCrossover(breakout.dir)) {
+      if (confirmed && !hasStochCrossover(breakout.dir, idx)) {
         addLog(`${confirmPattern} at #${idx} BLOCKED — stochastic crossover filter (no K/D cross)`);
         noteBreakoutRetestDelay("stochastic crossover filter", idx);
         confirmed = false;
@@ -15872,7 +15881,8 @@ function processCandle(idx) {
         addLog(`${confirmPattern} at #${idx} — TRADE ENTRY`);
         /* Confluence score was already computed for the min gate check above */
         addLog(`Confluence score: ${confluenceScore}`);
-        logBreakoutRetestTiming(idx, confirmPattern);
+        const generationIdx2 = _retestCatchUpGenerationIdx != null ? _retestCatchUpGenerationIdx : idx;
+        logBreakoutRetestTiming(generationIdx2, confirmPattern);
         recordSignal(confirmPattern, retestInfo?.candleIdx);
       } else {
         /* buildTrade() rejected the setup (news pause, timing-quality/ATR-drift,
@@ -16177,7 +16187,7 @@ function buildTrade(confirmCandle, confirmIdx) {
   const slAtrBuf = _gran <= LOWER_TF_1M_SEC ? SL_ATR_BUF_1M
                  : _gran <= LOWER_TF_5M_SEC  ? SL_ATR_BUF_5M
                  : SL_ATR_BUF_DEFAULT;
-  const atrRef = getAtrReference();
+  const atrRef = getAtrReference(confirmIdx);
   const extraStopAtr = getVolatilityAdjustedStopBufferAtr(symbol, _gran, breakout);
   const maxEntryDriftAtr = getMaxEntryDriftAtr(symbol, _gran, false);
   const entryMode = getCurrentEntryMode();
@@ -25884,26 +25894,35 @@ function hasConsecutiveDirection(idx, dir) {
   return count >= 2;
 }
 
-function isVWAPAligned(dir) {
+function isVWAPAligned(dir, idx) {
   if (!vwapFilterEnabled) return true;
   if (vwapValues.length === 0 || candles.length === 0) return true;
-  const vwap = vwapValues[vwapValues.length - 1];
-  const price = candles[candles.length - 1].close;
+  /* Use provided index for replay context, otherwise latest */
+  const candleIdx = Number.isFinite(idx) ? idx : candles.length - 1;
+  if (candleIdx < 0 || candleIdx >= candles.length) return true;
+  const vwap = vwapValues[candleIdx];
+  const price = candles[candleIdx].close;
   if (vwap === null || vwap === undefined) return true;
-  /* Allow within 0.5 ATR of VWAP as "near" */
-  const tolerance = atrValue > 0 ? atrValue * VWAP_ATR_TOLERANCE : Math.abs(price * VWAP_PRICE_TOLERANCE_PCT);
+  /* Allow within 0.5 ATR of VWAP as "near". Use historical ATR at this bar. */
+  const barAtr = atrValues && atrValues[candleIdx] && atrValues[candleIdx] > 0
+    ? atrValues[candleIdx]
+    : (atrValue > 0 ? atrValue : Math.abs(price * VWAP_PRICE_TOLERANCE_PCT));
+  const tolerance = barAtr > 0 ? barAtr * VWAP_ATR_TOLERANCE : Math.abs(price * VWAP_PRICE_TOLERANCE_PCT);
   if (dir === "BULL") return price >= vwap - tolerance;
   if (dir === "BEAR") return price <= vwap + tolerance;
   return true;
 }
 
-function hasStochCrossover(dir) {
+function hasStochCrossover(dir, idx) {
   if (!stochCrossEnabled) return true;
   if (stochK.length < 2 || stochD.length < 2) return true;
-  const kNow  = stochK[stochK.length - 1];
-  const kPrev = stochK[stochK.length - 2];
-  const dNow  = stochD[stochD.length - 1];
-  const dPrev = stochD[stochD.length - 2];
+  /* Use provided index for replay context, otherwise latest */
+  const candleIdx = Number.isFinite(idx) ? idx : stochK.length - 1;
+  if (candleIdx < 1 || candleIdx >= stochK.length) return true;
+  const kNow  = stochK[candleIdx];
+  const kPrev = stochK[candleIdx - 1];
+  const dNow  = stochD[candleIdx];
+  const dPrev = stochD[candleIdx - 1];
   if (kNow == null || kPrev == null || dNow == null || dPrev == null) return true;
   if (dir === "BULL") {
     /* K crosses above D from below, and coming from oversold zone */
