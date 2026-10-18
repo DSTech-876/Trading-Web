@@ -15395,12 +15395,24 @@ function processCandle(idx) {
          through close-based checks never run again — a reversal or false
          breakout on this very candle could never invalidate the setup. Wait
          for the close-based verdict before confirming the retest. */
-      if (!historicalRetest && intrabar && !falseBreakoutWindowClosed && idx === candles.length - 1) {
-        if (breakout._lastRetestDeferLogEpoch !== c.epoch) {
-          addLog(`Retest touch at #${idx} detected intrabar — waiting for candle close (false breakout / follow-through window) before confirming`);
-          breakout._lastRetestDeferLogEpoch = c.epoch;
+      if (!historicalRetest && intrabar && idx === candles.length - 1) {
+        /* Gate the wait by the appropriate feature(s):
+           - If false-breakout is enabled, wait for its window to close
+           - If only follow-through is enabled, wait for just one candle (follow-through window)
+           - If both are disabled, don't defer (no close-based verdict to wait for) */
+        let shouldDefer = false;
+        if (falseBreakoutEnabled && !falseBreakoutWindowClosed) {
+          shouldDefer = true;
+        } else if (!falseBreakoutEnabled && followThroughEnabled && breakout.candleIdx + 1 >= candles.length - 1) {
+          shouldDefer = true;
         }
-        return;
+        if (shouldDefer) {
+          if (breakout._lastRetestDeferLogEpoch !== c.epoch) {
+            addLog(`Retest touch at #${idx} detected intrabar — waiting for candle close (false breakout / follow-through window) before confirming`);
+            breakout._lastRetestDeferLogEpoch = c.epoch;
+          }
+          return;
+        }
       }
       /* If touches is true but historicalRetest is null, we just found a touch on
          the current candle. Count each candle's touch once — intrabar runs revisit
@@ -15781,8 +15793,17 @@ function processCandle(idx) {
 
     if (confirmed) {
       confirmInfo = { candleIdx: idx, pattern: confirmPattern };
-      /* Record a CONFIRMED signal immediately so it appears in the Live Signals banner */
-      recordConfirmedSignal(confirmPattern, retestInfo?.candleIdx);
+      /* Record a CONFIRMED signal immediately so it appears in the Live Signals banner.
+         Deduplicate per setup/candle/pattern using a key stored on `breakout` (which
+         survives confirmInfo/indecisionInfo resets): buildTrade() can reject entry below
+         (news pause, timing-quality/ATR-drift, min R:R, confluence, strength, etc.),
+         which clears confirmInfo so the next tick retries entry here. Without this key,
+         every retry tick would append another CONFIRMED row. */
+      const confirmDedupeKey = `${idx}|${confirmPattern}`;
+      if (breakout._lastConfirmDedupeKey !== confirmDedupeKey) {
+        recordConfirmedSignal(confirmPattern, retestInfo?.candleIdx);
+        breakout._lastConfirmDedupeKey = confirmDedupeKey;
+      }
       addLog(`${confirmPattern} confirmed at #${idx}`);
       buildTrade(c, idx);
       if (trade) {
