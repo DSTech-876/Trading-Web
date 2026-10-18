@@ -14970,26 +14970,20 @@ function runIntrabarTimingOptimizations(currentCandle) {
   if (!aggressiveEntryEnabled || !candleCloseOnlyEnabled) return;
   if (!currentCandle || candles.length < 2) return;
 
-  const idx = candles.length - 1;
-
-  /* Detect the breakout itself intrabar instead of waiting for the level-breaking
+  /* Advance the whole pre-trade pipeline intrabar instead of waiting for each
      candle to close. Waiting for candle close was the single biggest source of
      delayed entries — by the time the candle finished forming, most of the
-     initial breakout move (and its best entry price) was already gone. All
-     existing breakout filters (EMA/HTF/MTF alignment, HH/HL, session, volume
-     spike) and the downstream false-breakout / follow-through invalidation
-     checks still apply, so signal quality is preserved while latency drops. */
-  if (!monitoringTrade && !trade && !breakout && phase === "BREAKOUT") {
-    const prevMode = _entryModeContext;
-    _entryModeContext = "aggressive_intrabar";
-    try {
-      processLatestCandle();
-    } finally {
-      _entryModeContext = prevMode;
-    }
-  }
-
-  if (!monitoringTrade && !trade && breakout && retestInfo && indecisionInfo && !confirmInfo && phase === "CONFIRM" && idx > indecisionInfo.candleIdx) {
+     move (and its best entry price) was already gone. This used to cover only
+     the BREAKOUT and CONFIRM phases, so the RETEST and INDECISION phases (the
+     level touch — a pure price-touch event — and the fast-track engulfing/
+     rejection entry) still each cost up to a full candle of latency. All
+     existing filters (EMA/HTF/MTF alignment, HH/HL, session, volume spike,
+     confluence, min entry-progress ATR) still apply, and the close-based
+     invalidations (false breakout, follow-through) are still judged only on
+     closed candles inside processCandle(), so signal quality is preserved
+     while latency drops. */
+  if (!monitoringTrade && !trade &&
+      (phase === "BREAKOUT" || phase === "RETEST" || phase === "INDECISION" || phase === "CONFIRM")) {
     const prevMode = _entryModeContext;
     _entryModeContext = "aggressive_intrabar";
     try {
@@ -15194,6 +15188,11 @@ function processCandle(idx) {
   if (!openingRange) return;
   const c = candles[idx];
   const tuning = getMarketTuning();
+  /* Intrabar runs (aggressive entry mode) evaluate the still-forming candle:
+     price-touch events (level break, retest touch, SL/TP) are valid intrabar,
+     but close-based judgements (false breakout, follow-through, doji shape)
+     must only be made once the judged candle has actually closed. */
+  const intrabar = getCurrentEntryMode() === "aggressive_intrabar";
 
   /* PHASE: looking for breakout */
   if (!breakout) {
@@ -15333,8 +15332,11 @@ function processCandle(idx) {
     breakout.level = breakout.lockedLevel;
   }
 
-  /* FALSE BREAKOUT DETECTION: invalidate if price returns inside range */
-  if (!retestInfo && isFalseBreakout(idx)) {
+  /* FALSE BREAKOUT DETECTION: invalidate if price returns inside range.
+     Close-based judgement — never evaluate intrabar while the last candle of
+     the judging window is still forming (its "close" is just the live price). */
+  const falseBreakoutWindowClosed = breakout.candleIdx + FALSE_BREAKOUT_CANDLES < candles.length - 1;
+  if (!retestInfo && (!intrabar || falseBreakoutWindowClosed) && isFalseBreakout(idx)) {
     addLog(`⚠ FALSE BREAKOUT detected — ${FALSE_BREAKOUT_CANDLES} candles closed back inside range. Resetting.`);
     maybeSendBreakoutCancelled("False breakout invalidated before the retest confirmation completed.");
     breakout = null;
@@ -15345,8 +15347,9 @@ function processCandle(idx) {
   /* PHASE: looking for retest */
   if (!retestInfo) {
     if (idx <= breakout.candleIdx) return;
-    /* Post-breakout follow-through check */
-    if (!hasFollowThrough()) {
+    /* Post-breakout follow-through check — close-based: skip intrabar while
+       the follow-through candle itself is still forming. */
+    if (!(intrabar && breakout.candleIdx + 1 >= candles.length - 1) && !hasFollowThrough()) {
       addLog(`Breakout at #${breakout.candleIdx} INVALIDATED — no follow-through (next candle reversed)`);
       maybeSendBreakoutCancelled("Breakout failed the follow-through check.");
       breakout = null;
@@ -15376,19 +15379,28 @@ function processCandle(idx) {
      
     /* Breakout distance check — only apply if no historical retest was found */
     if (!historicalRetest && !isBreakoutDistanceOK(idx)) {
-      addLog(`📏 Breakout distance: price too far from level (>${breakoutDistATR}× ATR) — skipping retest`);
+      if (!(intrabar && breakout._lastDistanceLogEpoch === c.epoch)) {
+        addLog(`📏 Breakout distance: price too far from level (>${breakoutDistATR}× ATR) — skipping retest`);
+      }
+      if (intrabar) breakout._lastDistanceLogEpoch = c.epoch;
       return;
     }
      
     const touches = historicalRetest || touchesLevel(c, breakout.level);
     if (touches) {
-      /* If touches is true but historicalRetest is null, we just found a touch on current candle */
-      if (!historicalRetest) {
+      /* If touches is true but historicalRetest is null, we just found a touch on
+         the current candle. Count each candle's touch once — intrabar runs revisit
+         the same forming candle on every tick. */
+      if (!historicalRetest && breakout._lastRetestCountEpoch !== c.epoch) {
         retestCount++;
+        breakout._lastRetestCountEpoch = c.epoch;
       }
       if (!isDoubleRetestSatisfied()) {
         const retestCandleIdx = historicalRetest ? historicalRetest.candleIdx : idx;
-        addLog(`Retest #${retestCount} at #${retestCandleIdx} — waiting for double retest (need ${2 - retestCount} more)`);
+        if (!(intrabar && breakout._lastDoubleRetestLogEpoch === c.epoch)) {
+          addLog(`Retest #${retestCount} at #${retestCandleIdx} — waiting for double retest (need ${2 - retestCount} more)`);
+        }
+        if (intrabar) breakout._lastDoubleRetestLogEpoch = c.epoch;
         return;  /* don't set retestInfo yet; wait for 2nd touch */
       }
       /* Apply RSI filter at retest — use the retest candle, not current */
@@ -15463,26 +15475,26 @@ function processCandle(idx) {
       if (fastPattern) {
         indecisionInfo = { candleIdx: idx };
         noteEarliestValidSignalCandle(idx);
-        let confirmed = true;
+        let blockReason = "";
         if (!hasConsecutiveDirection(idx, breakout.dir)) {
-          addLog(`${fastPattern} at #${idx} BLOCKED — consecutive direction filter`);
-          noteBreakoutRetestDelay("consecutive direction filter", idx);
-          confirmed = false;
+          blockReason = "consecutive direction filter";
+        } else if (!isVWAPAligned(breakout.dir)) {
+          blockReason = "VWAP filter";
+        } else if (!hasStochCrossover(breakout.dir)) {
+          blockReason = "stochastic crossover filter";
+        } else if (!isConfirmBarValid(idx)) {
+          blockReason = "confirm bar filter";
         }
-        if (confirmed && !isVWAPAligned(breakout.dir)) {
-          addLog(`${fastPattern} at #${idx} BLOCKED — VWAP filter`);
-          noteBreakoutRetestDelay("VWAP filter", idx);
-          confirmed = false;
-        }
-        if (confirmed && !hasStochCrossover(breakout.dir)) {
-          addLog(`${fastPattern} at #${idx} BLOCKED — stochastic crossover filter`);
-          noteBreakoutRetestDelay("stochastic crossover filter", idx);
-          confirmed = false;
-        }
-        if (confirmed && !isConfirmBarValid(idx)) {
-          addLog(`${fastPattern} at #${idx} BLOCKED — confirm bar filter`);
-          noteBreakoutRetestDelay("confirm bar filter", idx);
-          confirmed = false;
+        const confirmed = !blockReason;
+        if (blockReason) {
+          /* Intrabar runs revisit the same forming candle on every tick — log a
+             given rejection once per candle/pattern/filter combination. */
+          const rejectKey = `${c.epoch}|${fastPattern}|${blockReason}`;
+          if (!(intrabar && breakout._lastFastTrackRejectKey === rejectKey)) {
+            addLog(`${fastPattern} at #${idx} BLOCKED — ${blockReason}`);
+            noteBreakoutRetestDelay(blockReason, idx);
+          }
+          if (intrabar) breakout._lastFastTrackRejectKey = rejectKey;
         }
         if (confirmed) {
           confirmInfo = { candleIdx: idx, pattern: fastPattern };
@@ -15521,7 +15533,11 @@ function processCandle(idx) {
       }
     }
 
-    if (isIndecision(c, idx)) {
+    /* Plain doji/spinning-top classification is a close-based shape judgement:
+       a candle's first ticks always have a tiny body and range, so intrabar every
+       forming candle looks like a doji. Lock plain indecision only on closed
+       candles; the fast-track above still fires intrabar for real momentum. */
+    if (!(intrabar && idx === candles.length - 1) && isIndecision(c, idx)) {
       indecisionInfo = { candleIdx: idx };
       setPhase("CONFIRM");
       /* Describe what type of indecision was detected */
@@ -24820,7 +24836,10 @@ function connect() {
         monitorCustomStrategyOutcomes(c);
         monitorSessionRangeTradeOutcome(c);
         monitorNyOpenRangeTradeOutcome(c);
-      } else if (sameEpoch) {
+      } else {
+        /* Candle-close mode: run intrabar optimizations on every tick, including
+           the first tick of a freshly opened candle (previously skipped, so a
+           breakout on the opening tick waited for the second tick). */
         runIntrabarTimingOptimizations(c);
       }
       /* Feature 5: update BOS/ChoCH markers on each new candle */
@@ -31070,7 +31089,10 @@ function connectPanel(p) {
         monitorCustomStrategyOutcomes(c);
         monitorSessionRangeTradeOutcome(c);
         monitorNyOpenRangeTradeOutcome(c);
-      } else if (sameEpoch) {
+      } else {
+        /* Candle-close mode: run intrabar optimizations on every tick, including
+           the first tick of a freshly opened candle (previously skipped, so a
+           breakout on the opening tick waited for the second tick). */
         runIntrabarTimingOptimizations(c);
       }
     }
