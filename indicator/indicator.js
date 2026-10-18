@@ -476,6 +476,7 @@ const ENTRY_DRIFT_ATR_DEFAULT      = 0.9;  /* reject confirmations that close to
 const MTF_ENTRY_DRIFT_ATR_DEFAULT  = 1.1;  /* MTF setups get slightly more room before being considered stale */
 const SIGNAL_DEFAULT_VALIDITY_MIN   = 60;   /* Telegram signal validity / expiry window */
 const SIGNAL_DEFAULT_MAX_DISTANCE_ATR = 0.9; /* invalidate alerts once price has stretched too far from entry */
+const REPLAY_ENTRY_MIN_RISK_REMAINING = 0.5; /* a catch-up entry needs at least half of its stop distance left at the live price */
 const HIGH_CONFIDENCE_TELEGRAM_THRESHOLD = 75; /* min confidenceScore required when "High Confidence Only" preference is on */
 const MULTI_VIEW_REFRESH_DEFAULT_MIN = 60;  /* refresh all multi-view panels hourly by default */
 const AGGRESSIVE_ENTRY_PROGRESS_ATR_DEFAULT = 0.18; /* intrabar entry needs at least this much progress beyond the level */
@@ -16130,6 +16131,53 @@ function resolveBreakoutRetestStopAnchor(opts) {
   return { anchor, anchorSource, zoneTooTight, levelExtended };
 }
 
+/* ---- Catch-up (replayed) entry guard ----
+ * Entries produced for a candle that is no longer the live candle — the retest
+ * catch-up replay and the post-range catch-up loop — are priced at that candle's
+ * close, while the actual fill (MT5 / manual) happens at the live price.  Honour
+ * such an entry only when the market has not already resolved or run away from
+ * the setup; otherwise the signal is chased into an immediate stop.
+ * Returns a rejection reason, or null when the stale entry is still tradable. */
+function evaluateCatchUpEntryAgainstLiveMarket(dir, confirmIdx, entry, sl, tp, atrRef) {
+  if (_historicalProcessing || backtestMode) return null;
+  if (!Number.isFinite(confirmIdx) || !Number.isFinite(entry) || !Number.isFinite(sl)) return null;
+  const liveIdx = candles.length - 1;
+  if (liveIdx < 0 || confirmIdx >= liveIdx) return null;
+
+  /* 1. The skipped window may already have hit the stop or the target. */
+  for (let i = confirmIdx + 1; i <= liveIdx; i++) {
+    const c = candles[i];
+    if (!c) continue;
+    const slHit = dir === "BULL" ? c.low <= sl : c.high >= sl;
+    if (slHit) return `catch-up entry at #${confirmIdx} is stale — stop ${fmt(sl, 4)} was already swept on candle #${i}`;
+    if (Number.isFinite(tp)) {
+      const tpHit = dir === "BULL" ? c.high >= tp : c.low <= tp;
+      if (tpHit) return `catch-up entry at #${confirmIdx} is stale — target ${fmt(tp, 4)} was already reached on candle #${i}`;
+    }
+  }
+
+  const livePrice = candles[liveIdx] ? candles[liveIdx].close : null;
+  if (!Number.isFinite(livePrice)) return null;
+
+  /* 2. Price must still be close enough to the intended entry to chase. */
+  const maxDistanceAtr = getSignalDistanceLimitAtr();
+  if (atrRef > 0 && Number.isFinite(maxDistanceAtr) && maxDistanceAtr > 0) {
+    const distanceAtr = Math.abs(livePrice - entry) / atrRef;
+    if (distanceAtr > maxDistanceAtr) {
+      return `catch-up entry at #${confirmIdx} is stale — live price is ${fmt(distanceAtr, 2)} ATR from entry ${fmt(entry, 4)} (max ${fmt(maxDistanceAtr, 2)} ATR)`;
+    }
+  }
+
+  /* 3. Enough of the planned risk must remain between the live price and the stop,
+   *    otherwise the real fill starts with a near-touching stop. */
+  const riskTotal = dir === "BULL" ? entry - sl : sl - entry;
+  const riskLeft  = dir === "BULL" ? livePrice - sl : sl - livePrice;
+  if (riskTotal > 0 && riskLeft < riskTotal * REPLAY_ENTRY_MIN_RISK_REMAINING) {
+    return `catch-up entry at #${confirmIdx} is stale — only ${fmt((riskLeft / riskTotal) * 100, 0)}% of the stop distance remains at the live price`;
+  }
+  return null;
+}
+
 /* ---- Trade setup builder ---- */
 function buildTrade(confirmCandle, confirmIdx) {
   /* Feature 11: News pause gate — block new trades during high-impact events */
@@ -16271,6 +16319,12 @@ function buildTrade(confirmCandle, confirmIdx) {
       addLog(`⚠ Trade REJECTED — R:R ${fmt(actualRR, 1)} below minimum ${fmt(effectiveMinRR, 1)}`);
       return;
     }
+    const staleCatchUpReason = evaluateCatchUpEntryAgainstLiveMarket("BULL", confirmIdx, entry, sl, tp, atrRef);
+    if (staleCatchUpReason) {
+      addLog(`⚠ Trade REJECTED — ${staleCatchUpReason}`);
+      noteBreakoutRetestDelay("stale catch-up entry", confirmIdx);
+      return;
+    }
     trade = {
       entry, sl, tp, dir: "BULL", rr: actualRR, scalpingMode: scalpingModeEnabled,
       entryIdx: confirmIdx, outcomeStartIdx: confirmIdx + 1, symbol: getActiveSymbol(),
@@ -16328,6 +16382,12 @@ function buildTrade(confirmCandle, confirmIdx) {
     /* Min R:R gate: reject trade if R:R is below minimum */
     if (minRREnabled && actualRR < effectiveMinRR) {
       addLog(`⚠ Trade REJECTED — R:R ${fmt(actualRR, 1)} below minimum ${fmt(effectiveMinRR, 1)}`);
+      return;
+    }
+    const staleCatchUpReasonBear = evaluateCatchUpEntryAgainstLiveMarket("BEAR", confirmIdx, entry, sl, tp, atrRef);
+    if (staleCatchUpReasonBear) {
+      addLog(`⚠ Trade REJECTED — ${staleCatchUpReasonBear}`);
+      noteBreakoutRetestDelay("stale catch-up entry", confirmIdx);
       return;
     }
     trade = {
