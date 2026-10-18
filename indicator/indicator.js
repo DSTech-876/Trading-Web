@@ -15388,6 +15388,20 @@ function processCandle(idx) {
      
     const touches = historicalRetest || touchesLevel(c, breakout.level);
     if (touches) {
+      /* A touch on the still-forming candle, while the false-breakout / follow-
+         through judging window for this breakout hasn't closed yet, must not
+         advance to retestInfo. This whole PHASE is gated by `!retestInfo` above
+         (line 15348), so once retestInfo is set the false-breakout and follow-
+         through close-based checks never run again — a reversal or false
+         breakout on this very candle could never invalidate the setup. Wait
+         for the close-based verdict before confirming the retest. */
+      if (!historicalRetest && intrabar && !falseBreakoutWindowClosed && idx === candles.length - 1) {
+        if (breakout._lastRetestDeferLogEpoch !== c.epoch) {
+          addLog(`Retest touch at #${idx} detected intrabar — waiting for candle close (false breakout / follow-through window) before confirming`);
+          breakout._lastRetestDeferLogEpoch = c.epoch;
+        }
+        return;
+      }
       /* If touches is true but historicalRetest is null, we just found a touch on
          the current candle. Count each candle's touch once — intrabar runs revisit
          the same forming candle on every tick. */
@@ -15498,7 +15512,18 @@ function processCandle(idx) {
         }
         if (confirmed) {
           confirmInfo = { candleIdx: idx, pattern: fastPattern };
-          recordConfirmedSignal(fastPattern, retestInfo?.candleIdx);
+          /* Deduplicate the CONFIRMED record per setup/candle/pattern: buildTrade()
+             can reject entry below (news pause, timing-quality/ATR-drift, min R:R,
+             recent-loss pause, strength requirement, etc.), which clears confirmInfo
+             and indecisionInfo so the next tick retries entry here. Without this key
+             — stored on `breakout`, which survives those clears — every retry tick
+             would append another CONFIRMED row, displacing real outcomes from the
+             signal history. */
+          const fastTrackConfirmKey = `${idx}|${fastPattern}`;
+          if (breakout._lastFastTrackConfirmKey !== fastTrackConfirmKey) {
+            recordConfirmedSignal(fastPattern, retestInfo?.candleIdx);
+            breakout._lastFastTrackConfirmKey = fastTrackConfirmKey;
+          }
           addLog(`${fastPattern} at #${idx} (retest fast-track)`);
           buildTrade(c, idx);
           if (trade) {
