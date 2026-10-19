@@ -57,6 +57,7 @@ function build(candles, options = {}) {
   vm.createContext(context);
   vm.runInContext(
     `${extractFunction('evaluateCatchUpEntryAgainstLiveMarket')}\n` +
+    `${extractFunction('describeEntryPriceInvalidation')}\n` +
     `module.exports = { evaluateCatchUpEntryAgainstLiveMarket };`,
     context
   );
