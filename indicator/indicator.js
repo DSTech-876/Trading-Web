@@ -16159,23 +16159,70 @@ function evaluateCatchUpEntryAgainstLiveMarket(dir, confirmIdx, entry, sl, tp, a
   const livePrice = candles[liveIdx] ? candles[liveIdx].close : null;
   if (!Number.isFinite(livePrice)) return null;
 
-  /* 2. Price must still be close enough to the intended entry to chase. */
-  const maxDistanceAtr = getSignalDistanceLimitAtr();
+  /* 2 & 3. Price must still be close enough to the intended entry to chase, and
+   *        enough of the planned risk must remain between it and the stop. */
+  const invalidation = describeEntryPriceInvalidation(dir, entry, sl, tp, atrRef, livePrice, getSignalDistanceLimitAtr());
+  if (invalidation) return `catch-up entry at #${confirmIdx} is stale — ${invalidation}`;
+  return null;
+}
+
+/* ---- Live-price entry invalidation ----
+ * Shared price checks for an entry that is about to be acted on — a replayed
+ * catch-up entry, or a signal that is about to leave the app (Telegram /
+ * screenshot render delay, slow candle dispatch).  A pending STOP/LIMIT order
+ * placed from such an alert never activates once price has already run through
+ * the entry zone, so the caller must drop the signal instead of publishing it.
+ * Returns a human-readable reason, or null when the entry is still tradable. */
+function describeEntryPriceInvalidation(dir, entry, sl, tp, atrRef, livePrice, maxDistanceAtr) {
+  if (!Number.isFinite(entry) || !Number.isFinite(sl) || !Number.isFinite(livePrice)) return null;
+  if (dir !== "BULL" && dir !== "BEAR") return null;
+
+  /* The stop or the target may already be through at the live price. */
+  const slBreached = dir === "BULL" ? livePrice <= sl : livePrice >= sl;
+  if (slBreached) return `live price ${fmt(livePrice, 4)} is already past the stop ${fmt(sl, 4)}`;
+  if (Number.isFinite(tp)) {
+    const tpReached = dir === "BULL" ? livePrice >= tp : livePrice <= tp;
+    if (tpReached) return `live price ${fmt(livePrice, 4)} has already reached the target ${fmt(tp, 4)}`;
+  }
+
+  /* Price must still be close enough to the intended entry to chase. */
   if (atrRef > 0 && Number.isFinite(maxDistanceAtr) && maxDistanceAtr > 0) {
     const distanceAtr = Math.abs(livePrice - entry) / atrRef;
     if (distanceAtr > maxDistanceAtr) {
-      return `catch-up entry at #${confirmIdx} is stale — live price is ${fmt(distanceAtr, 2)} ATR from entry ${fmt(entry, 4)} (max ${fmt(maxDistanceAtr, 2)} ATR)`;
+      return `live price is ${fmt(distanceAtr, 2)} ATR from entry ${fmt(entry, 4)} (max ${fmt(maxDistanceAtr, 2)} ATR)`;
     }
   }
 
-  /* 3. Enough of the planned risk must remain between the live price and the stop,
-   *    otherwise the real fill starts with a near-touching stop. */
+  /* Enough of the planned risk must remain between the live price and the stop,
+     otherwise the real fill starts with a near-touching stop. */
   const riskTotal = dir === "BULL" ? entry - sl : sl - entry;
   const riskLeft  = dir === "BULL" ? livePrice - sl : sl - livePrice;
   if (riskTotal > 0 && riskLeft < riskTotal * REPLAY_ENTRY_MIN_RISK_REMAINING) {
-    return `catch-up entry at #${confirmIdx} is stale — only ${fmt((riskLeft / riskTotal) * 100, 0)}% of the stop distance remains at the live price`;
+    return `only ${fmt((riskLeft / riskTotal) * 100, 0)}% of the stop distance remains at the live price`;
   }
   return null;
+}
+
+/* ---- Telegram dispatch readiness ----
+ * An auto-send is scheduled when the TRADE phase fires but only runs after the
+ * chart render delay, by which time the setup may have been reset (the alert
+ * then goes out as an empty "Entry Active" card in RANGE phase with no
+ * direction) or the market may have run past the entry (the pending order the
+ * user places never activates).  Validate the state at dispatch time. */
+function evaluateTelegramDispatchReadiness(state) {
+  const st = state || {};
+  if (st.phase !== "TRADE" || !st.trade) {
+    return { ready: false, reason: `setup is no longer active (phase ${st.phase || "--"}${st.trade ? "" : ", no trade"})` };
+  }
+  const list = Array.isArray(st.candles) ? st.candles : [];
+  const livePrice = list.length > 0 ? list[list.length - 1].close : null;
+  const t = st.trade;
+  const dir = t.dir || (st.breakout ? st.breakout.dir : null);
+  const atrRef = Number.isFinite(t.atrAtEntry) ? t.atrAtEntry : 0;
+  const maxDistanceAtr = Number.isFinite(t.maxEntryDistanceAtr) ? t.maxEntryDistanceAtr : null;
+  const invalidation = describeEntryPriceInvalidation(dir, t.entry, t.sl, t.tp, atrRef, livePrice, maxDistanceAtr);
+  if (invalidation) return { ready: false, reason: `entry is no longer reachable — ${invalidation}` };
+  return { ready: true, reason: null };
 }
 
 /* ---- Trade setup builder ---- */
@@ -19490,11 +19537,11 @@ function setPhase(newPhase) {
         const targetPanel = multiPanels.get(panelSymbol);
         if (targetPanel) targetPanel._tradeTelegramSent = true;
         addLog("📤 Telegram auto-send triggered — TRADE signal");
-        setTimeout(() => sendPanelTelegramAlert(panelSymbol), CHART_RENDER_DELAY_MS);
+        setTimeout(() => sendPanelTelegramAlert(panelSymbol, { requireActiveEntry: true }), CHART_RENDER_DELAY_MS);
       } else {
         /* Single-symbol mode: use main chart as before */
         addLog("📤 Telegram auto-send triggered — TRADE signal");
-        setTimeout(() => sendTelegramAlert(), CHART_RENDER_DELAY_MS);
+        setTimeout(() => sendTelegramAlert({ requireActiveEntry: true }), CHART_RENDER_DELAY_MS);
       }
     } else {
       /* Warn user that Telegram isn't configured when a TRADE fires */
@@ -20302,6 +20349,13 @@ function captureChartScreenshot() {
   return _renderChartToBlob();
 }
 
+/* A caption only states "Entry Active" when there really is a live entry;
+   status snapshots (manual send, NY-open notice, post-reset dispatch) must not
+   look like a tradable signal with no direction or levels. */
+function telegramCaptionHeadline(phaseName, tradeState) {
+  return phaseName === "TRADE" && tradeState ? "Entry Active" : `Status Update (${phaseName || "--"})`;
+}
+
 function buildTelegramCaption() {
   const activeSym = getActiveSymbol() || "";
   const symbol = UI.symbolSelect
@@ -20316,7 +20370,7 @@ function buildTelegramCaption() {
   const ts = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
 
   let lines = [];
-  lines.push(`<b>📊 IT Guru Signal — Entry Active</b>`);
+  lines.push(`<b>📊 IT Guru Signal — ${telegramCaptionHeadline(phase, trade)}</b>`);
   lines.push(``);
   lines.push(`<b>Symbol:</b> ${symbol}`);
   lines.push(`<b>Timeframe:</b> ${tfLabel}`);
@@ -20325,8 +20379,13 @@ function buildTelegramCaption() {
   lines.push(`<b>Order Type:</b> ${orderType}`);
 
   if (trade) {
+    const livePrice = candles.length > 0 ? candles[candles.length - 1].close : null;
     lines.push(``);
     lines.push(`<b>📍 Entry:</b> <code>${fmtPrice(trade.entry, activeSym)}</code>`);
+    if (Number.isFinite(livePrice)) {
+      const driftAtr = trade.atrAtEntry > 0 ? Math.abs(livePrice - trade.entry) / trade.atrAtEntry : null;
+      lines.push(`<b>📡 Price Now:</b> <code>${fmtPrice(livePrice, activeSym)}</code>${driftAtr != null ? ` (${fmt(driftAtr, 2)} ATR from entry)` : ""}`);
+    }
     lines.push(`<b>🛑 SL:</b> <code>${fmtPrice(trade.sl, activeSym)}</code>`);
     if (trade.tp != null && !pureTrailingEnabled) {
       lines.push(`<b>🎯 TP:</b> <code>${fmtPrice(trade.tp, activeSym)}</code>`);
@@ -21037,12 +21096,20 @@ async function testTelegramConnection() {
  * Capture chart + build caption and send to Telegram.
  * Shows status in the signal log and the Telegram status label.
  */
-async function sendTelegramAlert() {
+async function sendTelegramAlert(options = {}) {
   if (UI.telegramBotToken) telegramBotToken = UI.telegramBotToken.value;
   if (UI.telegramChatId) telegramChatId = UI.telegramChatId.value;
 
   if (focusedPanelSymbol && multiPanels.has(focusedPanelSymbol)) {
-    return sendPanelTelegramAlert(focusedPanelSymbol);
+    return sendPanelTelegramAlert(focusedPanelSymbol, options);
+  }
+
+  if (options.requireActiveEntry) {
+    const readiness = evaluateTelegramDispatchReadiness({ phase, trade, breakout, candles });
+    if (!readiness.ready) {
+      addLog(`📤 Telegram alert skipped — ${readiness.reason}`);
+      return;
+    }
   }
 
   const pending = findPendingTradeSignal();
@@ -21106,9 +21173,17 @@ async function sendTelegramAlert() {
  * Activates the panel's state, captures its mini-chart screenshot,
  * builds a caption using the panel's data, and sends to Telegram.
  */
-async function sendPanelTelegramAlert(symbol) {
+async function sendPanelTelegramAlert(symbol, options = {}) {
   const p = multiPanels.get(symbol);
   if (!p) return;
+
+  if (options.requireActiveEntry) {
+    const readiness = evaluateTelegramDispatchReadiness({ phase: p.phase, trade: p.trade, breakout: p.breakout, candles: p.candles });
+    if (!readiness.ready) {
+      addLog(`📤 [${symbol}] Telegram alert skipped — ${readiness.reason}`);
+      return;
+    }
+  }
 
   if (UI.telegramBotToken) telegramBotToken = UI.telegramBotToken.value;
   if (UI.telegramChatId) telegramChatId = UI.telegramChatId.value;
@@ -21204,7 +21279,7 @@ function buildPanelTelegramCaption(p) {
   }
 
   let lines = [];
-  lines.push(`<b>📊 IT Guru Signal — Entry Active</b>`);
+  lines.push(`<b>📊 IT Guru Signal — ${telegramCaptionHeadline(p.phase, p.trade)}</b>`);
   lines.push(``);
   lines.push(`<b>Symbol:</b> ${symLabel}`);
   lines.push(`<b>Timeframe:</b> ${tfLabel}`);
@@ -21213,8 +21288,13 @@ function buildPanelTelegramCaption(p) {
   lines.push(`<b>Order Type:</b> ${orderType}`);
 
   if (p.trade) {
+    const livePrice = Array.isArray(p.candles) && p.candles.length > 0 ? p.candles[p.candles.length - 1].close : null;
     lines.push(``);
     lines.push(`<b>📍 Entry:</b> <code>${fmtPrice(p.trade.entry, p.symbol)}</code>`);
+    if (Number.isFinite(livePrice)) {
+      const driftAtr = p.trade.atrAtEntry > 0 ? Math.abs(livePrice - p.trade.entry) / p.trade.atrAtEntry : null;
+      lines.push(`<b>📡 Price Now:</b> <code>${fmtPrice(livePrice, p.symbol)}</code>${driftAtr != null ? ` (${fmt(driftAtr, 2)} ATR from entry)` : ""}`);
+    }
     lines.push(`<b>🛑 SL:</b> <code>${fmtPrice(p.trade.sl, p.symbol)}</code>`);
     if (p.trade.tp != null && !p.filters.pureTrailingEnabled) {
       lines.push(`<b>🎯 TP:</b> <code>${fmtPrice(p.trade.tp, p.symbol)}</code>`);
@@ -31325,7 +31405,7 @@ function connectPanel(p) {
     if (msg.candles && telegramAutoSend && p.phase === "TRADE" && p.trade && !p._tradeTelegramSent) {
       p._tradeTelegramSent = true;
       addLog("📤 Telegram auto-send triggered — active TRADE signal");
-      setTimeout(() => sendPanelTelegramAlert(p.symbol), CHART_RENDER_DELAY_MS);
+      setTimeout(() => sendPanelTelegramAlert(p.symbol, { requireActiveEntry: true }), CHART_RENDER_DELAY_MS);
     }
 
     _multiPanelProcessing = null;
