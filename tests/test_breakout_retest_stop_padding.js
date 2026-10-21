@@ -120,7 +120,10 @@ test('intrabar entries get extra stop room, confirmed-close entries do not', () 
   assert.equal(getEntryModeStopPadAtr(undefined), 0);
 });
 
-const analyzer = stats => ({ getStats: () => stats });
+const analyzer = stats => ({ 
+  getStats: () => stats,
+  getTrailingStats: () => stats
+});
 
 test('no adaptive pad without an analyzer or a matching strategy', () => {
   assert.equal(getSlThenTpStopPadAtr('breakout_retest', null), 0);

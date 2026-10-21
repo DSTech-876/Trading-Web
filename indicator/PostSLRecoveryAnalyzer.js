@@ -360,6 +360,37 @@
       })).sort((x, y) => y.total_losses - x.total_losses);
     }
 
+    /** Per-strategy aggregates over the trailing N most recent records. */
+    getTrailingStats(windowSize = 5) {
+      const trailingRecords = this.records.slice(-Math.max(1, windowSize));
+      const by = {};
+      for (const r of trailingRecords) {
+        const s = by[r.strategy] || (by[r.strategy] = {
+          strategy: r.strategy, losses: 0, a: 0, b: 0, c: 0, recMin: [], recDist: [], classes: {}
+        });
+        s.losses++;
+        if (r.scenarioA.eventual_tp_reached) {
+          s.a++;
+          s.recMin.push(r.scenarioA.minutes_to_tp_after_sl);
+          s.recDist.push(r.scenarioA.max_favorable_move);
+        }
+        if (r.scenarioB.tp_hit) s.b++;
+        if (r.scenarioC.tp_hit) s.c++;
+        s.classes[r.classification] = (s.classes[r.classification] || 0) + 1;
+      }
+      const avg = arr => arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : null;
+      return Object.values(by).map(s => ({
+        strategy: s.strategy,
+        total_losses: s.losses,
+        scenario_a_pct: pct(s.a, s.losses),
+        scenario_b_pct: pct(s.b, s.losses),
+        scenario_c_pct: pct(s.c, s.losses),
+        avg_recovery_minutes: avg(s.recMin),
+        avg_recovery_distance: avg(s.recDist),
+        classifications: s.classes
+      })).sort((x, y) => y.total_losses - x.total_losses);
+    }
+
     getRecommendations() {
       const out = {};
       for (const s of this.getStats()) {

@@ -2093,12 +2093,14 @@ function getVolatilityAdjustedStopBufferAtr(symbol, granSec, breakoutRef) {
  * ran to the original target (scenario A).  A high scenario-A rate means the
  * direction was right and the stop was simply inside the noise, so new stops of
  * that strategy get extra ATR room (capped) until the rate drops back.
+ * Uses trailing stats (last 5+ losses) to avoid stale historical data keeping
+ * stops widened after recent outcomes have changed.
  * Returns the extra buffer in ATR units (0 when there is no evidence). */
 function getSlThenTpStopPadAtr(strategyKey, analyzer) {
   const src = analyzer || (typeof window !== "undefined" ? window.postSLRecoveryAnalyzer : null);
-  if (!src || typeof src.getStats !== "function") return 0;
+  if (!src || typeof src.getTrailingStats !== "function") return 0;
   let stats;
-  try { stats = src.getStats(); } catch (e) { return 0; }
+  try { stats = src.getTrailingStats(SL_THEN_TP_PAD_MIN_SAMPLE); } catch (e) { return 0; }
   if (!Array.isArray(stats)) return 0;
   const row = stats.find(s => s && String(s.strategy) === String(strategyKey));
   if (!row) return 0;
@@ -16121,15 +16123,13 @@ function isBearishEngulfing(prev, curr) {
  * TP afterwards" pattern.  Keeping the anchor at/beyond the level makes the
  * stop match the actual invalidation point.
  *
- * @param {{dir: string, entry: number, zoneExtreme: ?number, swingAnchor: ?number,
- *          breakoutLevel: ?number, atrRef: number, bufferAtr: number}} opts
- * @returns {{anchor: ?number, anchorSource: string, zoneTooTight: boolean, levelExtended: boolean}}
+ * @param {Array} candleList - List of candle objects to scan.
+ * @param {number} retestIdx - Index of the retest candle (or null/undefined).
+ * @param {number} indecisionIdx - Index of the indecision candle (or null/undefined).
+ * @param {number} confirmIdx - Index of the confirmation/entry candle.
+ * @param {Object} confirmCandle - The confirmation/entry candle object itself.
+ * @returns {Array} Array of candles spanning the retest → confirmation zone.
  */
-/* Collect every candle that forms the retest → confirmation leg so the stop can
- * be anchored beyond the full adverse excursion of the setup, including the
- * confirmation/entry candle itself (which is still forming on intrabar entries
- * and was previously ignored — its sweep repeatedly took out the stop before
- * price ran to target). */
 function collectBreakoutRetestZoneCandles(candleList, retestIdx, indecisionIdx, confirmIdx, confirmCandle) {
   const list = Array.isArray(candleList) ? candleList : [];
   const zoneIdxs = [retestIdx, indecisionIdx].filter(i => Number.isFinite(i) && i >= 0 && i < list.length);
@@ -16145,6 +16145,22 @@ function collectBreakoutRetestZoneCandles(candleList, retestIdx, indecisionIdx, 
   return out;
 }
 
+/* Resolve the retest/indecision zone into a structural stop anchor, accounting for
+ * zone tightness, swing fallback, and breakout-level protection. The breakout zone
+ * frames the retest → confirmation leg; the stop should anchor beyond its full
+ * adverse excursion so price must truly invalidate the setup (break the level) to
+ * sweep the stop.  A zone that is too tight (< 0.9 ATR of risk) is deemed too
+ * shallow to be a reliable anchor and falls back to the swing anchor.  Finally,
+ * the setup is only invalidated once price trades back through the level it
+ * broke, so a stop parked *inside* the retest zone is routinely swept by the
+ * deeper retest wick moments before price continues to target — the "SL first,
+ * TP afterwards" pattern.  Keeping the anchor at/beyond the level makes the
+ * stop match the actual invalidation point.
+ *
+ * @param {{dir: string, entry: number, zoneExtreme: ?number, swingAnchor: ?number,
+ *          breakoutLevel: ?number, atrRef: number, bufferAtr: number}} opts
+ * @returns {{anchor: ?number, anchorSource: string, zoneTooTight: boolean, levelExtended: boolean}}
+ */
 function resolveBreakoutRetestStopAnchor(opts) {
   const o = opts || {};
   const dir = o.dir === "BULL" ? "BULL" : "BEAR";
@@ -16433,6 +16449,17 @@ function buildTrade(confirmCandle, confirmIdx) {
       addLog(`⚠ Trade REJECTED — R:R ${fmt(actualRR, 1)} below minimum ${fmt(effectiveMinRR, 1)}`);
       return;
     }
+    /* Explicit risk-distance gate: when adaptive stop padding is applied (slThenTpPadAtr > 0),
+       ensure the resulting risk distance is not excessive; widened stops should not create
+       unreasonably large stop distances that defeat risk management. */
+    if (slThenTpPadAtr > 0 && atrRef > 0) {
+      const maxRiskAtr = 2.5;
+      const riskAtr = risk / atrRef;
+      if (riskAtr > maxRiskAtr) {
+        addLog(`⚠ Trade REJECTED — risk ${fmt(riskAtr, 1)} ATR too large with adaptive SL widening (max ${fmt(maxRiskAtr, 1)} ATR)`);
+        return;
+      }
+    }
     const staleCatchUpReason = evaluateCatchUpEntryAgainstLiveMarket("BULL", confirmIdx, entry, sl, tp, atrRef);
     if (staleCatchUpReason) {
       addLog(`⚠ Trade REJECTED — ${staleCatchUpReason}`);
@@ -16498,6 +16525,17 @@ function buildTrade(confirmCandle, confirmIdx) {
     if (minRREnabled && actualRR < effectiveMinRR) {
       addLog(`⚠ Trade REJECTED — R:R ${fmt(actualRR, 1)} below minimum ${fmt(effectiveMinRR, 1)}`);
       return;
+    }
+    /* Explicit risk-distance gate: when adaptive stop padding is applied (slThenTpPadAtr > 0),
+       ensure the resulting risk distance is not excessive; widened stops should not create
+       unreasonably large stop distances that defeat risk management. */
+    if (slThenTpPadAtr > 0 && atrRef > 0) {
+      const maxRiskAtr = 2.5;
+      const riskAtr = risk / atrRef;
+      if (riskAtr > maxRiskAtr) {
+        addLog(`⚠ Trade REJECTED — risk ${fmt(riskAtr, 1)} ATR too large with adaptive SL widening (max ${fmt(maxRiskAtr, 1)} ATR)`);
+        return;
+      }
     }
     const staleCatchUpReasonBear = evaluateCatchUpEntryAgainstLiveMarket("BEAR", confirmIdx, entry, sl, tp, atrRef);
     if (staleCatchUpReasonBear) {
