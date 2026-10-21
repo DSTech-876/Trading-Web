@@ -479,6 +479,10 @@ const SIGNAL_DEFAULT_MAX_DISTANCE_ATR = 0.9; /* invalidate alerts once price has
 const REPLAY_ENTRY_MIN_RISK_REMAINING = 0.5; /* a catch-up entry needs at least half of its stop distance left at the live price */
 const HIGH_CONFIDENCE_TELEGRAM_THRESHOLD = 75; /* min confidenceScore required when "High Confidence Only" preference is on */
 const MULTI_VIEW_REFRESH_DEFAULT_MIN = 60;  /* refresh all multi-view panels hourly by default */
+const INTRABAR_STOP_PAD_ATR        = 0.15; /* extra stop room when entering before the confirmation candle closes */
+const SL_THEN_TP_PAD_MAX_ATR       = 0.30; /* cap for the adaptive pad added when stops are swept before TP */
+const SL_THEN_TP_PAD_MIN_SAMPLE    = 5;    /* minimum analysed losses before the adaptive pad kicks in */
+const SL_THEN_TP_PAD_THRESHOLD_PCT = 50;   /* % of losses that later reached TP before the pad is applied */
 const AGGRESSIVE_ENTRY_PROGRESS_ATR_DEFAULT = 0.18; /* intrabar entry needs at least this much progress beyond the level */
 const ENTRY_QUALITY_PROGRESS_ATR_DEFAULT    = 0.22; /* confirmed entries must displace away from the level by this ATR amount */
 const RECENT_LOSS_PAUSE_COUNT_DEFAULT       = 2;    /* pause fresh entries after repeated same-side losses */
@@ -2082,6 +2086,34 @@ function getVolatilityAdjustedStopBufferAtr(symbol, granSec, breakoutRef) {
   else if (mtype === "step") extra += 0.04;
   if (breakoutRef && breakoutRef.volumeSpike) extra += 0.05;
   return extra;
+}
+
+/* ---- Adaptive stop padding from the Post-SL recovery analytics ----
+ * The analyser records, for every stopped-out trade, whether price afterwards
+ * ran to the original target (scenario A).  A high scenario-A rate means the
+ * direction was right and the stop was simply inside the noise, so new stops of
+ * that strategy get extra ATR room (capped) until the rate drops back.
+ * Returns the extra buffer in ATR units (0 when there is no evidence). */
+function getSlThenTpStopPadAtr(strategyKey, analyzer) {
+  const src = analyzer || (typeof window !== "undefined" ? window.postSLRecoveryAnalyzer : null);
+  if (!src || typeof src.getStats !== "function") return 0;
+  let stats;
+  try { stats = src.getStats(); } catch (e) { return 0; }
+  if (!Array.isArray(stats)) return 0;
+  const row = stats.find(s => s && String(s.strategy) === String(strategyKey));
+  if (!row) return 0;
+  const losses = Number(row.total_losses);
+  const pct = Number(row.scenario_a_pct);
+  if (!Number.isFinite(losses) || losses < SL_THEN_TP_PAD_MIN_SAMPLE) return 0;
+  if (!Number.isFinite(pct) || pct <= SL_THEN_TP_PAD_THRESHOLD_PCT) return 0;
+  const excess = (pct - SL_THEN_TP_PAD_THRESHOLD_PCT) / (100 - SL_THEN_TP_PAD_THRESHOLD_PCT);
+  return Math.min(SL_THEN_TP_PAD_MAX_ATR, SL_THEN_TP_PAD_MAX_ATR * excess);
+}
+
+/* Entries taken before the confirmation candle closes commit to a stop while the
+ * candle can still extend against the trade, so they need the extra pad. */
+function getEntryModeStopPadAtr(entryMode) {
+  return entryMode === "aggressive_intrabar" ? INTRABAR_STOP_PAD_ATR : 0;
 }
 
 function getMaxEntryDriftAtr(symbol, granSec, isMtf = false) {
@@ -16093,6 +16125,26 @@ function isBearishEngulfing(prev, curr) {
  *          breakoutLevel: ?number, atrRef: number, bufferAtr: number}} opts
  * @returns {{anchor: ?number, anchorSource: string, zoneTooTight: boolean, levelExtended: boolean}}
  */
+/* Collect every candle that forms the retest → confirmation leg so the stop can
+ * be anchored beyond the full adverse excursion of the setup, including the
+ * confirmation/entry candle itself (which is still forming on intrabar entries
+ * and was previously ignored — its sweep repeatedly took out the stop before
+ * price ran to target). */
+function collectBreakoutRetestZoneCandles(candleList, retestIdx, indecisionIdx, confirmIdx, confirmCandle) {
+  const list = Array.isArray(candleList) ? candleList : [];
+  const zoneIdxs = [retestIdx, indecisionIdx].filter(i => Number.isFinite(i) && i >= 0 && i < list.length);
+  const out = [];
+  if (zoneIdxs.length > 0) {
+    const start = Math.min(...zoneIdxs);
+    const end = Number.isFinite(confirmIdx)
+      ? Math.min(Math.max(confirmIdx, Math.max(...zoneIdxs)), list.length - 1)
+      : Math.max(...zoneIdxs);
+    for (let i = start; i <= end; i++) if (list[i]) out.push(list[i]);
+  }
+  if (confirmCandle && out.indexOf(confirmCandle) === -1) out.push(confirmCandle);
+  return out;
+}
+
 function resolveBreakoutRetestStopAnchor(opts) {
   const o = opts || {};
   const dir = o.dir === "BULL" ? "BULL" : "BEAR";
@@ -16283,9 +16335,19 @@ function buildTrade(confirmCandle, confirmIdx) {
                  : _gran <= LOWER_TF_5M_SEC  ? SL_ATR_BUF_5M
                  : SL_ATR_BUF_DEFAULT;
   const atrRef = getAtrReference(confirmIdx);
-  const extraStopAtr = getVolatilityAdjustedStopBufferAtr(symbol, _gran, breakout);
   const maxEntryDriftAtr = getMaxEntryDriftAtr(symbol, _gran, false);
   const entryMode = getCurrentEntryMode();
+  /* Faster (intrabar) entries commit to a stop while the confirmation candle can
+     still wick against the trade, and the Post-SL analytics tell us when stops of
+     this strategy are being swept before price runs to target — both add room. */
+  const intrabarStopPadAtr = getEntryModeStopPadAtr(entryMode);
+  const slThenTpPadAtr = getSlThenTpStopPadAtr("breakout_retest");
+  const extraStopAtr = getVolatilityAdjustedStopBufferAtr(symbol, _gran, breakout)
+    + intrabarStopPadAtr + slThenTpPadAtr;
+  if (slThenTpPadAtr > 0 && !(breakout && breakout._slThenTpPadLogged === confirmIdx)) {
+    addLog(`ℹ️ SL widened by ${fmt(slThenTpPadAtr, 2)} ATR — recent breakout-retest stops were swept before price reached target.`);
+    if (breakout) breakout._slThenTpPadLogged = confirmIdx;
+  }
   const timingQuality = evaluateEntryTimingQuality(breakout.dir, confirmCandle, breakout.level, atrRef, {
     symbol,
     granSec: _gran,
@@ -16323,8 +16385,13 @@ function buildTrade(confirmCandle, confirmIdx) {
    * risk without sacrificing structural validity.  Fall back to the swing-based SL
    * when retestInfo / indecisionInfo is unavailable (e.g. historical re-processing
    * edge cases). */
-  const rtCandle = retestInfo    && retestInfo.candleIdx    < candles.length ? candles[retestInfo.candleIdx]    : null;
-  const inCandle = indecisionInfo && indecisionInfo.candleIdx < candles.length ? candles[indecisionInfo.candleIdx] : null;
+  const zoneCandles = collectBreakoutRetestZoneCandles(
+    candles,
+    retestInfo ? retestInfo.candleIdx : null,
+    indecisionInfo ? indecisionInfo.candleIdx : null,
+    confirmIdx,
+    confirmCandle
+  );
 
   if (breakout.dir === "BULL") {
     const entry = confirmCandle.close;
@@ -16336,7 +16403,7 @@ function buildTrade(confirmCandle, confirmIdx) {
 
     /* SL anchor: lowest low of the retest/indecision zone; fall back to swing,
        and never above the broken breakout level (retest-wick stop hunts). */
-    const zoneLows = [rtCandle, inCandle].filter(Boolean).map(c => c.low);
+    const zoneLows = zoneCandles.map(c => c.low).filter(Number.isFinite);
     const anchorInfo = resolveBreakoutRetestStopAnchor({
       dir: "BULL",
       entry,
@@ -16376,6 +16443,7 @@ function buildTrade(confirmCandle, confirmIdx) {
       entry, sl, tp, dir: "BULL", rr: actualRR, scalpingMode: scalpingModeEnabled,
       entryIdx: confirmIdx, outcomeStartIdx: confirmIdx + 1, symbol: getActiveSymbol(),
       atrAtEntry: atrRef, stopBufferAtr: slAtrBuf + extraStopAtr, entryDriftAtr,
+      intrabarStopPadAtr, slThenTpPadAtr,
       slAnchorSource: anchorInfo.anchorSource,
       validUntilMs: Date.now() + getSignalValidityMs(), maxEntryDistanceAtr: getSignalDistanceLimitAtr(),
       entryMode, entryProgressAtr: timingQuality.progressAtr, entryBodyAtr: timingQuality.bodyAtr,
@@ -16401,7 +16469,7 @@ function buildTrade(confirmCandle, confirmIdx) {
 
     /* SL anchor: highest high of the retest/indecision zone; fall back to swing,
        and never below the broken breakout level (retest-wick stop hunts). */
-    const zoneHighs = [rtCandle, inCandle].filter(Boolean).map(c => c.high);
+    const zoneHighs = zoneCandles.map(c => c.high).filter(Number.isFinite);
     const anchorInfo = resolveBreakoutRetestStopAnchor({
       dir: "BEAR",
       entry,
@@ -16441,6 +16509,7 @@ function buildTrade(confirmCandle, confirmIdx) {
       entry, sl, tp, dir: "BEAR", rr: actualRR, scalpingMode: scalpingModeEnabled,
       entryIdx: confirmIdx, outcomeStartIdx: confirmIdx + 1, symbol: getActiveSymbol(),
       atrAtEntry: atrRef, stopBufferAtr: slAtrBuf + extraStopAtr, entryDriftAtr,
+      intrabarStopPadAtr, slThenTpPadAtr,
       slAnchorSource: anchorInfo.anchorSource,
       validUntilMs: Date.now() + getSignalValidityMs(), maxEntryDistanceAtr: getSignalDistanceLimitAtr(),
       entryMode, entryProgressAtr: timingQuality.progressAtr, entryBodyAtr: timingQuality.bodyAtr,
