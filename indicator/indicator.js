@@ -3743,6 +3743,11 @@ let candleInterpEnabled     = false;    /* master toggle */
 let candleInterpHistory     = [];       /* alert history */
 let lastCandleInterpIdx     = -999;     /* cooldown tracker */
 let autoTradeCandleInterp   = true;     /* auto-trade sub-toggle */
+/* Adaptive SL-buffer multiplier — only ever widens (never below 1.0) when
+   PostSLRecoveryAnalyzer shows losses that later reached the original TP
+   (Scenario A / "stop too tight for the structure"). See
+   applyRecoveryAdviceToCandleInterp(). */
+let candleInterpSlBufferAdj = 1.0;
 
 const CANDLE_INTERP_COOLDOWN      = 5;    /* min candles between signals */
 const CANDLE_INTERP_MAX_HISTORY   = 30;   /* max stored alerts */
@@ -3756,6 +3761,10 @@ const CANDLE_INTERP_MIN_RR        = 2.0;  /* minimum acceptable R:R */
 const CANDLE_INTERP_SL_BUFFER_ATR = 0.3;  /* ATR buffer beyond wick for SL */
 const CANDLE_INTERP_LEVEL_TOL_ATR = 0.5;  /* ATR tolerance for "at key level" */
 const CANDLE_INTERP_VOL_SPIKE     = 1.5;  /* volume spike multiplier vs avg */
+const CANDLE_INTERP_SL_BUFFER_ADJ_MAX   = 1.6;  /* cap on adaptive widening (1.6× base buffer) */
+const CANDLE_INTERP_SL_BUFFER_ADJ_STEP  = 0.2;  /* widening increment per flagged review */
+const CANDLE_INTERP_RECOVERY_MIN_LOSSES = 3;    /* min sample size before acting on recovery stats */
+const CANDLE_INTERP_RECOVERY_WINDOW     = 10;   /* trailing losses considered (recency-weighted) */
 
 /* ================= STRATEGY 19: GRID SCALPER V2 ================= */
 
@@ -9523,6 +9532,7 @@ function sweepOppositeTradeTracking(candle) {
       recovery.onChange = () => {
         recovery.renderDashboard(document.getElementById("tradeRecoveryAnalytics"));
         recovery.getAlerts().forEach(a => addLog(`📊 ${a}`));
+        try { applyRecoveryAdviceToCandleInterp(); } catch (e) { /* optional */ }
       };
     }
   }
@@ -9547,6 +9557,30 @@ function applyOppositeTradeAdviceToGridScalper() {
       gridScalperMAEntryDelayMode = want;
     }
   }).catch(() => {});
+}
+
+/**
+ * Widen the Candle Interpretation SL buffer when PostSLRecoveryAnalyzer shows
+ * recent SL losses would frequently have reached the original TP anyway
+ * (Scenario A — "stop too tight for the structure"). Only ever widens the
+ * buffer (never tightens below 1.0×), and requires a minimum sample size so a
+ * single losing trade can't swing the setting.
+ */
+function applyRecoveryAdviceToCandleInterp() {
+  const recovery = typeof window !== "undefined" ? window.postSLRecoveryAnalyzer : null;
+  if (!recovery || typeof recovery.getTrailingStats !== "function") return;
+  const stats = recovery.getTrailingStats(CANDLE_INTERP_RECOVERY_WINDOW)
+    .find(s => s.strategy === "candle_interp");
+  if (!stats || stats.total_losses < CANDLE_INTERP_RECOVERY_MIN_LOSSES) return;
+
+  const threshold = Number.isFinite(recovery.threshold) ? recovery.threshold : 60;
+  if (stats.scenario_a_pct > threshold && candleInterpSlBufferAdj < CANDLE_INTERP_SL_BUFFER_ADJ_MAX) {
+    const prev = candleInterpSlBufferAdj;
+    candleInterpSlBufferAdj = Math.min(CANDLE_INTERP_SL_BUFFER_ADJ_MAX, candleInterpSlBufferAdj + CANDLE_INTERP_SL_BUFFER_ADJ_STEP);
+    if (candleInterpSlBufferAdj !== prev) {
+      addLog(`🕯 Candle Interp: ${stats.scenario_a_pct}% of the last ${stats.total_losses} SL losses later reached the original TP — widening SL buffer ${prev.toFixed(1)}x → ${candleInterpSlBufferAdj.toFixed(1)}x`);
+    }
+  }
 }
 
 function monitorCustomStrategyOutcomes(candle) {
@@ -11329,7 +11363,7 @@ function detectCandleInterpretation() {
   if (dir === "BULL") {
     /* SL below the lowest low in the sequence + buffer */
     const seqLow = Math.min(...candles.slice(Math.max(0, idx - CANDLE_INTERP_SEQ_LOOKBACK), idx + 1).map(x => x.low));
-    sl = seqLow - slBuffer * _profParams.slBufferMult;
+    sl = seqLow - slBuffer * _profParams.slBufferMult * candleInterpSlBufferAdj;
     /* TP at nearest resistance or R:R minimum */
     const resistance = detectCandleInterpKeyLevels().filter(l => l.type === "RESISTANCE" && l.price > entry);
     if (resistance.length > 0) {
@@ -11340,7 +11374,7 @@ function detectCandleInterpretation() {
   } else {
     /* SL above the highest high in the sequence + buffer */
     const seqHigh = Math.max(...candles.slice(Math.max(0, idx - CANDLE_INTERP_SEQ_LOOKBACK), idx + 1).map(x => x.high));
-    sl = seqHigh + slBuffer * _profParams.slBufferMult;
+    sl = seqHigh + slBuffer * _profParams.slBufferMult * candleInterpSlBufferAdj;
     /* TP at nearest support or R:R minimum */
     const support = detectCandleInterpKeyLevels().filter(l => l.type === "SUPPORT" && l.price < entry);
     if (support.length > 0) {
