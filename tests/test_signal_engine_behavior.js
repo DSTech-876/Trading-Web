@@ -441,6 +441,7 @@ test('cleanupPendingSignalsForSymbol expires BULL signals when price drops below
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [
       { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-1', symbol: 'R_100' }
     ],
@@ -478,6 +479,7 @@ test('cleanupPendingSignalsForSymbol expires BEAR signals when price rises above
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [
       { result: 'PENDING', entry: 100, dir: 'BEAR', createdAtMs: now - 100, signalId: 'sig-2', symbol: 'R_100' }
     ],
@@ -515,6 +517,7 @@ test('cleanupPendingSignalsForSymbol preserves signals at boundary price (exactl
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [
       { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-3', symbol: 'R_100' }
     ],
@@ -552,6 +555,7 @@ test('cleanupPendingSignalsForSymbol skips price cleanup with invalid ATR but re
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [
       { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-4', symbol: 'R_100' }
     ],
@@ -589,6 +593,7 @@ test('cleanupPendingSignalsForSymbol preserves keepSignalId and tracked trades',
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [
       { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 100, signalId: 'sig-keep', symbol: 'R_100' }
     ],
@@ -626,6 +631,7 @@ test('cleanupPendingSignalsForSymbol evaluates multi-panel signals with price ac
   const now = 5_000;
   const context = {
     module: { exports: {} },
+    _historicalProcessing: false,
     signalHistory: [],
     multiPanels: new Map([
       ['panel-1', {

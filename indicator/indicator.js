@@ -1721,6 +1721,17 @@ function logSignalLifecycleEvent(symbol, stage, details = null) {
 function cleanupPendingSignalsForSymbol(symbol, strategyType = null, options = {}) {
   const sym = symbol || getActiveSymbol();
   if (!sym) return 0;
+  /* Skip entirely during a full-history replay (triggered by every reconnect,
+     including watchdog-forced ones, and by processAllCandles() in general).
+     processAllCandles() resets `trade`/`monitoringTrade` to null/false at the
+     top so it can deterministically rebuild phase state from scratch, which
+     otherwise makes a legitimately still-pending trade look "orphaned" here
+     (staleByOrphan) purely because of that transient reset — causing it to be
+     expired and then immediately re-created as a duplicate signal/trade with
+     a new signalId before remapPendingSignalIndices() gets a chance to restore
+     the original. The live per-candle path (_historicalProcessing === false)
+     still runs this cleanup normally once streaming resumes. */
+  if (_historicalProcessing) return 0;
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const staleAfterMs = Number.isFinite(options.staleAfterMs)
     ? options.staleAfterMs
@@ -24760,19 +24771,26 @@ function stopPing() {
   }
 }
 
+/* Shared stall check for the single-panel public feed — called both from the
+   periodic interval and immediately on visibilitychange (see
+   resyncWatchdogsOnVisible()), since a backgrounded tab can throttle
+   setInterval for minutes at a time, letting a real stall go undetected far
+   longer than WATCHDOG_TIMEOUT_MS until the tab regains focus. */
+function checkWatchdogStall() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const elapsed = Date.now() - lastDataTimestamp;
+  if (elapsed >= WATCHDOG_TIMEOUT_MS) {
+    addLog(`⚠️ Watchdog: No market data for ${Math.round(elapsed / 1000)}s — forcing reconnect`);
+    showToast("Stream Stall Detected", "No data received — reconnecting…", "warning", TOAST_WARNING_DURATION_MS);
+    intentionalClose = false;
+    ws.close();
+  }
+}
+
 function startWatchdog() {
   stopWatchdog();
   lastDataTimestamp = Date.now();
-  watchdogTimer = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const elapsed = Date.now() - lastDataTimestamp;
-    if (elapsed >= WATCHDOG_TIMEOUT_MS) {
-      addLog(`⚠️ Watchdog: No market data for ${Math.round(elapsed / 1000)}s — forcing reconnect`);
-      showToast("Stream Stall Detected", "No data received — reconnecting…", "warning", TOAST_WARNING_DURATION_MS);
-      intentionalClose = false;
-      ws.close();
-    }
-  }, WATCHDOG_CHECK_INTERVAL_MS);
+  watchdogTimer = setInterval(checkWatchdogStall, WATCHDOG_CHECK_INTERVAL_MS);
 }
 
 function stopWatchdog() {
@@ -24786,18 +24804,22 @@ function feedWatchdog() {
   lastDataTimestamp = Date.now();
 }
 
+/* Shared per-panel stall check (see checkWatchdogStall() above for why this
+   also needs to run outside the throttle-prone setInterval). */
+function checkPanelWatchdogStall(p) {
+  if (!p.ws || p.ws.readyState !== WebSocket.OPEN) return;
+  const elapsed = Date.now() - p._lastDataTs;
+  if (elapsed >= WATCHDOG_TIMEOUT_MS) {
+    addLog(`⚠️ [Multi] ${p.symbol} Watchdog: No data for ${Math.round(elapsed / 1000)}s — forcing reconnect`);
+    p.intentionalClose = false;
+    p.ws.close();
+  }
+}
+
 function startPanelWatchdog(p) {
   stopPanelWatchdog(p);
   p._lastDataTs = Date.now();
-  p._watchdogTimer = setInterval(() => {
-    if (!p.ws || p.ws.readyState !== WebSocket.OPEN) return;
-    const elapsed = Date.now() - p._lastDataTs;
-    if (elapsed >= WATCHDOG_TIMEOUT_MS) {
-      addLog(`⚠️ [Multi] ${p.symbol} Watchdog: No data for ${Math.round(elapsed / 1000)}s — forcing reconnect`);
-      p.intentionalClose = false;
-      p.ws.close();
-    }
-  }, WATCHDOG_CHECK_INTERVAL_MS);
+  p._watchdogTimer = setInterval(() => checkPanelWatchdogStall(p), WATCHDOG_CHECK_INTERVAL_MS);
 }
 
 function stopPanelWatchdog(p) {
@@ -24806,6 +24828,22 @@ function stopPanelWatchdog(p) {
     p._watchdogTimer = null;
   }
 }
+
+/* Backgrounded browser tabs can throttle setInterval timers to run far less
+   often than WATCHDOG_CHECK_INTERVAL_MS (Chrome clamps background-tab timers,
+   and can delay them for minutes), which is why logged stalls sometimes show
+   several hundred seconds of silence despite a 45s threshold — the check
+   itself was simply late. Re-running the stall check immediately when the
+   tab regains focus (instead of waiting for the next throttled tick) catches
+   a real stall right away and avoids sitting on stale data for minutes. */
+function resyncWatchdogsOnVisible() {
+  if (document.visibilityState !== "visible") return;
+  checkWatchdogStall();
+  for (const p of multiPanels.values()) {
+    checkPanelWatchdogStall(p);
+  }
+}
+document.addEventListener("visibilitychange", resyncWatchdogsOnVisible);
 
 function remapPendingSignalIndices() {
   if (!candles || candles.length === 0) return;
@@ -24871,9 +24909,14 @@ function remapPendingSignalIndices() {
         dir:   pendingBreakout.dir,
         symbol: pendingBreakout.symbol,
         rr:    pendingBreakout.rr,
-        outcomeStartIdx: pendingBreakout.candleIdx || 0
+        outcomeStartIdx: pendingBreakout.candleIdx || 0,
+        signalId: pendingBreakout.signalId || null
       };
       monitoringTrade = true;
+      /* Keep phase consistent with the restored trade so UI/phase-gated logic
+         (enforceTradeLifecycleIntegrity, lifecycle alerts, the chart phase
+         badge) doesn't think the engine is still hunting for a setup. */
+      if (phase !== "TRADE") setPhase("TRADE");
       addLog(`🔄 Restored pending breakout trade monitoring after reconnect (${pendingBreakout.dir} @ ${fmt(pendingBreakout.entry, 4)})`);
     }
     remapped++;
