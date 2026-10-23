@@ -195,3 +195,54 @@ test('remapPendingSignalIndices remaps the repeat-setup guard by epoch against t
      index 1 must be corrected, not left pointing at the wrong candle. */
   assert.equal(context.resolvedBreakoutSetups.get('R_75').closedAtIdx, 2);
 });
+
+test('remapPendingSignalIndices restores trade state and phase when a PENDING breakout signal survives reconnect', () => {
+  const context = {
+    module: { exports: {} },
+    Map,
+    addLog: () => {},
+    fmt: (v) => v,
+    getActiveSymbol: () => 'R_75',
+    candles: [
+      { epoch: 1000 }, { epoch: 1060 }, { epoch: 1120 }, { epoch: 1180 }, { epoch: 1240 }
+    ],
+    liquiditySweepHistory: [], stopLossHuntHistory: [], failedPinBarHistory: [],
+    fibScalpHistory: [], po3History: [], gridScalperMAHistory: [], gridScalperV2History: [],
+    liveScalpHistory: [], nyOpenRangeHistory: [], sessionRangeHistory: [], mtfTopDownHistory: [],
+    tiktokHistory: [], orderblockHistory: [], fvgStratHistory: [], candleInterpHistory: [],
+    po3_4hHistory: [], breakerBlockHistory: [], oteGoldenPocketHistory: [],
+    signalHistory: [
+      { result: 'PENDING', entry: 100, sl: 95, tp: 105, dir: 'BULL', symbol: 'R_75', rr: 2.0, 
+        epoch: 1060, signalId: 'sig-preserved-1' }
+    ],
+    trade: null, monitoringTrade: false,
+    phase: 'WAITING',
+    setPhase: (p) => { context.phase = p; },
+    _reconnectSavedNyTrade: null, _reconnectSavedSessionTrade: null,
+    nyOpenRangeTrade: null, sessionRangeTrade: null,
+    lastScalpCandleIdx: -999, lastLiquiditySweepIdx: -999, lastStopLossHuntIdx: -999,
+    lastFailedPinBarIdx: -999, lastFibScalpIdx: -999, lastPo3Idx: -999,
+    lastGridScalperMAIdx: -999, lastGridScalperV2Idx: -999, lastFvgStratIdx: -999,
+    lastMtfTopDownIdx: -999, lastCandleInterpIdx: -999, lastOrderblockIdx: -999,
+    lastTiktokIdx: -999, lastPo3_4hIdx: -999, lastBreakerBlockIdx: -999,
+    lastOteGoldenPocketIdx: -999,
+    resolvedBreakoutSetups: new Map()
+  };
+  const harness = `${extractFunction('remapPendingSignalIndices')}\nmodule.exports = { remapPendingSignalIndices };`;
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  context.module.exports.remapPendingSignalIndices();
+  
+  /* Verify trade state is restored from the PENDING signal */
+  assert.ok(context.trade !== null, 'trade should be restored from PENDING signal');
+  assert.equal(context.trade.entry, 100, 'trade entry should match signal');
+  assert.equal(context.trade.sl, 95, 'trade SL should match signal');
+  assert.equal(context.trade.tp, 105, 'trade TP should match signal');
+  assert.equal(context.trade.dir, 'BULL', 'trade direction should match signal');
+  assert.equal(context.trade.symbol, 'R_75', 'trade symbol should match signal');
+  assert.equal(context.trade.signalId, 'sig-preserved-1', 'trade signalId should be restored from signal');
+  assert.equal(context.monitoringTrade, true, 'monitoringTrade should be set to true');
+  
+  /* Verify phase is restored to TRADE */
+  assert.equal(context.phase, 'TRADE', 'phase should be set to TRADE when restoring pending trade');
+});
