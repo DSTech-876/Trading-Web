@@ -677,6 +677,53 @@ test('cleanupPendingSignalsForSymbol evaluates multi-panel signals with price ac
   assert.equal(panel2.signalHistory[0].result, 'PENDING');
 });
 
+test('cleanupPendingSignalsForSymbol skips cleanup when _historicalProcessing is true (regression for reconnect replay)', () => {
+  const fnSource = extractFunction('cleanupPendingSignalsForSymbol');
+  const harness = `${fnSource}\nmodule.exports = { cleanupPendingSignalsForSymbol };`;
+  const now = 5_000;
+  const context = {
+    module: { exports: {} },
+    _historicalProcessing: true,
+    signalHistory: [
+      { result: 'PENDING', entry: 100, dir: 'BULL', createdAtMs: now - 1_000_000, signalId: 'sig-stale', symbol: 'R_100' }
+    ],
+    multiPanels: new Map([
+      ['panel-1', {
+        symbol: 'R_100',
+        signalHistory: [
+          { result: 'PENDING', entry: 100, dir: 'BEAR', createdAtMs: now - 1_000_000, signalId: 'sig-stale-panel', symbol: 'R_100' }
+        ]
+      }]
+    ]),
+    candles: [{ close: 97.5 }],
+    getActiveSymbol: () => 'R_100',
+    getSignalValidityMs: () => 30_000,
+    getSignalCreatedAtMs: (entry) => entry.createdAtMs,
+    getAtrReference: () => 2.0,
+    monitoringTrade: false,
+    trade: null,
+    unregisterActiveTradeRecord: () => {},
+    ensureAdaptiveTradeResolutionTimestamp: () => {},
+    transitionSignalLifecycleState: () => {},
+    addLog: () => {},
+    persistSignalHistory: () => {},
+    Number,
+    Math,
+    Date,
+    Map,
+    Array
+  };
+  vm.createContext(context);
+  vm.runInContext(harness, context);
+  const { cleanupPendingSignalsForSymbol } = context.module.exports;
+
+  const cleaned = cleanupPendingSignalsForSymbol('R_100', 'breakout_retest', { now });
+  assert.equal(cleaned, 0, 'should return 0 early when _historicalProcessing is true');
+  assert.equal(context.signalHistory[0].result, 'PENDING', 'stale signal should remain PENDING during historical processing');
+  const panel1 = Array.from(context.multiPanels.values())[0];
+  assert.equal(panel1.signalHistory[0].result, 'PENDING', 'panel signal should remain PENDING during historical processing');
+});
+
 test('monitorTradeOutcome handles non-scalp timeout (time-stop) with trade reset and finalization', () => {
   const fnSource = extractFunction('monitorTradeOutcome');
   const harness = `${fnSource}\nmodule.exports = { monitorTradeOutcome };`;
