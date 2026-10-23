@@ -9527,14 +9527,16 @@ function sweepOppositeTradeTracking(candle) {
   }
   tracker.onCandle(candle, focusedPanelSymbol);
   if (recovery) {
-    recovery.onCandle(candle, focusedPanelSymbol);
     if (!recovery.onChange) {
-      recovery.onChange = () => {
+      recovery.onChange = (rec) => {
         recovery.renderDashboard(document.getElementById("tradeRecoveryAnalytics"));
         recovery.getAlerts().forEach(a => addLog(`📊 ${a}`));
-        try { applyRecoveryAdviceToCandleInterp(); } catch (e) { /* optional */ }
+        if (rec && rec.strategy === "candle_interp") {
+          try { applyRecoveryAdviceToCandleInterp(); } catch (e) { /* optional */ }
+        }
       };
     }
+    recovery.onCandle(candle, focusedPanelSymbol);
   }
 }
 
