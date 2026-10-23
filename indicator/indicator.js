@@ -69,8 +69,10 @@
 /* ================= CONFIG ================= */
 let APP_ID  = 120128;
 
-/** Public market-data endpoint — no API token required (charts, indicators, analysis). */
-let PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
+/** Public market-data endpoint — no API token required (charts, indicators, analysis).
+ *  app_id is a mandatory query parameter for this endpoint; omitting it causes the
+ *  connection to be rejected, which was preventing charts from connecting. */
+let PUBLIC_WS_URL = `wss://api.derivws.com/trading/v1/options/ws/public?app_id=${APP_ID}`;
 
 /** Standard Deriv API endpoint — supports ticks_history (OHLC candles), authorize, trading.
  *  Used for both the chart data feed and authenticated trading actions. */
@@ -83,6 +85,7 @@ let WS_URL = AUTH_WS_URL;
 function updateWsUrl() {
   AUTH_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
   WS_URL = AUTH_WS_URL;
+  PUBLIC_WS_URL = `wss://api.derivws.com/trading/v1/options/ws/public?app_id=${APP_ID}`;
 }
 
 
