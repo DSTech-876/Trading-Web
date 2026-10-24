@@ -29262,6 +29262,139 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
   });
 }
 
+/* ---------------------------------------------------------------------------
+ *  Multi-symbol selection
+ * ------------------------------------------------------------------------- */
+
+/** Human-readable name of a getMarketType() family, used in status/report text. */
+const MARKET_TYPE_LABELS = Object.freeze({
+  boom: "Boom indices",
+  crash: "Crash indices",
+  jump: "Jump indices",
+  step: "Step indices",
+  dailyreset: "Daily Reset indices",
+  dex: "DEX indices",
+  driftswitch: "Drift Switch indices",
+  volatility: "Volatility indices",
+  commodity: "Commodities",
+  forex: "Forex pairs"
+});
+
+function getMarketTypeLabel(type) {
+  return MARKET_TYPE_LABELS[type] || `${type} instruments`;
+}
+
+/**
+ * Every symbol the user can trade, taken from the live symbol dropdown so the
+ * backtest list never drifts from the instruments the app actually offers.
+ * Falls back to an explicit list (used by tests/headless callers).
+ */
+function getBacktestSymbolUniverse(explicitList) {
+  if (Array.isArray(explicitList) && explicitList.length > 0) {
+    return explicitList.map(s => String(s).trim()).filter(Boolean);
+  }
+  const sel = (typeof document !== "undefined" && document.getElementById)
+    ? (document.getElementById("btSymbolSelect") || document.getElementById("symbolSelect"))
+    : null;
+  if (!sel || !sel.options) return [];
+  const out = [];
+  for (const opt of sel.options) {
+    const v = String(opt.value || "").trim();
+    if (v && out.indexOf(v) === -1) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Expand the chosen symbol into the list of symbols a run should replay.
+ *
+ *  - "one"   → just the selected symbol
+ *  - "group" → every symbol of the same getMarketType() family (e.g. all Step
+ *              indices), so a whole instrument family can be compared in one run
+ *  - "all"   → every symbol in the dropdown
+ *
+ * The selected symbol always comes first and the list is de-duplicated after
+ * feed-symbol resolution, so aliases of the same instrument are only run once.
+ */
+function resolveBacktestSymbols(symbol, scope, explicitList) {
+  const primary = migrateSymbol(String(symbol || "").trim());
+  if (!primary) return [];
+  if (scope !== "group" && scope !== "all") return [primary];
+
+  const universe = getBacktestSymbolUniverse(explicitList);
+  const wanted = scope === "group" ? getMarketType(primary) : null;
+  const out = [primary];
+  for (const raw of universe) {
+    const resolved = migrateSymbol(raw);
+    if (!resolved || out.indexOf(resolved) !== -1) continue;
+    if (wanted && getMarketType(resolved) !== wanted) continue;
+    out.push(resolved);
+  }
+  return out;
+}
+
+/**
+ * Combine one strategy's per-symbol results into a single portfolio row.
+ *
+ * Per-symbol P&L is already expressed in account currency (contract size is
+ * applied per symbol inside computeBacktestMetrics), so the trades can simply
+ * be merged in chronological order to rebuild a portfolio equity curve and a
+ * true combined drawdown. Trades are sequenced, not netted concurrently, so
+ * the drawdown is a conservative single-account approximation.
+ */
+function _btAggregateStrategyResults(rows, initialBalance) {
+  const initial = Math.max(1, +initialBalance || 0);
+  const all = [];
+  for (const r of rows) {
+    for (const t of (r.trades || [])) all.push(Object.assign({ symbol: r.symbol }, t));
+  }
+  all.sort((a, b) => (a.exitEpoch || a.epoch || 0) - (b.exitEpoch || b.epoch || 0));
+
+  let balance = initial, peak = initial, maxDD = 0, maxDDPct = 0;
+  let wins = 0, losses = 0, breakevens = 0, expired = 0;
+  let grossProfit = 0, grossLoss = 0, bestTrade = 0, worstTrade = 0;
+  let winStreak = 0, lossStreak = 0, maxWinStreak = 0, maxLossStreak = 0;
+  const equityCurve = [{ idx: 0, epoch: null, balance: initial, equity: initial, pnl: 0 }];
+
+  all.forEach((t, i) => {
+    const pnl = +t.pnl || 0;
+    balance += pnl;
+    if (pnl > 0) grossProfit += pnl; else if (pnl < 0) grossLoss += -pnl;
+    if (pnl > bestTrade)  bestTrade = pnl;
+    if (pnl < worstTrade) worstTrade = pnl;
+    if (t.result === "WIN")            { wins++; winStreak++; lossStreak = 0; }
+    else if (t.result === "LOSS")      { losses++; lossStreak++; winStreak = 0; }
+    else if (t.result === "BREAKEVEN") { breakevens++; winStreak = 0; lossStreak = 0; }
+    else                               { expired++; winStreak = 0; lossStreak = 0; }
+    if (winStreak  > maxWinStreak)  maxWinStreak  = winStreak;
+    if (lossStreak > maxLossStreak) maxLossStreak = lossStreak;
+    if (balance > peak) peak = balance;
+    const dd = peak - balance;
+    if (dd > maxDD) { maxDD = dd; maxDDPct = peak > 0 ? (dd / peak) * 100 : 0; }
+    equityCurve.push({ idx: i + 1, epoch: t.exitEpoch || t.epoch || null, balance: +balance.toFixed(4), equity: +balance.toFixed(4), pnl: +pnl.toFixed(4) });
+  });
+
+  const decided = wins + losses;
+  const netProfit = balance - initial;
+  return {
+    totalTrades: all.length,
+    wins, losses, breakevens, expired,
+    winRate: decided > 0 ? (wins / decided) * 100 : 0,
+    netProfit,
+    profitPct: (netProfit / initial) * 100,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0),
+    grossProfit, grossLoss,
+    maxDrawdown: maxDD,
+    maxDrawdownPct: maxDDPct,
+    initialBalance: initial,
+    finalBalance: balance,
+    expectancy: all.length > 0 ? netProfit / all.length : 0,
+    bestTrade, worstTrade, maxWinStreak, maxLossStreak,
+    trades: all,
+    equityCurve
+  };
+}
+
 /**
  * Run a backtest.
  *
@@ -29275,6 +29408,8 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
  * @param {"lot"|"risk"} cfg.sizingMode
  * @param {number} [cfg.lotSize]
  * @param {number} [cfg.riskPercent]
+ * @param {"one"|"group"|"all"} [cfg.symbolScope]  expand cfg.symbol into a family
+ * @param {string[]} [cfg.symbols]  explicit symbol list (overrides symbolScope)
  * @param {Function} [cfg.onStatus]
  * @returns {Promise<object>} exportable backtest report
  */
@@ -29292,6 +29427,15 @@ async function runStrategyBacktest(cfg) {
   if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) throw new Error("Select a valid date range.");
   if (endSec <= startSec) throw new Error("End date must be after start date.");
   if (!(+cfg.initialBalance > 0)) throw new Error("Initial balance must be greater than zero.");
+
+  const symbolScope = cfg.symbolScope === "group" || cfg.symbolScope === "all" ? cfg.symbolScope : "one";
+  const symbols = Array.isArray(cfg.symbols) && cfg.symbols.length > 0
+    ? resolveBacktestSymbols(symbol, "all", cfg.symbols)
+    : resolveBacktestSymbols(symbol, symbolScope, cfg.symbolUniverse);
+  if (symbols.length === 0) throw new Error("No symbols matched the selected scope.");
+  const scopeLabel = symbols.length === 1
+    ? symbols[0]
+    : (symbolScope === "group" ? `${getMarketTypeLabel(getMarketType(symbol))} (${symbols.length})` : `${symbols.length} symbols`);
 
   const sizingMode = cfg.sizingMode === "risk" ? "risk" : "lot";
   if (sizingMode === "risk" && !(+cfg.riskPercent > 0)) throw new Error("Risk % must be greater than zero.");
@@ -29313,71 +29457,121 @@ async function runStrategyBacktest(cfg) {
   const prevGranOverride = _multiPanelGran;
 
   try {
-    status("Downloading historical candles…");
-    const warmupSec = startSec - BT_WARMUP_CANDLES * granularity;
-    const result = await backtestFetchHistory(symbol, granularity, warmupSec, endSec,
-      n => status(`Downloading historical candles… ${n}`));
-    
-    /* Unwrap the result object to handle both format: { data, truncated } and legacy array */
-    const data = (result && result.data) || result || [];
-    const isTruncated = (result && result.truncated) === true;
-    
-    if (data.length < 30) throw new Error(`Only ${data.length} candles available for that range — widen the dates or pick a lower timeframe.`);
-    if (isTruncated) {
-      const msg = `⚠️ Data truncated at limit: only ${data.length} candles loaded (maximum reached).`;
-      addLog(msg);
-      showToast("Data Truncated", msg, "warning", 5000);
-    }
-
-    /* Filters: the symbol's recommended configuration, unless the user locked
-       their own. Mutated globals are all covered by _snapshotChartGlobals(). */
-    const settings = _btApplyRecommendedSettings(symbol, granularity);
-    if (settings.mode === "recommended") {
-      addLog(`📊 Backtest ${symbol}: using recommended settings — ${settings.label}`);
-      if (!settings.granularityMatchesRecommendation && settings.recommendedGran) {
-        addLog(`ℹ Backtest timeframe ${granularity}s differs from the recommended ${settings.recommendedGran}s for ${symbol}.`);
-      }
-    } else {
-      addLog(`📊 Backtest ${symbol}: using your locked manual filter settings`);
-    }
-
     /* Silence every live-only side effect for the whole replay. */
-    _btSilent = true;
     _historicalProcessing = true;
-    _multiPanelProcessing = symbol;
     _multiPanelGran = granularity;
 
     const results = [];
-    for (let s = 0; s < requested.length; s++) {
+    const perSymbol = [];
+    const settingsBySymbol = {};
+    let candlesLoaded = 0;
+    let firstSettings = null;
+
+    for (let y = 0; y < symbols.length; y++) {
       if (backtestAbortRequested) break;
-      const strategy = requested[s];
-      const label = `${strategy.label} (${s + 1}/${requested.length})`;
-      const trades = await _btReplayStrategy(strategy, data, startSec,
-        (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`));
-      const metrics = computeBacktestMetrics(trades, {
-        symbol, startSec, endSec,
-        initialBalance: +cfg.initialBalance,
-        sizingMode,
-        lotSize: +cfg.lotSize || 0,
-        riskPercent: +cfg.riskPercent || 0
-      });
-      results.push(Object.assign({ strategyId: strategy.id, strategy: strategy.label }, metrics));
+      const sym = symbols[y];
+      const symTag = symbols.length > 1 ? `[${y + 1}/${symbols.length}] ${sym} — ` : "";
+
+      let data = [];
+      try {
+        _btSilent = false;   /* download/setup messages stay visible */
+        status(`${symTag}Downloading historical candles…`);
+        const warmupSec = startSec - BT_WARMUP_CANDLES * granularity;
+        const result = await backtestFetchHistory(sym, granularity, warmupSec, endSec,
+          n => status(`${symTag}Downloading historical candles… ${n}`));
+
+        /* Unwrap the result object to handle both format: { data, truncated } and legacy array */
+        data = (result && result.data) || result || [];
+        const isTruncated = (result && result.truncated) === true;
+
+        if (data.length < 30) {
+          throw new Error(`Only ${data.length} candles available for that range — widen the dates or pick a lower timeframe.`);
+        }
+        if (isTruncated) {
+          const msg = `⚠️ Data truncated at limit: only ${data.length} candles loaded for ${sym} (maximum reached).`;
+          addLog(msg);
+          showToast("Data Truncated", msg, "warning", 5000);
+        }
+      } catch (e) {
+        /* One unavailable instrument must not abandon a whole family run. */
+        const reason = e && e.message ? e.message : String(e);
+        addLog(`⚠ Backtest skipped ${sym} — ${reason}`);
+        perSymbol.push({ symbol: sym, candles: 0, error: reason });
+        if (symbols.length === 1) throw e;
+        continue;
+      }
+
+      /* Filters: the symbol's own recommended configuration, unless the user
+         locked theirs. Mutated globals are all covered by _snapshotChartGlobals(). */
+      const settings = _btApplyRecommendedSettings(sym, granularity);
+      if (settings.mode === "recommended") {
+        addLog(`📊 Backtest ${sym}: using recommended settings — ${settings.label}`);
+        if (!settings.granularityMatchesRecommendation && settings.recommendedGran) {
+          addLog(`ℹ Backtest timeframe ${granularity}s differs from the recommended ${settings.recommendedGran}s for ${sym}.`);
+        }
+      } else {
+        addLog(`📊 Backtest ${sym}: using your locked manual filter settings`);
+      }
+      settingsBySymbol[sym] = settings;
+      if (!firstSettings) firstSettings = settings;
+      candlesLoaded += data.length;
+      perSymbol.push({ symbol: sym, candles: data.length, settings, error: null });
+
+      _btSilent = true;
+      _multiPanelProcessing = sym;
+      try {
+        for (let s = 0; s < requested.length; s++) {
+          if (backtestAbortRequested) break;
+          const strategy = requested[s];
+          const label = `${symTag}${strategy.label} (${s + 1}/${requested.length})`;
+          const trades = await _btReplayStrategy(strategy, data, startSec,
+            (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`));
+          const metrics = computeBacktestMetrics(trades, {
+            symbol: sym, startSec, endSec,
+            initialBalance: +cfg.initialBalance,
+            sizingMode,
+            lotSize: +cfg.lotSize || 0,
+            riskPercent: +cfg.riskPercent || 0
+          });
+          results.push(Object.assign({ symbol: sym, strategyId: strategy.id, strategy: strategy.label }, metrics));
+        }
+      } finally {
+        _btSilent = false;
+      }
+    }
+
+    /* Portfolio view: one combined row per strategy across every symbol run. */
+    const testedSymbols = perSymbol.filter(p => !p.error).map(p => p.symbol);
+    if (testedSymbols.length > 1) {
+      for (const strategy of requested) {
+        const rows = results.filter(r => r.strategyId === strategy.id && !r.aggregate);
+        if (rows.length === 0) continue;
+        results.push(Object.assign({
+          symbol: `ALL (${rows.length} symbols)`,
+          strategyId: strategy.id,
+          strategy: strategy.label,
+          aggregate: true
+        }, _btAggregateStrategyResults(rows, +cfg.initialBalance)));
+      }
     }
 
     lastBacktestReport = {
       version: 1,
       generatedAt: new Date().toISOString(),
       config: {
-        symbol, granularity, startSec, endSec,
+        symbol, symbols: testedSymbols, symbolScope, scopeLabel,
+        granularity, startSec, endSec,
         start: new Date(startSec * 1000).toISOString(),
         end: new Date(endSec * 1000).toISOString(),
         initialBalance: +cfg.initialBalance,
         sizingMode,
         lotSize: +cfg.lotSize || null,
         riskPercent: +cfg.riskPercent || null,
-        settings
+        settings: firstSettings,
+        settingsBySymbol
       },
-      candlesLoaded: data.length,
+      candlesLoaded,
+      perSymbol,
       aborted: backtestAbortRequested,
       results
     };
@@ -29402,16 +29596,18 @@ function abortStrategyBacktest() { backtestAbortRequested = true; }
  * ------------------------------------------------------------------------- */
 
 const BACKTEST_REPORT_COLUMNS = Object.freeze([
-  "Strategy", "Trades", "Win Rate", "Profit", "Profit %", "Drawdown", "Profit Factor"
+  "Symbol", "Strategy", "Trades", "Win Rate", "Profit", "Profit %", "Drawdown", "Profit Factor"
 ]);
 
 function _btNum(v, d = 2) { return Number.isFinite(v) ? v.toFixed(d) : "--"; }
 function _btPF(v) { return v === Infinity ? "∞" : _btNum(v, 2); }
 
-/** One report row per strategy — the only output this engine produces. */
+/** One report row per symbol × strategy, plus the combined rows of a multi-symbol run. */
 function buildBacktestReportRows(report) {
   if (!report || !Array.isArray(report.results)) return [];
+  const fallbackSymbol = (report.config && report.config.symbol) || "--";
   return report.results.map(r => ({
+    Symbol: r.symbol || fallbackSymbol,
     Strategy: r.strategy,
     Trades: r.totalTrades,
     "Win Rate": `${_btNum(r.winRate, 1)}%`,
@@ -29447,9 +29643,13 @@ function exportBacktestCSV(report = lastBacktestReport) {
 }
 
 /** Equity curve points for a strategy — kept internally for future charting. */
-function getBacktestEquityCurve(strategyId, report = lastBacktestReport) {
+function getBacktestEquityCurve(strategyId, report = lastBacktestReport, symbol = null) {
   if (!report) return [];
-  const hit = report.results.find(r => r.strategyId === strategyId) || report.results[0];
+  const matches = report.results.filter(r => r.strategyId === strategyId);
+  const hit = (symbol ? matches.find(r => r.symbol === symbol) : null)
+    || matches.find(r => r.aggregate)
+    || matches[0]
+    || report.results[0];
   return hit ? hit.equityCurve : [];
 }
 
@@ -29494,6 +29694,7 @@ function initStrategyBacktestPanel() {
     if (endEl && !endEl.value) endEl.value = now.toISOString().slice(0, 10);
   }
   _btSyncSizingInputs();
+  _btSyncScopeLabel();
   _btRenderResults(lastBacktestReport);
 }
 
@@ -29519,11 +29720,27 @@ function _btRenderResults(report) {
   const rows = buildBacktestReportRows(report);
   if (rows.length === 0) { wrap.style.display = "none"; body.innerHTML = ""; return; }
   wrap.style.display = "";
+
+  /* Keep the header in step with BACKTEST_REPORT_COLUMNS. */
+  const head = document.getElementById("btResultsHead");
+  if (head) {
+    head.innerHTML = "";
+    const htr = document.createElement("tr");
+    for (const col of BACKTEST_REPORT_COLUMNS) {
+      const th = document.createElement("th");
+      th.textContent = col;
+      htr.appendChild(th);
+    }
+    head.appendChild(htr);
+  }
+
   body.innerHTML = "";
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const net = report.results[i].netProfit;
+    const result = report.results[i];
+    const net = result.netProfit;
     const tr = document.createElement("tr");
+    if (result.aggregate) tr.style.fontWeight = "600";
     for (const col of BACKTEST_REPORT_COLUMNS) {
       const td = document.createElement("td");
       td.textContent = r[col];
@@ -29543,6 +29760,28 @@ function _btDownload(filename, text, mime) {
   URL.revokeObjectURL(url);
 }
 
+function _btExportBaseName(report) {
+  const cfgR = (report && report.config) || {};
+  const syms = Array.isArray(cfgR.symbols) ? cfgR.symbols : [];
+  const name = syms.length > 1
+    ? (cfgR.symbolScope === "group" ? `${getMarketType(cfgR.symbol)}-group-${syms.length}` : `multi-${syms.length}`)
+    : (syms[0] || cfgR.symbol || "backtest");
+  return `backtest-${String(name).replace(/[^\w.-]+/g, "_")}-${cfgR.granularity}s`;
+}
+
+/** Relabel the "same type" scope option for the symbol currently selected. */
+function _btSyncScopeLabel() {
+  const scopeSel = document.getElementById("btSymbolScope");
+  const symSel   = document.getElementById("btSymbolSelect");
+  if (!scopeSel || !symSel) return;
+  const groupOpt = scopeSel.querySelector('option[value="group"]');
+  if (!groupOpt) return;
+  const sym = String(symSel.value || "").trim();
+  if (!sym) { groupOpt.textContent = "All symbols of the same type"; return; }
+  const matches = resolveBacktestSymbols(sym, "group");
+  groupOpt.textContent = `All ${getMarketTypeLabel(getMarketType(sym))} (${matches.length})`;
+}
+
 async function runStrategyBacktestFromUI() {
   const runBtn  = document.getElementById("btRunBtn");
   const stopBtn = document.getElementById("btStopBtn");
@@ -29555,6 +29794,7 @@ async function runStrategyBacktestFromUI() {
   const cfg = {
     strategyId: val("btStrategySelect") || "ALL",
     symbol: val("btSymbolSelect"),
+    symbolScope: val("btSymbolScope") || "one",
     granularity: parseInt(val("btGranSelect"), 10),
     startSec: Math.floor(Date.parse(`${startVal}T00:00:00Z`) / 1000),
     endSec:   Math.floor(Date.parse(`${endVal}T23:59:59Z`) / 1000),
@@ -29573,9 +29813,12 @@ async function runStrategyBacktestFromUI() {
     const mode = report.config.settings && report.config.settings.mode === "manual"
       ? "manual (locked) filters"
       : `recommended settings — ${report.config.settings ? report.config.settings.label : ""}`;
+    const skipped = (report.perSymbol || []).filter(p => p.error);
+    const scope = report.config.scopeLabel || report.config.symbol;
+    const skipNote = skipped.length > 0 ? ` · ${skipped.length} symbol(s) skipped` : "";
     _btSetStatus(report.aborted
-      ? `Stopped early — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles · ${mode}.`
-      : `Done — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles · ${mode}.`);
+      ? `Stopped early — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}.`
+      : `Done — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}.`);
   } catch (e) {
     _btSetStatus(`Error: ${e.message}`);
   } finally {
@@ -29593,18 +29836,20 @@ function initStrategyBacktestControls() {
   on("btExportJsonBtn", "click", () => {
     const data = exportBacktestReport();
     if (!data) { _btSetStatus("Run a backtest first."); return; }
-    _btDownload(`backtest-${data.config.symbol}-${data.config.granularity}s.json`, JSON.stringify(data, null, 2), "application/json");
+    _btDownload(`${_btExportBaseName(data)}.json`, JSON.stringify(data, null, 2), "application/json");
   });
   on("btExportCsvBtn", "click", () => {
     const csv = exportBacktestCSV();
     if (!csv) { _btSetStatus("Run a backtest first."); return; }
-    _btDownload(`backtest-${lastBacktestReport.config.symbol}-${lastBacktestReport.config.granularity}s.csv`, csv, "text/csv");
+    _btDownload(`${_btExportBaseName(lastBacktestReport)}.csv`, csv, "text/csv");
   });
+  on("btSymbolSelect", "change", _btSyncScopeLabel);
   const symSel = document.getElementById("symbolSelect");
   if (symSel) symSel.addEventListener("change", () => {
     const btSym = document.getElementById("btSymbolSelect");
     const prev = btSym ? btSym.value : null;
     if (btSym) { btSym.innerHTML = symSel.innerHTML; btSym.value = prev && btSym.querySelector(`option[value="${prev}"]`) ? prev : symSel.value; }
+    _btSyncScopeLabel();
   });
 }
 

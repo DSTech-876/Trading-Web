@@ -891,7 +891,31 @@ filter configuration automatically:
   configuration verbatim — the lock means "these are my settings, do not touch them".
   `Lock R:R` and `Lock Range Minutes` are honoured in recommended mode too.
 
-The run status line and the report config both state which mode was used.
+The run status line and the report config both state which filter mode a run used.
+
+#### Backtesting a whole family of symbols
+
+**Symbols to Test** controls how many instruments a single run covers:
+
+| Option | What it replays |
+| --- | --- |
+| Selected symbol only | Just the symbol in the Symbol dropdown (default) |
+| All *&lt;family&gt;* | Every symbol of the same market type as the selected one — e.g. pick any Step Index to replay **all Step Indices**, or any Boom index to replay all Boom indices |
+| All available symbols | Every instrument in the dropdown (slowest) |
+
+Notes:
+
+- Each symbol is downloaded and replayed independently and gets **its own recommended
+  settings**, so a family run compares instruments fairly instead of forcing one
+  symbol's configuration onto the rest.
+- The results table gains a **Symbol** column, and each strategy also gets a combined
+  **ALL (n symbols)** row: its trades are merged in chronological order to produce a
+  portfolio-level win rate, profit, profit factor and drawdown.
+- If one instrument's history cannot be downloaded the run logs it, marks it as skipped
+  and carries on with the rest of the family.
+- JSON/CSV exports contain every row, and the JSON report additionally carries
+  `config.symbols`, `config.settingsBySymbol` and a `perSymbol` section listing the
+  candle count (or skip reason) for each instrument.
 
 ---
 
