@@ -49,6 +49,9 @@ function baseContext(overrides) {
   const logs = [];
   const base = {
     FALSE_BREAKOUT_CANDLES: 3,
+    BREAKOUT_SETUP_MAX_AGE_CANDLES: 150,
+    monitoringTrade: false,
+    getCurrentGranularitySec: () => 60,
     openingRange: { high: 110, low: 90 },
     retestCount: 0,
     retestInfo: null,

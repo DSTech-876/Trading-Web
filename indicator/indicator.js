@@ -157,6 +157,15 @@ const SR_CONFLUENCE_PRICE_PCT = 0.002;
 /* False breakout: number of candles to watch for price returning inside range */
 const FALSE_BREAKOUT_CANDLES = 3;
 
+/* Hard staleness cap for an un-entered breakout setup. The optional time-decay
+   filter is only consulted while hunting the retest, so a setup that reached
+   RETEST/INDECISION/CONFIRM and was then rejected by an entry filter had no
+   expiry at all: the pipeline could sit on a dead level indefinitely. Kept
+   below MAX_CANDLE_HISTORY so a setup always expires before the candle that
+   produced it is trimmed out of the buffer (adjustIndicesAfterSlice clamps
+   those indices to 0, which would otherwise pin the setup at index 0 forever). */
+const BREAKOUT_SETUP_MAX_AGE_CANDLES = 150;
+
 /* Profit-Direction Constraint constants */
 const STOCH_CROSSOVER_BUFFER  = 20;   /* buffer zone for K/D crossover from oversold/overbought */
 const VWAP_ATR_TOLERANCE      = 0.5;  /* ATR multiplier for VWAP proximity */
@@ -812,6 +821,10 @@ let _historicalProcessing = false; /* true during processAllCandles() to suppres
  * every live-only side effect (logs, toasts, audio, notifications, chart redraws,
  * Telegram dispatch and auto-trading) so a replay is silent and cheap. */
 let _btSilent = false;
+/* Id of the strategy the backtest engine is currently replaying (null when no
+ * replay is running). Used to isolate the always-on breakout-retest pipeline so
+ * it cannot starve the strategy under test. */
+let _btActiveStrategyId = null;
 let _entryModeContext = null;      /* temporary context for aggressive intrabar entries */
 
 /* ================= UI REFS ================= */
@@ -13809,9 +13822,25 @@ function hasVolumeSpikeOnBreakout(candleIdx) {
  * Sessions help avoid low-liquidity periods that produce noisy signals.
  * If sessionFilterEnabled is off, always returns true.
  */
+/**
+ * UTC hour that session gating is judged against.
+ *
+ * During a backtest replay (or a historical catch-up) the wall clock is
+ * meaningless: a replay of last month's candles must be gated by the session
+ * each candle belongs to, not by whatever time the user pressed "Run".
+ * Live streaming keeps using the real clock.
+ */
+function getSessionEvalUtcHour() {
+  if ((_btSilent || _historicalProcessing) && candles.length > 0) {
+    const epoch = candles[candles.length - 1].epoch;
+    if (Number.isFinite(epoch)) return new Date(epoch * 1000).getUTCHours();
+  }
+  return new Date().getUTCHours();
+}
+
 function isWithinActiveSession() {
   if (!sessionFilterEnabled) return true;
-  const hour = new Date().getUTCHours();
+  const hour = getSessionEvalUtcHour();
   switch (sessionFilterMode) {
     case "london":
       return hour >= SESSION_LONDON.start && hour < SESSION_LONDON.end;
@@ -13831,7 +13860,7 @@ function isWithinActiveSession() {
 }
 
 function getActiveSessionName() {
-  const hour = new Date().getUTCHours();
+  const hour = getSessionEvalUtcHour();
   const sessions = [];
   if (hour >= SESSION_LONDON.start && hour < SESSION_LONDON.end) sessions.push("London");
   if (hour >= SESSION_NEW_YORK.start && hour < SESSION_NEW_YORK.end) sessions.push("NY");
@@ -15038,6 +15067,20 @@ function processLatestCandle() {
     detectLondonAsianSweep();
   }
 
+  /* Backtest isolation: while the engine replays a *different* strategy the
+     always-on breakout-retest machinery must not advance. Its TRADE phase
+     short-circuits this function, which would starve the strategy under test
+     (NY Open Range in particular) of every candle after the first trade. */
+  if (_btSilent && _btActiveStrategyId && _btActiveStrategyId !== "breakout_retest") {
+    if (nyOpenRangeEnabled) {
+      buildNyOpenRange();
+      if (nyOpenRange && nyOpenRangePhase !== "TRADE") {
+        processNyOpenRangeCandle(candles.length - 1);
+      }
+    }
+    return;
+  }
+
   if (phase === "TRADE") { updateStateUI(); return; }
 
   if (phase === "WAITING" || phase === "RANGE") {
@@ -15476,6 +15519,30 @@ function processCandle(idx) {
       restored: breakout.lockedLevel
     });
     breakout.level = breakout.lockedLevel;
+  }
+
+  /* Hard staleness cap: a breakout whose entry never materialised is dead
+     structure. Applies to every post-breakout phase (the optional time-decay
+     filter below only runs while hunting the retest), so the pipeline can no
+     longer freeze in RETEST/INDECISION/CONFIRM re-evaluating a level price has
+     left far behind. Age is measured in epochs, not indices: once the buffer is
+     trimmed past MAX_CANDLE_HISTORY, adjustIndicesAfterSlice() clamps
+     breakout.candleIdx to 0, so an index-based age silently stops growing. */
+  if (!trade && !monitoringTrade) {
+    const _setupGranSec = getCurrentGranularitySec() || 60;
+    const _setupAge = Number.isFinite(breakout.detectedEpoch)
+      ? Math.floor((c.epoch - breakout.detectedEpoch) / _setupGranSec)
+      : idx - breakout.candleIdx;
+    if (_setupAge > BREAKOUT_SETUP_MAX_AGE_CANDLES) {
+      addLog(`⌛ Setup expired — ${_setupAge} candles since the breakout with no entry. Re-arming the opening range.`);
+      maybeSendBreakoutCancelled(`Setup expired after ${_setupAge} candles without an entry.`);
+      breakout = null; retestInfo = null; indecisionInfo = null; confirmInfo = null;
+      trailingSL = null; partialTpHit = false; retestCount = 0;
+      openingRange = null;
+      rangeStartEpoch = c.epoch;
+      setPhase("RANGE");
+      return;
+    }
   }
 
   /* FALSE BREAKOUT DETECTION: invalidate if price returns inside range.
@@ -28976,12 +29043,128 @@ function _btIsolateStrategy(target) {
     s.setEnabled(s.id === target.id);
   }
   if (!target.alwaysOn) target.setEnabled(true);
+  _btActiveStrategyId = target.id;
+}
+
+/**
+ * Apply the filter configuration a replay runs with.
+ *
+ * Default ("recommended"): every advanced gate that no per-symbol
+ * recommendation covers is reset to its documented default, then the symbol's
+ * own recommended configuration (getMarketRecommendations) is applied on top.
+ * Each symbol is therefore backtested with the settings the app would actually
+ * recommend for it, instead of inheriting whatever the live chart happens to
+ * be tuned to — hand-tuned gates such as a 11/16 minimum-confluence threshold
+ * silently rejected every strategy signal in a replay.
+ *
+ * With "Lock Strategy Filters" enabled the user's manual configuration is used
+ * verbatim: the lock means "these are my settings, do not touch them".
+ *
+ * Only globals covered by _snapshotChartGlobals() are mutated, so the live
+ * configuration is restored intact when the replay finishes.
+ *
+ * @param {string} symbol      feed symbol being replayed
+ * @param {number} granularity seconds per candle chosen for the replay
+ * @returns {{mode: string, label: string, recommendedGran: number|null}}
+ */
+function _btApplyRecommendedSettings(symbol, granularity) {
+  if (lockIndicatorFilters) {
+    return {
+      mode: "manual",
+      label: "Manual filters (Lock Strategy Filters is ON)",
+      recommendedGran: null
+    };
+  }
+
+  /* 1. Neutral baseline for gates no recommendation covers (revertAllSettings defaults). */
+  minConfluenceEnabled    = false;
+  minConfluenceValue      = DYNAMIC_CONF_MIN_FLOOR;
+  requiredConfluences     = [];
+  doubleRetestEnabled     = false;
+  confirmBarEnabled       = false;
+  divergenceFilterEnabled = false;
+  adxHardGateEnabled      = false;
+  adxMaxThreshold         = 50;
+  breakoutDistEnabled     = false;
+  breakoutDistATR         = 6.0;
+  timeDecayEnabled        = false;
+  timeDecayCandles        = 60;
+  consecutiveDirEnabled   = false;
+  vwapFilterEnabled       = false;
+  stochCrossEnabled       = false;
+  rangeSizeEnabled        = false;
+  rangeSizeMin            = 0.5;
+  rangeSizeMax            = 3.0;
+  hhhlEnabled             = false;
+  followThroughEnabled    = false;
+  mtfStructureEnabled     = false;
+  pureTrailingEnabled     = false;
+  teslaScalingEnabled     = false;
+  scalpingModeEnabled     = false;
+
+  /* 2. The symbol's own recommended configuration. */
+  const rec = getMarketRecommendations(symbol);
+  emaFilterEnabled     = rec.ema;
+  htfFilterEnabled     = rec.htf;
+  atrToleranceEnabled  = rec.atr;
+  trailingStopEnabled  = rec.trailing.rec;
+  partialTpEnabled     = rec.partialTp;
+  falseBreakoutEnabled = rec.falseBreakout;
+  rsiFilterEnabled     = rec.rsi;
+  volumeSpikeEnabled   = rec.volSpike.rec;
+  fibRetestEnabled     = rec.fib;
+  sessionFilterEnabled = rec.session.rec;
+  if (rec.session.rec) sessionFilterMode = "london_ny";
+  macdFilterEnabled      = rec.macd;
+  bbSqueezeFilterEnabled = rec.bbSqueeze;
+  adxFilterEnabled       = rec.adx;
+  stochFilterEnabled     = rec.stoch;
+  minRREnabled           = rec.minRR.rec;
+  /* The timeframe/R:R/range locks keep their live meaning here too. */
+  if (!lockRR)       minRRValue    = rec.rr.minRR;
+  if (!lockRangeMin) RANGE_MINUTES = rec.range.minutes;
+
+  return {
+    mode: "recommended",
+    label: rec.label,
+    recommendedGran: rec.timeframe && Number.isFinite(rec.timeframe.gran) ? rec.timeframe.gran : null,
+    minRR: minRRValue,
+    rangeMinutes: RANGE_MINUTES,
+    granularityMatchesRecommendation: !rec.timeframe || rec.timeframe.gran === granularity
+  };
+}
+
+/** UTC day of the opening range currently armed in a replay. */
+let _btRangeDay = null;
+
+/**
+ * Re-arm the breakout-retest opening range at each UTC day boundary of a replay.
+ *
+ * A live session builds one opening range per connect. A multi-day replay that
+ * kept day 1's range would measure every later day against a dead level and —
+ * whenever that first range failed a gate such as the range-size filter — stay
+ * parked in the BREAKOUT phase for the rest of the run, producing zero trades.
+ */
+function _btMaybeRollOpeningRange(candle) {
+  if (!candle || !Number.isFinite(candle.epoch)) return;
+  const day = Math.floor(candle.epoch / 86400);
+  if (_btRangeDay === null) { _btRangeDay = day; return; }
+  if (day === _btRangeDay) return;
+  _btRangeDay = day;
+  if (monitoringTrade || trade) return;   /* never cut an open setup short */
+  openingRange = null; breakout = null;
+  retestInfo = null; indecisionInfo = null; confirmInfo = null;
+  trailingSL = null; partialTpHit = false;
+  retestCount = 0;
+  rangeStartEpoch = candle.epoch;
+  phase = "RANGE";
 }
 
 /** Wipe all per-strategy and shared setup/trade state before a replay. */
 function _btResetWorld() {
   candles = [];
   rangeStartEpoch = null;
+  _btRangeDay = null;
   openingRange = null; breakout = null;
   retestInfo = null; indecisionInfo = null; confirmInfo = null;
   trade = null; monitoringTrade = false; trailingSL = null;
@@ -29040,6 +29223,7 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
       candles = candles.slice(removed);
       adjustIndicesAfterSlice(removed);
     }
+    _btMaybeRollOpeningRange(candles[candles.length - 1]);
     _btStep(candles[candles.length - 1]);
     _btHarvest(strategy, harvested, c);
 
@@ -29145,6 +29329,18 @@ async function runStrategyBacktest(cfg) {
       showToast("Data Truncated", msg, "warning", 5000);
     }
 
+    /* Filters: the symbol's recommended configuration, unless the user locked
+       their own. Mutated globals are all covered by _snapshotChartGlobals(). */
+    const settings = _btApplyRecommendedSettings(symbol, granularity);
+    if (settings.mode === "recommended") {
+      addLog(`📊 Backtest ${symbol}: using recommended settings — ${settings.label}`);
+      if (!settings.granularityMatchesRecommendation && settings.recommendedGran) {
+        addLog(`ℹ Backtest timeframe ${granularity}s differs from the recommended ${settings.recommendedGran}s for ${symbol}.`);
+      }
+    } else {
+      addLog(`📊 Backtest ${symbol}: using your locked manual filter settings`);
+    }
+
     /* Silence every live-only side effect for the whole replay. */
     _btSilent = true;
     _historicalProcessing = true;
@@ -29178,7 +29374,8 @@ async function runStrategyBacktest(cfg) {
         initialBalance: +cfg.initialBalance,
         sizingMode,
         lotSize: +cfg.lotSize || null,
-        riskPercent: +cfg.riskPercent || null
+        riskPercent: +cfg.riskPercent || null,
+        settings
       },
       candlesLoaded: data.length,
       aborted: backtestAbortRequested,
@@ -29187,6 +29384,7 @@ async function runStrategyBacktest(cfg) {
     return lastBacktestReport;
   } finally {
     _btSilent = false;
+    _btActiveStrategyId = null;
     _historicalProcessing = prevHistorical;
     _multiPanelProcessing = prevMultiPanel;
     _multiPanelGran = prevGranOverride;
@@ -29372,9 +29570,12 @@ async function runStrategyBacktestFromUI() {
   try {
     const report = await runStrategyBacktest(cfg);
     _btRenderResults(report);
+    const mode = report.config.settings && report.config.settings.mode === "manual"
+      ? "manual (locked) filters"
+      : `recommended settings — ${report.config.settings ? report.config.settings.label : ""}`;
     _btSetStatus(report.aborted
-      ? `Stopped early — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles.`
-      : `Done — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles.`);
+      ? `Stopped early — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles · ${mode}.`
+      : `Done — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles · ${mode}.`);
   } catch (e) {
     _btSetStatus(`Error: ${e.message}`);
   } finally {
