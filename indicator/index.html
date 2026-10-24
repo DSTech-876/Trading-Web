@@ -1370,6 +1370,75 @@
             </div>
           </section>
 
+          <!-- Strategy Backtest Engine (Backtest Feature #1) -->
+          <section class="box">
+            <h3 class="collapsible">📊 Strategy Backtest (Feature #1)</h3>
+            <div class="collapsible-body">
+              <p class="hint">Replay any strategy over a historical date range using the exact live signal logic (entries, SL/TP, trailing, break-even, partial TP and strategy-specific exits).</p>
+
+              <label for="btStrategySelect" class="spaced-label">Strategy</label>
+              <select id="btStrategySelect"></select>
+
+              <div class="bt-grid">
+                <div>
+                  <label for="btSymbolSelect" class="spaced-label">Symbol</label>
+                  <select id="btSymbolSelect"></select>
+                </div>
+                <div>
+                  <label for="btGranSelect" class="spaced-label">Timeframe</label>
+                  <select id="btGranSelect"></select>
+                </div>
+                <div>
+                  <label for="btStartDate" class="spaced-label">Start Date</label>
+                  <input type="date" id="btStartDate" />
+                </div>
+                <div>
+                  <label for="btEndDate" class="spaced-label">End Date</label>
+                  <input type="date" id="btEndDate" />
+                </div>
+                <div>
+                  <label for="btInitialBalance" class="spaced-label">Initial Balance</label>
+                  <input type="number" id="btInitialBalance" min="1" step="1" value="1000" />
+                </div>
+                <div>
+                  <label for="btSizingMode" class="spaced-label">Position Sizing</label>
+                  <select id="btSizingMode">
+                    <option value="lot" selected>Lot Size</option>
+                    <option value="risk">Risk %</option>
+                  </select>
+                </div>
+                <div id="btLotRow">
+                  <label for="btLotSize" class="spaced-label">Lot Size</label>
+                  <input type="number" id="btLotSize" min="0.01" step="0.01" value="1" />
+                </div>
+                <div id="btRiskRow" style="display:none;">
+                  <label for="btRiskPercent" class="spaced-label">Risk % per Trade</label>
+                  <input type="number" id="btRiskPercent" min="0.1" max="100" step="0.1" value="1" />
+                </div>
+              </div>
+
+              <div class="backtest-controls">
+                <button type="button" id="btRunBtn" class="btn-primary">▶ Run Backtest</button>
+                <button type="button" id="btStopBtn" class="btn-secondary" disabled>⏹ Stop</button>
+                <button type="button" id="btExportJsonBtn" class="btn-secondary">⬇ JSON</button>
+                <button type="button" id="btExportCsvBtn" class="btn-secondary">⬇ CSV</button>
+              </div>
+              <div id="btStatus" class="backtest-status" role="status" aria-live="polite">Idle</div>
+
+              <div id="btResults" class="bt-results" style="display:none;">
+                <table class="bt-table">
+                  <thead>
+                    <tr>
+                      <th>Strategy</th><th>Trades</th><th>Win Rate</th><th>Profit</th>
+                      <th>Profit %</th><th>Drawdown</th><th>Profit Factor</th>
+                    </tr>
+                  </thead>
+                  <tbody id="btResultsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
           <!-- Economic Calendar -->
           <section class="box">
             <h3 class="collapsible">📅 Economic Calendar / News Pause (Feature 11)</h3>

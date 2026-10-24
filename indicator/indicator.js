@@ -808,6 +808,10 @@ let _multiPanelProcessing = null;  /* null = normal mode, otherwise the panel's 
 let _multiPanelGran = null;        /* gran (seconds) for the panel currently being processed */
 let focusedPanelSymbol = null;     /* which multi-panel drives the main view */
 let _historicalProcessing = false; /* true during processAllCandles() to suppress live-only actions */
+/* True while the Strategy Backtest Engine replays historical candles. Suppresses
+ * every live-only side effect (logs, toasts, audio, notifications, chart redraws,
+ * Telegram dispatch and auto-trading) so a replay is silent and cheap. */
+let _btSilent = false;
 let _entryModeContext = null;      /* temporary context for aggressive intrabar entries */
 
 /* ================= UI REFS ================= */
@@ -5526,6 +5530,7 @@ function _checkProfitExitAlert(s, candle, stratLabel) {
  * Audio alert for the 3 custom strategies (triple beep).
  */
 function playStrategyAlert(dir) {
+  if (_btSilent) return;  /* Backtest engine: no audio during replay */
   if (!soundEnabled) return;
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -5548,6 +5553,7 @@ function playStrategyAlert(dir) {
  * Render all strategy alert lists (liquidity sweep, stop loss hunt, failed pin bar).
  */
 function renderStrategyAlerts() {
+  if (_btSilent) return;  /* Backtest engine: skip DOM work during replay */
   /* Liquidity Sweep */
   _renderAlertList(UI.liquiditySweepAlertList, UI.liquiditySweepCount, liquiditySweepHistory, "🌊", "Liquidity Sweep");
   /* Stop Loss Hunt */
@@ -17904,6 +17910,7 @@ function rebuildWalkForwardProfilesFromHistory() {
 }
 
 function executeAutoTrade(signal, _capturedWs) {
+  if (_btSilent) return;  /* Backtest engine: replays must never place real orders */
   /* Mint the audit correlation id before the first gate so that every
      rejection below — including the earliest halt/risk-config gates — is
      attributable to a concrete signal in /api/mt5/audit.php. */
@@ -19625,6 +19632,7 @@ function getRecommendedOrderType() {
 }
 
 function addLog(msg) {
+  if (_btSilent) return;  /* Backtest engine: suppress per-candle log spam */
   if (!UI.signalLog) return;
   const li = document.createElement("li");
   const now = new Date();
@@ -19717,6 +19725,7 @@ function setPhase(newPhase) {
 }
 
 function playPhaseAlert(phaseName) {
+  if (_btSilent) return;  /* Backtest engine: no audio during replay */
   if (!soundEnabled) return;
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -19737,6 +19746,7 @@ function playPhaseAlert(phaseName) {
 }
 
 function throttledNotification(title, body) {
+  if (_btSilent) return;  /* Backtest engine: no browser notifications */
   const now = Date.now();
   /* Prune timestamps outside the burst window */
   _notifTimestamps = _notifTimestamps.filter(t => now - t < NOTIFICATION_BURST_WINDOW_MS);
@@ -19756,6 +19766,7 @@ function throttledNotification(title, body) {
 }
 
 function sendPhaseNotification(phaseName) {
+  if (_btSilent) return;  /* Backtest engine: no browser notifications during replay */
   if (!notificationsEnabled || !("Notification" in window)) return;
   if (Notification.permission !== "granted") return;
   const symbol = _multiPanelProcessing || (UI.symbolSelect ? UI.symbolSelect.value : "");
@@ -19779,6 +19790,7 @@ function requestNotificationPermission() {
 }
 
 function showToast(title, msg, type = "info", duration = 6000) {
+  if (_btSilent) return;  /* Backtest engine: suppress toasts */
   const container = UI.toastContainer || document.getElementById("toastContainer");
   if (!container) return;
 
@@ -20848,6 +20860,7 @@ function handleLongTelegramCaption(caption, strategyType = "strategy") {
 }
 
 async function sendTelegramPhoto(blob, caption) {
+  if (_btSilent) return;  /* Backtest engine: never emit live alerts from a replay */
   /* Check rate limit before making API call */
   if (!(await waitForApiCallSlot("telegram", 20000))) {
     throw new Error("Rate limit exceeded. Please wait before sending another message.");
@@ -20917,6 +20930,7 @@ async function sendTelegramPhoto(blob, caption) {
  * Send a text-only message to Telegram via Bot API (HTML parse mode).
  */
 async function sendTelegramMessage(text) {
+  if (_btSilent) return;  /* Backtest engine: never emit live alerts from a replay */
   /* Check rate limit before making API call */
   if (!(await waitForApiCallSlot("telegram", 20000))) {
     throw new Error("Rate limit exceeded. Please wait before sending another message.");
@@ -22384,6 +22398,7 @@ function restoreSettings() {
 }
 
 function persistSignalLog() {
+  if (_btSilent) return;  /* Backtest engine: don't persist replay logs */
   try {
     const items = [];
     if (UI.signalLog) {
@@ -22459,6 +22474,7 @@ function restoreSignalHistory() {
 }
 
 function updateStatsUI() {
+  if (_btSilent) return;  /* Backtest engine: skip stats DOM work during replay */
   /* For focused-panel-specific stats, skip non-focused panels */
   const isFocusedOrSingle = !_multiPanelProcessing || _multiPanelProcessing === focusedPanelSymbol;
 
@@ -28460,6 +28476,873 @@ function updateBacktestUI() {
   if (statusEl) statusEl.textContent = backtestMode ? `Running… (${backtestIdx} / ${_backtestCandles.length})` : "Idle";
 }
 
+/* ============================================================================
+ *  STRATEGY BACKTEST ENGINE (Backtest Feature #1)
+ * ----------------------------------------------------------------------------
+ *  Replays historical candles for a user-selected symbol / timeframe / date
+ *  range through the *exact* live signal pipeline (processLatestCandle,
+ *  processCustomStrategies, monitorTradeOutcome, monitorCustomStrategyOutcomes,
+ *  …).  No strategy logic is duplicated here: entries, stop-losses, take
+ *  profits, trailing stops, break-even moves, partial-TP handling and every
+ *  strategy-specific exit are produced by the same functions that drive live
+ *  signals, with `_btSilent` suppressing the live-only side effects.
+ *
+ *  Adding a new strategy only requires one registerBacktestStrategy() entry
+ *  (or a call to the same function from any module) — the selector, the runner
+ *  and the report pick it up automatically.
+ * ========================================================================== */
+
+const BT_MAX_HISTORY_PAGES   = 24;    /* ticks_history pages per run (5000 candles each) */
+const BT_PAGE_SIZE           = 5000;  /* Deriv hard limit for ticks_history `count` */
+const BT_MAX_CANDLES         = 60000; /* safety cap on a single replay */
+const BT_WARMUP_CANDLES      = 220;   /* bars fetched before startDate to warm indicators */
+const BT_YIELD_EVERY         = 400;   /* candles processed between event-loop yields */
+const BT_FETCH_TIMEOUT_MS    = 25000;
+const BT_TERMINAL_RESULTS    = Object.freeze(["WIN", "LOSS", "BREAKEVEN", "EXPIRED"]);
+
+/* ---------------------------------------------------------------------------
+ *  Strategy registry
+ * ------------------------------------------------------------------------- */
+
+/** @type {Map<string, object>} id → strategy descriptor */
+const BACKTEST_STRATEGY_REGISTRY = new Map();
+
+const _BT_NOOP = () => {};
+
+/**
+ * Register a strategy as backtestable.  Every descriptor field is optional
+ * except `id`; missing accessors degrade gracefully so a partially-described
+ * future strategy still shows up in the selector.
+ *
+ * @param {object} def
+ * @param {string}   def.id           canonical snake_case strategy id
+ * @param {string}  [def.label]       display label (defaults to STRATEGY_DISPLAY_LABELS)
+ * @param {boolean} [def.alwaysOn]    true when the strategy has no master toggle
+ * @param {Function}[def.isEnabled]   () => boolean — current master toggle
+ * @param {Function}[def.setEnabled]  (bool) => void — master toggle setter
+ * @param {Function}[def.getHistory]  () => Array — the strategy's signal history
+ * @param {Function}[def.setHistory]  (Array) => void — replace the history array
+ * @param {Function}[def.getCooldown] () => * — cooldown / pending-setup state bundle
+ * @param {Function}[def.setCooldown] (*) => void — restore that bundle
+ * @param {Function}[def.resetExtra]  () => void — clear any other per-run state
+ */
+function registerBacktestStrategy(def) {
+  if (!def || !def.id) return null;
+  const id = String(def.id);
+  const entry = {
+    id,
+    label: def.label || resolveStrategyDisplayLabel(id, id),
+    order: Number.isFinite(def.order) ? def.order : BACKTEST_STRATEGY_REGISTRY.size,
+    alwaysOn: def.alwaysOn === true,
+    isEnabled:   typeof def.isEnabled   === "function" ? def.isEnabled   : () => def.alwaysOn === true,
+    setEnabled:  typeof def.setEnabled  === "function" ? def.setEnabled  : _BT_NOOP,
+    getHistory:  typeof def.getHistory  === "function" ? def.getHistory  : () => [],
+    setHistory:  typeof def.setHistory  === "function" ? def.setHistory  : _BT_NOOP,
+    getCooldown: typeof def.getCooldown === "function" ? def.getCooldown : () => null,
+    setCooldown: typeof def.setCooldown === "function" ? def.setCooldown : _BT_NOOP,
+    resetExtra:  typeof def.resetExtra  === "function" ? def.resetExtra  : _BT_NOOP
+  };
+  /** Clear this strategy's state so a replay starts from a clean slate. */
+  entry.reset = () => { entry.setHistory([]); entry.setCooldown(null); entry.resetExtra(); };
+  BACKTEST_STRATEGY_REGISTRY.set(id, entry);
+  return entry;
+}
+
+/** All registered strategies, in registration order. */
+function getBacktestStrategies() {
+  return Array.from(BACKTEST_STRATEGY_REGISTRY.values()).sort((a, b) => a.order - b.order);
+}
+
+/** Resolve a strategy descriptor by id (accepts camelCase aliases). */
+function getBacktestStrategy(id) {
+  if (!id) return null;
+  const key = String(id);
+  if (BACKTEST_STRATEGY_REGISTRY.has(key)) return BACKTEST_STRATEGY_REGISTRY.get(key);
+  for (const entry of BACKTEST_STRATEGY_REGISTRY.values()) {
+    if (STRATEGY_TYPE_TO_OPPOSITE_KEY[entry.id] === key) return entry;
+  }
+  return null;
+}
+
+/**
+ * Report canonical strategy ids that the UI knows about
+ * (STRATEGY_TYPE_TO_OPPOSITE_KEY — the snake_case signal-type vocabulary) but
+ * that have no backtest registration yet.  New strategies only need a single
+ * registerBacktestStrategy() entry; this surfaces any that were forgotten.
+ */
+function auditBacktestRegistry() {
+  const known = new Set(Object.keys(STRATEGY_TYPE_TO_OPPOSITE_KEY));
+  known.add("breakout_retest");
+  known.add("live_scalp");
+  return Array.from(known).filter(id => !BACKTEST_STRATEGY_REGISTRY.has(id));
+}
+
+/* --- Registrations. One entry per strategy; add new strategies here. ------ */
+(function registerBuiltInBacktestStrategies() {
+  /* Helper for the common "history array + numeric cooldown index" shape. */
+  const defs = [
+    { id: "breakout_retest", alwaysOn: true,
+      getHistory: () => signalHistory, setHistory: v => { signalHistory = v; },
+      getCooldown: () => ({ w: signalWins, l: signalLosses, b: signalBreakevens }),
+      setCooldown: s => { signalWins = s ? s.w : 0; signalLosses = s ? s.l : 0; signalBreakevens = s ? s.b : 0; } },
+    { id: "liquidity_sweep",
+      isEnabled: () => liquiditySweepEnabled, setEnabled: v => { liquiditySweepEnabled = v; },
+      getHistory: () => liquiditySweepHistory, setHistory: v => { liquiditySweepHistory = v; },
+      getCooldown: () => lastLiquiditySweepIdx, setCooldown: v => { lastLiquiditySweepIdx = v == null ? -999 : v; } },
+    { id: "stop_loss_hunt",
+      isEnabled: () => stopLossHuntEnabled, setEnabled: v => { stopLossHuntEnabled = v; },
+      getHistory: () => stopLossHuntHistory, setHistory: v => { stopLossHuntHistory = v; },
+      getCooldown: () => lastStopLossHuntIdx, setCooldown: v => { lastStopLossHuntIdx = v == null ? -999 : v; } },
+    { id: "failed_pin_bar",
+      isEnabled: () => failedPinBarEnabled, setEnabled: v => { failedPinBarEnabled = v; },
+      getHistory: () => failedPinBarHistory, setHistory: v => { failedPinBarHistory = v; },
+      getCooldown: () => lastFailedPinBarIdx, setCooldown: v => { lastFailedPinBarIdx = v == null ? -999 : v; } },
+    { id: "fib_scalp",
+      isEnabled: () => fibScalpEnabled, setEnabled: v => { fibScalpEnabled = v; },
+      getHistory: () => fibScalpHistory, setHistory: v => { fibScalpHistory = v; },
+      getCooldown: () => lastFibScalpIdx, setCooldown: v => { lastFibScalpIdx = v == null ? -999 : v; } },
+    { id: "power_of_3",
+      isEnabled: () => po3Enabled, setEnabled: v => { po3Enabled = v; },
+      getHistory: () => po3History, setHistory: v => { po3History = v; },
+      getCooldown: () => lastPo3Idx, setCooldown: v => { lastPo3Idx = v == null ? -999 : v; } },
+    { id: "po3_4h",
+      isEnabled: () => po3_4hEnabled, setEnabled: v => { po3_4hEnabled = v; },
+      getHistory: () => po3_4hHistory, setHistory: v => { po3_4hHistory = v; },
+      getCooldown: () => lastPo3_4hIdx, setCooldown: v => { lastPo3_4hIdx = v == null ? -999 : v; } },
+    { id: "grid_scalper_ma",
+      isEnabled: () => gridScalperMAEnabled, setEnabled: v => { gridScalperMAEnabled = v; },
+      getHistory: () => gridScalperMAHistory, setHistory: v => { gridScalperMAHistory = v; },
+      getCooldown: () => ({ i: lastGridScalperMAIdx, p: gridScalperMAPendingSetup, w: gridScalperMALossReversalWatch }),
+      setCooldown: s => {
+        lastGridScalperMAIdx = s ? s.i : -999;
+        gridScalperMAPendingSetup = s ? s.p : null;
+        gridScalperMALossReversalWatch = s && Array.isArray(s.w) ? s.w : [];
+      } },
+    { id: "grid_scalper_v2",
+      isEnabled: () => gridScalperV2Enabled, setEnabled: v => { gridScalperV2Enabled = v; },
+      getHistory: () => gridScalperV2History, setHistory: v => { gridScalperV2History = v; },
+      getCooldown: () => lastGridScalperV2Idx, setCooldown: v => { lastGridScalperV2Idx = v == null ? -999 : v; } },
+    { id: "fvg_strat",
+      isEnabled: () => fvgStratEnabled, setEnabled: v => { fvgStratEnabled = v; },
+      getHistory: () => fvgStratHistory, setHistory: v => { fvgStratHistory = v; },
+      getCooldown: () => lastFvgStratIdx, setCooldown: v => { lastFvgStratIdx = v == null ? -999 : v; } },
+    { id: "mtf_top_down",
+      isEnabled: () => mtfTopDownEnabled, setEnabled: v => { mtfTopDownEnabled = v; },
+      getHistory: () => mtfTopDownHistory, setHistory: v => { mtfTopDownHistory = v; },
+      getCooldown: () => ({ i: lastMtfTopDownIdx, s: mtfSetupState, e: mtfTerminalBreakoutEpoch }),
+      setCooldown: s => {
+        lastMtfTopDownIdx = s ? s.i : -999;
+        mtfSetupState = s ? s.s : null;
+        mtfTerminalBreakoutEpoch = s ? s.e : null;
+      } },
+    { id: "tiktok",
+      isEnabled: () => tiktokEnabled, setEnabled: v => { tiktokEnabled = v; },
+      getHistory: () => tiktokHistory, setHistory: v => { tiktokHistory = v; },
+      getCooldown: () => lastTiktokIdx, setCooldown: v => { lastTiktokIdx = v == null ? -999 : v; } },
+    { id: "candle_interp",
+      isEnabled: () => candleInterpEnabled, setEnabled: v => { candleInterpEnabled = v; },
+      getHistory: () => candleInterpHistory, setHistory: v => { candleInterpHistory = v; },
+      getCooldown: () => lastCandleInterpIdx, setCooldown: v => { lastCandleInterpIdx = v == null ? -999 : v; } },
+    { id: "orderblock",
+      isEnabled: () => orderblockEnabled, setEnabled: v => { orderblockEnabled = v; },
+      getHistory: () => orderblockHistory, setHistory: v => { orderblockHistory = v; },
+      getCooldown: () => lastOrderblockIdx, setCooldown: v => { lastOrderblockIdx = v == null ? -999 : v; } },
+    { id: "breaker_block",
+      isEnabled: () => breakerBlockEnabled, setEnabled: v => { breakerBlockEnabled = v; },
+      getHistory: () => breakerBlockHistory, setHistory: v => { breakerBlockHistory = v; },
+      getCooldown: () => lastBreakerBlockIdx, setCooldown: v => { lastBreakerBlockIdx = v == null ? -999 : v; } },
+    { id: "ote_golden_pocket",
+      isEnabled: () => oteGoldenPocketEnabled, setEnabled: v => { oteGoldenPocketEnabled = v; },
+      getHistory: () => oteGoldenPocketHistory, setHistory: v => { oteGoldenPocketHistory = v; },
+      getCooldown: () => lastOteGoldenPocketIdx, setCooldown: v => { lastOteGoldenPocketIdx = v == null ? -999 : v; } },
+    { id: "orb",
+      isEnabled: () => orbEnabled, setEnabled: v => { orbEnabled = v; },
+      getHistory: () => orbHistory, setHistory: v => { orbHistory = v; },
+      getCooldown: () => lastOrbIdx, setCooldown: v => { lastOrbIdx = v == null ? -999 : v; } },
+    { id: "crt_tbs",
+      isEnabled: () => crtTbsEnabled, setEnabled: v => { crtTbsEnabled = v; },
+      getHistory: () => crtTbsHistory, setHistory: v => { crtTbsHistory = v; },
+      getCooldown: () => lastCrtTbsIdx, setCooldown: v => { lastCrtTbsIdx = v == null ? -999 : v; } },
+    { id: "ny_open_range",
+      isEnabled: () => nyOpenRangeEnabled, setEnabled: v => { nyOpenRangeEnabled = v; },
+      getHistory: () => nyOpenRangeHistory, setHistory: v => { nyOpenRangeHistory = v; },
+      getCooldown: () => ({
+        r: nyOpenRange, b: nyOpenRangeBreakout, t: nyOpenRangeRetest,
+        x: nyOpenRangeTrade, p: nyOpenRangePhase, w: nyOpenRangeTradeWins, l: nyOpenRangeTradeLosses
+      }),
+      setCooldown: s => {
+        if (!s) { resetNyOpenRange(); nyOpenRangeTradeWins = 0; nyOpenRangeTradeLosses = 0; return; }
+        nyOpenRange = s.r; nyOpenRangeBreakout = s.b; nyOpenRangeRetest = s.t;
+        nyOpenRangeTrade = s.x; nyOpenRangePhase = s.p;
+        nyOpenRangeTradeWins = s.w; nyOpenRangeTradeLosses = s.l;
+      } },
+    { id: "session_range",
+      isEnabled: () => sessionRangesEnabled, setEnabled: v => { sessionRangesEnabled = v; },
+      getHistory: () => sessionRangeHistory, setHistory: v => { sessionRangeHistory = v; },
+      getCooldown: () => ({
+        a: sessionRangeAsian, l: sessionRangeLondon, n: sessionRangeNY,
+        t: asianRangeTight, s: londonSweepSignal, x: sessionRangeTrade,
+        w: sessionRangeTradeWins, o: sessionRangeTradeLosses
+      }),
+      setCooldown: s => {
+        if (!s) { resetSessionRanges(); sessionRangeTradeWins = 0; sessionRangeTradeLosses = 0; return; }
+        sessionRangeAsian = s.a; sessionRangeLondon = s.l; sessionRangeNY = s.n;
+        asianRangeTight = s.t; londonSweepSignal = s.s; sessionRangeTrade = s.x;
+        sessionRangeTradeWins = s.w; sessionRangeTradeLosses = s.o;
+      } },
+    { id: "live_scalp",
+      isEnabled: () => liveScalpEnabled, setEnabled: v => { liveScalpEnabled = v; },
+      getHistory: () => liveScalpHistory, setHistory: v => { liveScalpHistory = v; },
+      getCooldown: () => lastScalpCandleIdx, setCooldown: v => { lastScalpCandleIdx = v == null ? -999 : v; } }
+  ];
+  defs.forEach(registerBacktestStrategy);
+})();
+
+/** Capture every registered strategy's live state so a replay can restore it. */
+function _btSnapshotStrategyState() {
+  return getBacktestStrategies().map(s => ({
+    id: s.id,
+    enabled: s.isEnabled(),
+    history: s.getHistory(),
+    cooldown: s.getCooldown()
+  }));
+}
+
+/** Put the user's live strategy state back exactly as it was. */
+function _btRestoreStrategyState(snapshot) {
+  if (!Array.isArray(snapshot)) return;
+  for (const item of snapshot) {
+    const s = BACKTEST_STRATEGY_REGISTRY.get(item.id);
+    if (!s) continue;
+    if (!s.alwaysOn) s.setEnabled(item.enabled);
+    s.setHistory(item.history);
+    s.setCooldown(item.cooldown);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ *  Historical data loader (Deriv ticks_history, paged backwards)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Fetch closed OHLC candles for [startSec, endSec] at `granularity` seconds.
+ * Pages backwards from `endSec` because Deriv caps a single response at 5000
+ * candles.  Resolves to an ascending, de-duplicated candle array.
+ */
+function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress) {
+  return new Promise((resolve, reject) => {
+    let socket;
+    try { socket = new WebSocket(PUBLIC_WS_URL); }
+    catch (e) { reject(new Error(`Cannot open data feed: ${e.message}`)); return; }
+
+    const bySec = new Map();
+    let cursorEnd = endSec;
+    let pages = 0;
+    let settled = false;
+
+    const timer = setTimeout(() => finish(new Error("Historical data request timed out.")), BT_FETCH_TIMEOUT_MS);
+
+    function finish(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.close(); } catch (_) { /* already closed */ }
+      if (err) { reject(err); return; }
+      const out = Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch);
+      resolve(out);
+    }
+
+    function requestPage() {
+      if (pages >= BT_MAX_HISTORY_PAGES || bySec.size >= BT_MAX_CANDLES) { finish(null); return; }
+      pages++;
+      socket.send(JSON.stringify({
+        ticks_history: symbol,
+        adjust_start_time: 1,
+        style: "candles",
+        granularity,
+        count: BT_PAGE_SIZE,
+        start: Math.max(0, Math.floor(startSec)),
+        end: Math.max(0, Math.floor(cursorEnd))
+      }));
+    }
+
+    socket.onopen = requestPage;
+    socket.onerror = () => finish(new Error("Data feed connection failed."));
+    socket.onclose = () => { if (!settled) finish(new Error("Data feed closed before history was complete.")); };
+
+    socket.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (_) { return; }
+      if (msg.error) { finish(new Error(msg.error.message || "Deriv API error")); return; }
+      if (!Array.isArray(msg.candles)) return;
+
+      const page = msg.candles;
+      let oldest = Infinity;
+      for (const c of page) {
+        const epoch = +c.epoch;
+        if (!Number.isFinite(epoch)) continue;
+        if (epoch < oldest) oldest = epoch;
+        if (!bySec.has(epoch)) {
+          bySec.set(epoch, { open: +c.open, high: +c.high, low: +c.low, close: +c.close, epoch });
+        }
+      }
+      if (typeof onProgress === "function") onProgress(bySec.size);
+
+      /* Stop when the window is covered, the page came back short, or we hit a cap. */
+      if (page.length < BT_PAGE_SIZE || !Number.isFinite(oldest) || oldest <= startSec) { finish(null); return; }
+      cursorEnd = oldest - 1;
+      if (cursorEnd <= startSec) { finish(null); return; }
+      requestPage();
+    };
+  });
+}
+
+/* ---------------------------------------------------------------------------
+ *  Metrics
+ * ------------------------------------------------------------------------- */
+
+/** Contract size for lot-based sizing (synthetics = 1, FX = 100 000, …). */
+function backtestContractSize(symbol) {
+  const spec = SYMBOL_SPECS[symbol];
+  return spec && Number.isFinite(spec.contractSize) ? spec.contractSize : 1;
+}
+
+/** Normalised direction multiplier: +1 long, -1 short. */
+function backtestDirSign(dir) {
+  const d = String(dir || "").toUpperCase();
+  return (d === "BULL" || d === "BUY" || d === "LONG") ? 1 : -1;
+}
+
+/**
+ * Exit price actually realised by the live logic.  Strategies that implement
+ * trailing stops / break-even / partial exits write the realised `exitPrice`
+ * (or `closedPrice`) onto the signal, so this reflects those exits exactly.
+ */
+function backtestExitPrice(sig) {
+  if (Number.isFinite(sig.exitPrice))   return sig.exitPrice;
+  if (Number.isFinite(sig.closedPrice)) return sig.closedPrice;
+  if (sig.result === "WIN"  && Number.isFinite(sig.tp)) return sig.tp;
+  if (sig.result === "LOSS" && Number.isFinite(sig.sl)) return Number.isFinite(sig.trailingSL) ? sig.trailingSL : sig.sl;
+  return sig.entry;  /* EXPIRED / BREAKEVEN → flat */
+}
+
+/**
+ * Walk the harvested trades in chronological order and build the full metric
+ * set plus the internal equity curve used by future chart support.
+ */
+function computeBacktestMetrics(trades, cfg) {
+  const initial = Math.max(1, +cfg.initialBalance || 0);
+  const contractSize = backtestContractSize(cfg.symbol);
+  const equityCurve = [{ idx: 0, epoch: cfg.startSec, balance: initial, equity: initial, pnl: 0 }];
+
+  let balance = initial, peak = initial, maxDD = 0, maxDDPct = 0;
+  let wins = 0, losses = 0, breakevens = 0, expired = 0;
+  let grossProfit = 0, grossLoss = 0;
+  let bestTrade = 0, worstTrade = 0;
+  let winStreak = 0, lossStreak = 0, maxWinStreak = 0, maxLossStreak = 0;
+  const closed = [];
+
+  for (const sig of trades) {
+    const entry = +sig.entry;
+    const sl = +sig.sl;
+    if (!Number.isFinite(entry)) continue;
+    const riskDist = Math.abs(entry - sl);
+    const exit = +backtestExitPrice(sig);
+    if (!Number.isFinite(exit)) continue;
+
+    const units = cfg.sizingMode === "risk"
+      ? (riskDist > 0 ? (balance * (+cfg.riskPercent || 0) / 100) / riskDist : 0)
+      : (+cfg.lotSize || 0) * contractSize;
+
+    const pnl = backtestDirSign(sig.dir) * (exit - entry) * units;
+    balance += pnl;
+
+    if (pnl > 0) { grossProfit += pnl; } else if (pnl < 0) { grossLoss += -pnl; }
+    if (pnl > bestTrade)  bestTrade = pnl;
+    if (pnl < worstTrade) worstTrade = pnl;
+
+    if (sig.result === "WIN")            { wins++;  winStreak++; lossStreak = 0; }
+    else if (sig.result === "LOSS")      { losses++; lossStreak++; winStreak = 0; }
+    else if (sig.result === "BREAKEVEN") { breakevens++; winStreak = 0; lossStreak = 0; }
+    else                                 { expired++; winStreak = 0; lossStreak = 0; }
+    if (winStreak  > maxWinStreak)  maxWinStreak  = winStreak;
+    if (lossStreak > maxLossStreak) maxLossStreak = lossStreak;
+
+    if (balance > peak) peak = balance;
+    const dd = peak - balance;
+    if (dd > maxDD) { maxDD = dd; maxDDPct = peak > 0 ? (dd / peak) * 100 : 0; }
+
+    closed.push({
+      strategy: sig.strategy, dir: sig.dir, result: sig.result,
+      entry, sl, tp: Number.isFinite(sig.tp) ? +sig.tp : null, exit,
+      epoch: sig.epoch || null, exitEpoch: sig.exitEpoch || null,
+      units: +units.toFixed(6), pnl: +pnl.toFixed(4), balance: +balance.toFixed(4),
+      rMultiple: riskDist > 0 ? +((backtestDirSign(sig.dir) * (exit - entry)) / riskDist).toFixed(3) : null,
+      partialTpHit: sig.partialTpHit === true,
+      trailingUsed: Number.isFinite(sig.trailingSL),
+      breakeven: sig._breakeven === true
+    });
+    equityCurve.push({
+      idx: closed.length, epoch: sig.exitEpoch || sig.epoch || null,
+      balance: +balance.toFixed(4), equity: +balance.toFixed(4), pnl: +pnl.toFixed(4)
+    });
+  }
+  const decided   = wins + losses;
+  const netProfit = balance - initial;
+
+  return {
+    totalTrades: closed.length,
+    wins, losses, breakevens, expired,
+    winRate: decided > 0 ? (wins / decided) * 100 : 0,
+    netProfit,
+    profitPct: (netProfit / initial) * 100,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0),
+    grossProfit, grossLoss,
+    maxDrawdown: maxDD,
+    maxDrawdownPct: maxDDPct,
+    initialBalance: initial,
+    finalBalance: balance,
+    expectancy: closed.length > 0 ? netProfit / closed.length : 0,
+    bestTrade, worstTrade, maxWinStreak, maxLossStreak,
+    trades: closed,
+    equityCurve
+  };
+}
+
+/* ---------------------------------------------------------------------------
+ *  Replay runner
+ * ------------------------------------------------------------------------- */
+
+let backtestEngineRunning = false;
+let backtestAbortRequested = false;
+let lastBacktestReport = null;   /* exportable structure for future reports */
+
+/** Harvest every newly-resolved signal from a strategy's history array. */
+function _btHarvest(strategy, sink, candle) {
+  const history = strategy.getHistory();
+  if (!Array.isArray(history)) return;
+  for (const s of history) {
+    if (!s || typeof s !== "object" || s._btHarvested) continue;
+    if (BT_TERMINAL_RESULTS.indexOf(s.result) === -1) continue;
+    s._btHarvested = true;
+    sink.push({
+      strategy: strategy.id,
+      dir: s.dir, result: s.result,
+      entry: s.entry, sl: s.sl, tp: s.tp,
+      exitPrice: s.exitPrice, closedPrice: s.closedPrice, trailingSL: s.trailingSL,
+      partialTpHit: s.partialTpHit, _breakeven: s._breakeven,
+      epoch: s.epoch || null,
+      exitEpoch: candle ? candle.epoch : null
+    });
+  }
+}
+
+/** Isolate a single strategy: enable it, disable every other registered one. */
+function _btIsolateStrategy(target) {
+  for (const s of getBacktestStrategies()) {
+    if (s.alwaysOn) continue;
+    s.setEnabled(s.id === target.id);
+  }
+  if (!target.alwaysOn) target.setEnabled(true);
+}
+
+/** Wipe all per-strategy and shared setup/trade state before a replay. */
+function _btResetWorld() {
+  candles = [];
+  rangeStartEpoch = null;
+  openingRange = null; breakout = null;
+  retestInfo = null; indecisionInfo = null; confirmInfo = null;
+  trade = null; monitoringTrade = false; trailingSL = null;
+  partialTpHit = false;
+  teslaT1Hit = false; teslaT2Hit = false; teslaT3Hit = false; teslaBEHit = false;
+  retestCount = 0;
+  phase = "WAITING";
+  _deferredOutcomeCandleIdx = null;
+  for (const s of getBacktestStrategies()) {
+    try { s.reset(); } catch (_) { /* a strategy without resettable state */ }
+  }
+}
+
+function _btComputeIndicators() {
+  computeEMAs();
+  computeATR();
+  computeRSI();
+  computeMACD();
+  computeBollingerBands();
+  computeADX();
+  computeStochastic();
+  computeEMA200();
+  computeVWAP();
+}
+
+/** Run the exact live per-candle pipeline for the candle just appended. */
+function _btStep(candle) {
+  _btComputeIndicators();
+  processLatestCandle();
+  processLiveScalp();
+  processCustomStrategies();
+  monitorTradeOutcome(candle);
+  monitorScalpOutcomes(candle);
+  monitorCustomStrategyOutcomes(candle);
+  monitorSessionRangeTradeOutcome(candle);
+  monitorNyOpenRangeTradeOutcome(candle);
+}
+
+/**
+ * Replay `data` through one strategy and return its harvested trades.
+ * Candles before `fromEpoch` only warm up indicators — their signals are
+ * discarded so the reported range matches the user's start date exactly.
+ */
+async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
+  _btIsolateStrategy(strategy);
+  _btResetWorld();
+
+  const harvested = [];
+  for (let i = 0; i < data.length; i++) {
+    if (backtestAbortRequested) break;
+    const c = data[i];
+    candles.push({ open: c.open, high: c.high, low: c.low, close: c.close, epoch: c.epoch });
+    if (!rangeStartEpoch) rangeStartEpoch = candles[0].epoch;
+    if (candles.length > MAX_CANDLE_HISTORY) {
+      const removed = candles.length - MAX_CANDLE_HISTORY;
+      candles = candles.slice(removed);
+      adjustIndicesAfterSlice(removed);
+    }
+    _btStep(candles[candles.length - 1]);
+    _btHarvest(strategy, harvested, c);
+
+    if (i % BT_YIELD_EVERY === 0) {
+      if (typeof onProgress === "function") onProgress(i + 1, data.length);
+      await new Promise(r => setTimeout(r, 0));  /* keep the UI responsive */
+    }
+  }
+  return harvested.filter(t => {
+    /* Not every strategy stamps an entry epoch; fall back to the resolution
+       candle so warm-up trades are still excluded from the reported range. */
+    const ts = Number.isFinite(t.epoch) ? t.epoch : t.exitEpoch;
+    return !Number.isFinite(ts) || ts >= fromEpoch;
+  });
+}
+
+/**
+ * Run a backtest.
+ *
+ * @param {object} cfg
+ * @param {string|string[]} cfg.strategyId  one id, an array of ids, or "ALL"
+ * @param {string} cfg.symbol
+ * @param {number} cfg.granularity  seconds per candle
+ * @param {number} cfg.startSec     inclusive UNIX seconds
+ * @param {number} cfg.endSec       inclusive UNIX seconds
+ * @param {number} cfg.initialBalance
+ * @param {"lot"|"risk"} cfg.sizingMode
+ * @param {number} [cfg.lotSize]
+ * @param {number} [cfg.riskPercent]
+ * @param {Function} [cfg.onStatus]
+ * @returns {Promise<object>} exportable backtest report
+ */
+async function runStrategyBacktest(cfg) {
+  if (backtestEngineRunning) throw new Error("A backtest is already running.");
+
+  const symbol      = resolveFeedSymbol(String(cfg.symbol || "").trim());
+  const granularity = parseInt(cfg.granularity, 10);
+  const startSec    = Math.floor(cfg.startSec);
+  const endSec      = Math.floor(cfg.endSec);
+  const status      = typeof cfg.onStatus === "function" ? cfg.onStatus : () => {};
+
+  if (!symbol) throw new Error("Select a symbol.");
+  if (!Number.isFinite(granularity) || granularity <= 0) throw new Error("Select a timeframe.");
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) throw new Error("Select a valid date range.");
+  if (endSec <= startSec) throw new Error("End date must be after start date.");
+  if (!(+cfg.initialBalance > 0)) throw new Error("Initial balance must be greater than zero.");
+
+  const sizingMode = cfg.sizingMode === "risk" ? "risk" : "lot";
+  if (sizingMode === "risk" && !(+cfg.riskPercent > 0)) throw new Error("Risk % must be greater than zero.");
+  if (sizingMode === "lot"  && !(+cfg.lotSize > 0))     throw new Error("Lot size must be greater than zero.");
+
+  const requested = cfg.strategyId === "ALL" || cfg.strategyId == null
+    ? getBacktestStrategies()
+    : (Array.isArray(cfg.strategyId) ? cfg.strategyId : [cfg.strategyId])
+        .map(getBacktestStrategy).filter(Boolean);
+  if (requested.length === 0) throw new Error("Select at least one strategy.");
+
+  backtestEngineRunning = true;
+  backtestAbortRequested = false;
+
+  const snapshot = _snapshotChartGlobals();
+  const strategySnapshot = _btSnapshotStrategyState();
+  const prevHistorical = _historicalProcessing;
+  const prevMultiPanel = _multiPanelProcessing;
+  const prevGranOverride = _multiPanelGran;
+
+  try {
+    status("Downloading historical candles…");
+    const warmupSec = startSec - BT_WARMUP_CANDLES * granularity;
+    const data = await backtestFetchHistory(symbol, granularity, warmupSec, endSec,
+      n => status(`Downloading historical candles… ${n}`));
+    if (data.length < 30) throw new Error(`Only ${data.length} candles available for that range — widen the dates or pick a lower timeframe.`);
+
+    /* Silence every live-only side effect for the whole replay. */
+    _btSilent = true;
+    _historicalProcessing = true;
+    _multiPanelProcessing = null;
+    _multiPanelGran = granularity;
+
+    const results = [];
+    for (let s = 0; s < requested.length; s++) {
+      if (backtestAbortRequested) break;
+      const strategy = requested[s];
+      const label = `${strategy.label} (${s + 1}/${requested.length})`;
+      const trades = await _btReplayStrategy(strategy, data, startSec,
+        (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`));
+      const metrics = computeBacktestMetrics(trades, {
+        symbol, startSec, endSec,
+        initialBalance: +cfg.initialBalance,
+        sizingMode,
+        lotSize: +cfg.lotSize || 0,
+        riskPercent: +cfg.riskPercent || 0
+      });
+      results.push(Object.assign({ strategyId: strategy.id, strategy: strategy.label }, metrics));
+    }
+
+    lastBacktestReport = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      config: {
+        symbol, granularity, startSec, endSec,
+        start: new Date(startSec * 1000).toISOString(),
+        end: new Date(endSec * 1000).toISOString(),
+        initialBalance: +cfg.initialBalance,
+        sizingMode,
+        lotSize: +cfg.lotSize || null,
+        riskPercent: +cfg.riskPercent || null
+      },
+      candlesLoaded: data.length,
+      aborted: backtestAbortRequested,
+      results
+    };
+    return lastBacktestReport;
+  } finally {
+    _btSilent = false;
+    _historicalProcessing = prevHistorical;
+    _multiPanelProcessing = prevMultiPanel;
+    _multiPanelGran = prevGranOverride;
+    _restoreChartGlobals(snapshot);
+    _btRestoreStrategyState(strategySnapshot);
+    backtestEngineRunning = false;
+  }
+}
+
+/** Request an early stop of the in-flight replay. */
+function abortStrategyBacktest() { backtestAbortRequested = true; }
+
+/* ---------------------------------------------------------------------------
+ *  Reporting / export
+ * ------------------------------------------------------------------------- */
+
+const BACKTEST_REPORT_COLUMNS = Object.freeze([
+  "Strategy", "Trades", "Win Rate", "Profit", "Profit %", "Drawdown", "Profit Factor"
+]);
+
+function _btNum(v, d = 2) { return Number.isFinite(v) ? v.toFixed(d) : "--"; }
+function _btPF(v) { return v === Infinity ? "∞" : _btNum(v, 2); }
+
+/** One report row per strategy — the only output this engine produces. */
+function buildBacktestReportRows(report) {
+  if (!report || !Array.isArray(report.results)) return [];
+  return report.results.map(r => ({
+    Strategy: r.strategy,
+    Trades: r.totalTrades,
+    "Win Rate": `${_btNum(r.winRate, 1)}%`,
+    Profit: _btNum(r.netProfit, 2),
+    "Profit %": `${_btNum(r.profitPct, 2)}%`,
+    Drawdown: `${_btNum(r.maxDrawdownPct, 2)}%`,
+    "Profit Factor": _btPF(r.profitFactor)
+  }));
+}
+
+/** Plain-text table (used by the panel and by console/debug output). */
+function formatBacktestReport(report) {
+  const rows = buildBacktestReportRows(report);
+  if (rows.length === 0) return "No results.";
+  const cols = BACKTEST_REPORT_COLUMNS;
+  const widths = cols.map(c => Math.max(c.length, ...rows.map(r => String(r[c]).length)));
+  const line = (cells) => cells.map((v, i) => String(v).padEnd(widths[i])).join(" | ");
+  return [line(cols), widths.map(w => "-".repeat(w)).join("-|-"), ...rows.map(r => line(cols.map(c => r[c])))].join("\n");
+}
+
+/** Full structured export (metrics + trades + equity curve) for future reports. */
+function exportBacktestReport(report = lastBacktestReport) {
+  if (!report) return null;
+  return JSON.parse(JSON.stringify(report));
+}
+
+/** Summary CSV using exactly the reporting columns. */
+function exportBacktestCSV(report = lastBacktestReport) {
+  const rows = buildBacktestReportRows(report);
+  if (rows.length === 0) return "";
+  const esc = v => `"${String(v).replace(/"/g, '""')}"`;
+  return [BACKTEST_REPORT_COLUMNS.join(","), ...rows.map(r => BACKTEST_REPORT_COLUMNS.map(c => esc(r[c])).join(","))].join("\n");
+}
+
+/** Equity curve points for a strategy — kept internally for future charting. */
+function getBacktestEquityCurve(strategyId, report = lastBacktestReport) {
+  if (!report) return [];
+  const hit = report.results.find(r => r.strategyId === strategyId) || report.results[0];
+  return hit ? hit.equityCurve : [];
+}
+
+/* ---------------------------------------------------------------------------
+ *  Panel UI
+ * ------------------------------------------------------------------------- */
+
+function initStrategyBacktestPanel() {
+  const sel = document.getElementById("btStrategySelect");
+  if (sel && sel.options.length === 0) {
+    const all = document.createElement("option");
+    all.value = "ALL"; all.textContent = "All Strategies (slower)";
+    sel.appendChild(all);
+    for (const s of getBacktestStrategies()) {
+      const opt = document.createElement("option");
+      opt.value = s.id; opt.textContent = s.label;
+      sel.appendChild(opt);
+    }
+    sel.value = "breakout_retest";
+  }
+
+  /* Mirror the live symbol/timeframe dropdowns so new instruments appear here too. */
+  const symSel = document.getElementById("btSymbolSelect");
+  const srcSym = document.getElementById("symbolSelect");
+  if (symSel && srcSym) {
+    symSel.innerHTML = srcSym.innerHTML;
+    symSel.value = srcSym.value;
+  }
+  const granSel = document.getElementById("btGranSelect");
+  const srcGran = document.getElementById("granSelect");
+  if (granSel && srcGran && granSel.options.length === 0) {
+    granSel.innerHTML = srcGran.innerHTML;
+    granSel.value = srcGran.value;
+  }
+
+  const startEl = document.getElementById("btStartDate");
+  const endEl   = document.getElementById("btEndDate");
+  if (startEl && !startEl.value) {
+    const now = new Date();
+    const back = new Date(now.getTime() - 7 * 86400000);
+    startEl.value = back.toISOString().slice(0, 10);
+    if (endEl && !endEl.value) endEl.value = now.toISOString().slice(0, 10);
+  }
+  _btSyncSizingInputs();
+  _btRenderResults(lastBacktestReport);
+}
+
+function _btSyncSizingInputs() {
+  const mode = document.getElementById("btSizingMode");
+  const lotRow = document.getElementById("btLotRow");
+  const riskRow = document.getElementById("btRiskRow");
+  if (!mode) return;
+  const isRisk = mode.value === "risk";
+  if (lotRow)  lotRow.style.display  = isRisk ? "none" : "";
+  if (riskRow) riskRow.style.display = isRisk ? "" : "none";
+}
+
+function _btSetStatus(text) {
+  const el = document.getElementById("btStatus");
+  if (el) el.textContent = text;
+}
+
+function _btRenderResults(report) {
+  const body = document.getElementById("btResultsBody");
+  const wrap = document.getElementById("btResults");
+  if (!body || !wrap) return;
+  const rows = buildBacktestReportRows(report);
+  if (rows.length === 0) { wrap.style.display = "none"; body.innerHTML = ""; return; }
+  wrap.style.display = "";
+  body.innerHTML = "";
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const net = report.results[i].netProfit;
+    const tr = document.createElement("tr");
+    for (const col of BACKTEST_REPORT_COLUMNS) {
+      const td = document.createElement("td");
+      td.textContent = r[col];
+      if (col === "Profit" || col === "Profit %") td.style.color = net >= 0 ? "#22c55e" : "#ef4444";
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+}
+
+function _btDownload(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function runStrategyBacktestFromUI() {
+  const runBtn  = document.getElementById("btRunBtn");
+  const stopBtn = document.getElementById("btStopBtn");
+  const val = id => { const el = document.getElementById(id); return el ? el.value : ""; };
+
+  const startVal = val("btStartDate");
+  const endVal   = val("btEndDate");
+  if (!startVal || !endVal) { _btSetStatus("Select a start and end date."); return; }
+
+  const cfg = {
+    strategyId: val("btStrategySelect") || "ALL",
+    symbol: val("btSymbolSelect"),
+    granularity: parseInt(val("btGranSelect"), 10),
+    startSec: Math.floor(Date.parse(`${startVal}T00:00:00Z`) / 1000),
+    endSec:   Math.floor(Date.parse(`${endVal}T23:59:59Z`) / 1000),
+    initialBalance: parseFloat(val("btInitialBalance")),
+    sizingMode: val("btSizingMode") === "risk" ? "risk" : "lot",
+    lotSize: parseFloat(val("btLotSize")),
+    riskPercent: parseFloat(val("btRiskPercent")),
+    onStatus: _btSetStatus
+  };
+
+  if (runBtn)  runBtn.disabled = true;
+  if (stopBtn) stopBtn.disabled = false;
+  try {
+    const report = await runStrategyBacktest(cfg);
+    _btRenderResults(report);
+    _btSetStatus(report.aborted
+      ? `Stopped early — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles.`
+      : `Done — ${report.results.length} strategy result(s) from ${report.candlesLoaded} candles.`);
+  } catch (e) {
+    _btSetStatus(`Error: ${e.message}`);
+  } finally {
+    if (runBtn)  runBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+  }
+}
+
+function initStrategyBacktestControls() {
+  initStrategyBacktestPanel();
+  const on = (id, evt, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(evt, fn); };
+  on("btRunBtn", "click", runStrategyBacktestFromUI);
+  on("btStopBtn", "click", () => { abortStrategyBacktest(); _btSetStatus("Stopping…"); });
+  on("btSizingMode", "change", _btSyncSizingInputs);
+  on("btExportJsonBtn", "click", () => {
+    const data = exportBacktestReport();
+    if (!data) { _btSetStatus("Run a backtest first."); return; }
+    _btDownload(`backtest-${data.config.symbol}-${data.config.granularity}s.json`, JSON.stringify(data, null, 2), "application/json");
+  });
+  on("btExportCsvBtn", "click", () => {
+    const csv = exportBacktestCSV();
+    if (!csv) { _btSetStatus("Run a backtest first."); return; }
+    _btDownload(`backtest-${lastBacktestReport.config.symbol}-${lastBacktestReport.config.granularity}s.csv`, csv, "text/csv");
+  });
+  const symSel = document.getElementById("symbolSelect");
+  if (symSel) symSel.addEventListener("change", () => {
+    const btSym = document.getElementById("btSymbolSelect");
+    const prev = btSym ? btSym.value : null;
+    if (btSym) { btSym.innerHTML = symSel.innerHTML; btSym.value = prev && btSym.querySelector(`option[value="${prev}"]`) ? prev : symSel.value; }
+  });
+}
+
 /* ---- Feature 15: Multi-R Partial Exit Ladder ---- */
 let multiRLadderEnabled = false;
 let multiRLadder   = JSON.parse(JSON.stringify(MULTI_R_LADDER_DEFAULT));
@@ -28577,6 +29460,7 @@ function areTradeLevelsEqual(a, b) {
 }
 
 function drawChart() {
+  if (_btSilent) return;  /* Backtest engine: skip canvas rendering during replay */
   const canvas = UI.canvas;
   const ctx = UI.ctx;
   if (!canvas || !ctx) return;
@@ -33668,6 +34552,9 @@ document.addEventListener("DOMContentLoaded", () => {
       UI.backtestSpeedInput.value = backtestSpeedMs;
     });
   }
+
+  /* Backtest Feature #1: strategy backtest engine controls */
+  initStrategyBacktestControls();
 
   /* Feature 8: Scanner toggle */
   if (UI.scannerToggle) {
