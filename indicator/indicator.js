@@ -11839,6 +11839,8 @@ function monitorScalpOutcomes(candle) {
 }
 
 function playScalpAlert(dir) {
+  /* Gate this during backtest replay to prevent side effects during historical processing. */
+  if (backtestEngineRunning || _btSilent) return;
   if (!soundEnabled) return;
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -12758,6 +12760,9 @@ function validateSignalExecutionLevels(signal, strategyLabel) {
  * Called from processLiquiditySweep, processStopLossHunt, processFailedPinBar.
  */
 async function sendTelegramStrategyAlert(signal, force = false) {
+  /* Gate this during backtest replay to prevent delayed callbacks from running after replay ends. */
+  if (backtestEngineRunning) return;
+  
   /* Determine which toggle to check based on strategy type.
      Breakout Retest uses telegramAutoSend, custom strategies use telegramStrategyAutoSend. */
   const isBreakoutRetest = signal && (signal.type === "breakout_retest" || signal.strategyType === "breakout_retest");
@@ -16829,6 +16834,10 @@ function recordSignal(confirmPattern, retestCandleIdx) {
   signal.entryProgressAtr = trade.entryProgressAtr;
   signal.entryBodyAtr = trade.entryBodyAtr;
   signal.entryCloseLocation = trade.entryCloseLocation;
+  /* Capture entry candle epoch to exclude warm-up trades from backtest range. */
+  if (trade.entryIdx >= 0 && trade.entryIdx < candles.length) {
+    signal.epoch = candles[trade.entryIdx].epoch;
+  }
   if (signal.breakoutDetectedAtMs == null && breakout) signal.breakoutDetectedAtMs = breakout.detectedAtMs;
   stampSignalLifecycle(signal, { atrAtSignal: trade.atrAtEntry });
   trade.signalId = signal.signalId;
@@ -25150,6 +25159,8 @@ function connect() {
 
   ws.onmessage = (evt) => {
     if (thisWs !== ws) return; /* stale connection */
+    /* Ignore live feed while backtest replay is running to prevent contamination */
+    if (backtestEngineRunning) return;
     const msg = JSON.parse(evt.data);
 
     /* Ignore ping/pong responses */
@@ -28621,7 +28632,8 @@ function auditBacktestRegistry() {
     { id: "grid_scalper_v2",
       isEnabled: () => gridScalperV2Enabled, setEnabled: v => { gridScalperV2Enabled = v; },
       getHistory: () => gridScalperV2History, setHistory: v => { gridScalperV2History = v; },
-      getCooldown: () => lastGridScalperV2Idx, setCooldown: v => { lastGridScalperV2Idx = v == null ? -999 : v; } },
+      getCooldown: () => lastGridScalperV2Idx, setCooldown: v => { lastGridScalperV2Idx = v == null ? -999 : v; },
+      resetExtra: () => { gridScalperV2State = null; } },
     { id: "fvg_strat",
       isEnabled: () => fvgStratEnabled, setEnabled: v => { fvgStratEnabled = v; },
       getHistory: () => fvgStratHistory, setHistory: v => { fvgStratHistory = v; },
@@ -28747,13 +28759,26 @@ function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress)
       settled = true;
       clearTimeout(timer);
       try { socket.close(); } catch (_) { /* already closed */ }
-      if (err) { reject(err); return; }
+      if (err) {
+        if (typeof err === "object" && err.truncated) {
+          resolve(err);  /* Return the truncated result object */
+        } else {
+          reject(err);
+        }
+        return;
+      }
       const out = Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch);
-      resolve(out);
+      resolve({ data: out, truncated: false });
     }
 
     function requestPage() {
-      if (pages >= BT_MAX_HISTORY_PAGES || bySec.size >= BT_MAX_CANDLES) { finish(null); return; }
+      const cappedByPages = pages >= BT_MAX_HISTORY_PAGES;
+      const cappedByCandles = bySec.size >= BT_MAX_CANDLES;
+      if (cappedByPages || cappedByCandles) {
+        const result = { data: Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch), truncated: true };
+        finish(result);
+        return;
+      }
       pages++;
       socket.send(JSON.stringify({
         ticks_history: symbol,
@@ -28850,11 +28875,17 @@ function computeBacktestMetrics(trades, cfg) {
     const exit = +backtestExitPrice(sig);
     if (!Number.isFinite(exit)) continue;
 
-    const units = cfg.sizingMode === "risk"
-      ? (riskDist > 0 ? (balance * (+cfg.riskPercent || 0) / 100) / riskDist : 0)
-      : (+cfg.lotSize || 0) * contractSize;
-
-    const pnl = backtestDirSign(sig.dir) * (exit - entry) * units;
+    /* Use strategy-specific realized P&L if available (e.g., Grid Scalper V2) */
+    let pnl, units;
+    if (Number.isFinite(sig.closedProfit)) {
+      pnl = sig.closedProfit;
+      units = 0; /* P&L is pre-computed; units don't apply */
+    } else {
+      units = cfg.sizingMode === "risk"
+        ? (riskDist > 0 ? (balance * (+cfg.riskPercent || 0) / 100) / riskDist : 0)
+        : (+cfg.lotSize || 0) * contractSize;
+      pnl = backtestDirSign(sig.dir) * (exit - entry) * units;
+    }
     balance += pnl;
 
     if (pnl > 0) { grossProfit += pnl; } else if (pnl < 0) { grossLoss += -pnl; }
@@ -28931,6 +28962,7 @@ function _btHarvest(strategy, sink, candle) {
       entry: s.entry, sl: s.sl, tp: s.tp,
       exitPrice: s.exitPrice, closedPrice: s.closedPrice, trailingSL: s.trailingSL,
       partialTpHit: s.partialTpHit, _breakeven: s._breakeven,
+      closedProfit: s.closedProfit || null,
       epoch: s.epoch || null,
       exitEpoch: candle ? candle.epoch : null
     });
@@ -29016,6 +29048,28 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
       await new Promise(r => setTimeout(r, 0));  /* keep the UI responsive */
     }
   }
+
+  /* Close any signals still PENDING at end of range to prevent them from disappearing. */
+  const history = strategy.getHistory();
+  if (Array.isArray(history)) {
+    for (const s of history) {
+      if (s && typeof s === "object" && !s._btHarvested && s.result === "PENDING") {
+        s.result = "EXPIRED";
+        s._btHarvested = true;
+        harvested.push({
+          strategy: strategy.id,
+          dir: s.dir, result: "EXPIRED",
+          entry: s.entry, sl: s.sl, tp: s.tp,
+          exitPrice: s.exitPrice, closedPrice: s.closedPrice, trailingSL: s.trailingSL,
+          partialTpHit: s.partialTpHit, _breakeven: s._breakeven,
+          closedProfit: s.closedProfit || null,
+          epoch: s.epoch || null,
+          exitEpoch: data.length > 0 ? data[data.length - 1].epoch : null
+        });
+      }
+    }
+  }
+
   return harvested.filter(t => {
     /* Not every strategy stamps an entry epoch; fall back to the resolution
        candle so warm-up trades are still excluded from the reported range. */
@@ -29077,14 +29131,24 @@ async function runStrategyBacktest(cfg) {
   try {
     status("Downloading historical candles…");
     const warmupSec = startSec - BT_WARMUP_CANDLES * granularity;
-    const data = await backtestFetchHistory(symbol, granularity, warmupSec, endSec,
+    const result = await backtestFetchHistory(symbol, granularity, warmupSec, endSec,
       n => status(`Downloading historical candles… ${n}`));
+    
+    /* Unwrap the result object to handle both format: { data, truncated } and legacy array */
+    const data = (result && result.data) || result || [];
+    const isTruncated = (result && result.truncated) === true;
+    
     if (data.length < 30) throw new Error(`Only ${data.length} candles available for that range — widen the dates or pick a lower timeframe.`);
+    if (isTruncated) {
+      const msg = `⚠️ Data truncated at limit: only ${data.length} candles loaded (maximum reached).`;
+      addLog(msg);
+      showToast("Data Truncated", msg, "warning", 5000);
+    }
 
     /* Silence every live-only side effect for the whole replay. */
     _btSilent = true;
     _historicalProcessing = true;
-    _multiPanelProcessing = null;
+    _multiPanelProcessing = symbol;
     _multiPanelGran = granularity;
 
     const results = [];
