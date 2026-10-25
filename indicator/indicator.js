@@ -5541,13 +5541,32 @@ function _checkProfitExitAlert(s, candle, stratLabel) {
 }
 
 /**
+ * Shared AudioContext for all alert beeps (phase/strategy/scalp).
+ * Creating a brand-new AudioContext per alert leaks native audio-thread
+ * resources over a long-running session — browsers cap concurrent live
+ * contexts, and never closing them causes growing memory/CPU usage until
+ * the tab becomes unresponsive. Lazily create ONE context and reuse it,
+ * resuming it if the browser auto-suspended it (e.g. after tab backgrounding).
+ */
+let _sharedAlertAudioCtx = null;
+function getSharedAlertAudioContext() {
+  if (!_sharedAlertAudioCtx || _sharedAlertAudioCtx.state === "closed") {
+    _sharedAlertAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (_sharedAlertAudioCtx.state === "suspended") {
+    _sharedAlertAudioCtx.resume().catch(() => {});
+  }
+  return _sharedAlertAudioCtx;
+}
+
+/**
  * Audio alert for the 3 custom strategies (triple beep).
  */
 function playStrategyAlert(dir) {
   if (_btSilent) return;  /* Backtest engine: no audio during replay */
   if (!soundEnabled) return;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getSharedAlertAudioContext();
     const freq = dir === "BULL" ? 900 : 700;
     for (let i = 0; i < 3; i++) {
       const osc = ctx.createOscillator();
@@ -11857,7 +11876,7 @@ function playScalpAlert(dir) {
   if (backtestEngineRunning || _btSilent) return;
   if (!soundEnabled) return;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getSharedAlertAudioContext();
     const freq = dir === "BULL" ? 1000 : 800;
     /* Double beep for urgency */
     for (let i = 0; i < 2; i++) {
@@ -19818,7 +19837,7 @@ function playPhaseAlert(phaseName) {
   if (_btSilent) return;  /* Backtest engine: no audio during replay */
   if (!soundEnabled) return;
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getSharedAlertAudioContext();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
