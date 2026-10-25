@@ -28846,6 +28846,7 @@ function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress)
     let cursorEnd = endSec;
     let pages = 0;
     let settled = false;
+    let lastOldest = Infinity;   /* detects a provider that stops making backward progress */
 
     const timer = setTimeout(() => finish(new Error("Historical data request timed out.")), BT_FETCH_TIMEOUT_MS);
 
@@ -28908,8 +28909,22 @@ function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress)
       }
       if (typeof onProgress === "function") onProgress(bySec.size);
 
-      /* Stop when the window is covered, the page came back short, or we hit a cap. */
-      if (page.length < BT_PAGE_SIZE || !Number.isFinite(oldest) || oldest <= startSec) { finish(null); return; }
+      /* A clean finish only happens once the window is actually covered (the
+         oldest candle received so far reaches startSec). A short/empty page
+         does NOT by itself mean history is exhausted — Deriv's public feed
+         can silently cap a single "candles" response well below the
+         requested `count` (e.g. 1000 instead of 5000) while still holding
+         more data further back, so a short page must keep paging rather than
+         stop. Only bail out — and flag the result as truncated — when the
+         window still isn't covered and the feed stops making backward
+         progress (an empty page, or an oldest candle no older than last time). */
+      const windowCovered = Number.isFinite(oldest) ? oldest <= startSec : bySec.size > 0 && lastOldest <= startSec;
+      if (windowCovered) { finish(null); return; }
+      if (page.length === 0 || (Number.isFinite(oldest) && oldest >= lastOldest)) {
+        finish({ data: Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch), truncated: true });
+        return;
+      }
+      lastOldest = oldest;
       cursorEnd = oldest - 1;
       if (cursorEnd <= startSec) { finish(null); return; }
       requestPage();
@@ -29836,6 +29851,27 @@ function _btSyncScopeLabel() {
   groupOpt.textContent = `All ${getMarketTypeLabel(getMarketType(sym))} (${matches.length})`;
 }
 
+/**
+ * Fixed "Lot Size" sizing applies the same raw unit count to every symbol,
+ * so a multi-symbol run mixes wildly different nominal price scales
+ * (e.g. a 1HZ25V unit vs. a 1HZ10V unit) into one non-comparable P&L table.
+ * "Risk %" sizing normalises every trade to the same % of account risk, which
+ * is the only sizing mode that produces an apples-to-apples comparison
+ * across symbols, so auto-switch to it the moment a multi-symbol scope is
+ * selected. The user can still switch back to Lot Size manually.
+ */
+function _btAutoSwitchSizingForScope() {
+  const scopeSel = document.getElementById("btSymbolScope");
+  const modeSel  = document.getElementById("btSizingMode");
+  if (!scopeSel || !modeSel) return;
+  const isMultiSymbol = scopeSel.value === "group" || scopeSel.value === "all";
+  if (isMultiSymbol && modeSel.value !== "risk") {
+    modeSel.value = "risk";
+    _btSyncSizingInputs();
+    _btSetStatus("Switched to Risk % sizing — Lot Size isn't comparable across symbols with different price scales.");
+  }
+}
+
 async function runStrategyBacktestFromUI() {
   const runBtn  = document.getElementById("btRunBtn");
   const stopBtn = document.getElementById("btStopBtn");
@@ -29898,6 +29934,7 @@ function initStrategyBacktestControls() {
     _btDownload(`${_btExportBaseName(lastBacktestReport)}.csv`, csv, "text/csv");
   });
   on("btSymbolSelect", "change", _btSyncScopeLabel);
+  on("btSymbolScope", "change", _btAutoSwitchSizingForScope);
   const symSel = document.getElementById("symbolSelect");
   if (symSel) symSel.addEventListener("change", () => {
     const btSym = document.getElementById("btSymbolSelect");
