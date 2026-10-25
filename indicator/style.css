@@ -3415,6 +3415,18 @@ body.light-theme .strat-enable-row input[type="checkbox"]:checked {
   margin-top: 2px;
 }
 
+.backtest-recommendation {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+.backtest-recommendation b { color: #22c55e; }
+
 /* Backtest Feature #1: strategy backtest panel */
 .bt-grid {
   display: grid;

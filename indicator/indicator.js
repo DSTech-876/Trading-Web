@@ -29700,6 +29700,56 @@ const BACKTEST_REPORT_COLUMNS = Object.freeze([
 function _btNum(v, d = 2) { return Number.isFinite(v) ? v.toFixed(d) : "--"; }
 function _btPF(v) { return v === Infinity ? "∞" : _btNum(v, 2); }
 
+/** Minimum trades before a result is treated as statistically meaningful enough to recommend. */
+const BT_RECOMMENDATION_MIN_TRADES = 5;
+
+/**
+ * Rank backtest result rows best-first by profit factor, then profit %,
+ * then lowest drawdown. Multi-symbol runs are ranked on their combined
+ * "ALL (N symbols)" row per strategy so the comparison stays apples-to-apples;
+ * single-symbol runs are ranked on the plain per-strategy rows.
+ */
+function rankBacktestResults(report) {
+  if (!report || !Array.isArray(report.results)) return [];
+  const hasAggregates = report.results.some(r => r.aggregate);
+  const rows = (hasAggregates ? report.results.filter(r => r.aggregate) : report.results.filter(r => !r.aggregate));
+  const pool = rows.length > 0 ? rows : report.results;
+  return pool.slice().sort((a, b) => {
+    const aTrades = a.totalTrades || 0, bTrades = b.totalTrades || 0;
+    if ((aTrades === 0) !== (bTrades === 0)) return aTrades === 0 ? 1 : -1;
+    const aPF = a.profitFactor === Infinity ? 1e9 : (+a.profitFactor || 0);
+    const bPF = b.profitFactor === Infinity ? 1e9 : (+b.profitFactor || 0);
+    if (bPF !== aPF) return bPF - aPF;
+    if ((b.profitPct || 0) !== (a.profitPct || 0)) return (b.profitPct || 0) - (a.profitPct || 0);
+    return (a.maxDrawdownPct || 0) - (b.maxDrawdownPct || 0);
+  });
+}
+
+/**
+ * Pick the single best-performing strategy from a finished backtest report.
+ * Returns { ok:false, reason } when the sample is too thin or nothing was
+ * net profitable, so the UI never recommends a strategy on weak evidence.
+ */
+function computeBacktestRecommendation(report) {
+  const ranked = rankBacktestResults(report);
+  if (ranked.length === 0) return { ok: false, reason: "No results to rank yet." };
+  const top = ranked[0];
+  if (!top.totalTrades || top.totalTrades < BT_RECOMMENDATION_MIN_TRADES) {
+    return { ok: false, reason: `Too few trades (${top.totalTrades || 0}) in this window to recommend a strategy confidently — widen the date range or add more strategies.` };
+  }
+  if (!(top.netProfit > 0)) {
+    return { ok: false, reason: "No strategy was net profitable over this window — none is recommended yet." };
+  }
+  const runnerUp = ranked.find(r => r !== top && r.strategyId !== top.strategyId);
+  return {
+    ok: true,
+    strategy: top.strategy, strategyId: top.strategyId, symbol: top.symbol,
+    trades: top.totalTrades, winRate: top.winRate, profitPct: top.profitPct,
+    profitFactor: top.profitFactor, drawdown: top.maxDrawdownPct,
+    runnerUp: runnerUp ? runnerUp.strategy : null
+  };
+}
+
 /** One report row per symbol × strategy, plus the combined rows of a multi-symbol run. */
 function buildBacktestReportRows(report) {
   if (!report || !Array.isArray(report.results)) return [];
@@ -29794,6 +29844,7 @@ function initStrategyBacktestPanel() {
   _btSyncSizingInputs();
   _btSyncScopeLabel();
   _btRenderResults(lastBacktestReport);
+  _btRenderRecommendation(lastBacktestReport);
 }
 
 function _btSyncSizingInputs() {
@@ -29847,6 +29898,27 @@ function _btRenderResults(report) {
     }
     body.appendChild(tr);
   }
+}
+
+/** Render the "recommended strategy" banner under the status line once a report exists. */
+function _btRenderRecommendation(report) {
+  const el = document.getElementById("btRecommendation");
+  if (!el) return;
+  if (!report || !Array.isArray(report.results) || report.results.length === 0) {
+    el.style.display = "none"; el.innerHTML = "";
+    return;
+  }
+  const rec = computeBacktestRecommendation(report);
+  el.style.display = "";
+  if (!rec.ok) {
+    el.innerHTML = `⚠️ <b>No recommendation</b> — ${rec.reason}`;
+    return;
+  }
+  const scopeNote = rec.symbol && String(rec.symbol).startsWith("ALL") ? ` across ${rec.symbol}` : (rec.symbol ? ` on ${rec.symbol}` : "");
+  const runnerUpNote = rec.runnerUp ? ` (runner-up: ${rec.runnerUp})` : "";
+  el.innerHTML = `⭐ <b>Recommended: ${rec.strategy}</b>${scopeNote} — ` +
+    `${_btNum(rec.winRate, 1)}% win rate, ${_btNum(rec.profitPct, 2)}% profit, ` +
+    `PF ${_btPF(rec.profitFactor)}, ${_btNum(rec.drawdown, 2)}% max drawdown over ${rec.trades} trades.${runnerUpNote}`;
 }
 
 function _btDownload(filename, text, mime) {
@@ -29929,6 +30001,7 @@ async function runStrategyBacktestFromUI() {
   try {
     const report = await runStrategyBacktest(cfg);
     _btRenderResults(report);
+    _btRenderRecommendation(report);
     const mode = report.config.settings && report.config.settings.mode === "manual"
       ? "manual (locked) filters"
       : `recommended settings — ${report.config.settings ? report.config.settings.label : ""}`;
