@@ -3644,6 +3644,7 @@ let nyOpenRangeHistory   = [];    /* alert history for strategy alerts panel */
 const NY_OPEN_RANGE_MAX_HISTORY = 20;
 let _nyOpenRangeNotified = false;  /* prevent duplicate 9:30 notifications per session */
 let _nyOpenRangeTimerInterval = null; /* check-clock interval */
+let _btNyRangeDay = null; /* track current processing day for day-aware reset */
 
 /* ================= SESSION RANGES (Asian / London / NY) ================= */
 let sessionRangesEnabled  = false;    /* master toggle */
@@ -13830,17 +13831,17 @@ function hasVolumeSpikeOnBreakout(candleIdx) {
  * each candle belongs to, not by whatever time the user pressed "Run".
  * Live streaming keeps using the real clock.
  */
-function getSessionEvalUtcHour() {
+function getSessionEvalUtcHour(evaluatedEpoch) {
   if ((_btSilent || _historicalProcessing) && candles.length > 0) {
-    const epoch = candles[candles.length - 1].epoch;
+    const epoch = evaluatedEpoch != null ? evaluatedEpoch : candles[candles.length - 1].epoch;
     if (Number.isFinite(epoch)) return new Date(epoch * 1000).getUTCHours();
   }
   return new Date().getUTCHours();
 }
 
-function isWithinActiveSession() {
+function isWithinActiveSession(evaluatedEpoch) {
   if (!sessionFilterEnabled) return true;
-  const hour = getSessionEvalUtcHour();
+  const hour = getSessionEvalUtcHour(evaluatedEpoch);
   switch (sessionFilterMode) {
     case "london":
       return hour >= SESSION_LONDON.start && hour < SESSION_LONDON.end;
@@ -13859,8 +13860,8 @@ function isWithinActiveSession() {
   }
 }
 
-function getActiveSessionName() {
-  const hour = getSessionEvalUtcHour();
+function getActiveSessionName(evaluatedEpoch) {
+  const hour = getSessionEvalUtcHour(evaluatedEpoch);
   const sessions = [];
   if (hour >= SESSION_LONDON.start && hour < SESSION_LONDON.end) sessions.push("London");
   if (hour >= SESSION_NEW_YORK.start && hour < SESSION_NEW_YORK.end) sessions.push("NY");
@@ -14989,6 +14990,14 @@ function processAllCandles() {
         if (phase === replayPhase || phase === "TRADE") break;
         replayPhase = phase;
       }
+      /* After a setup expires, processCandle clears openingRange. Rebuild it and
+         continue scanning the remaining history for new setups. */
+      if (openingRange === null && rangeStartEpoch && phase === "RANGE") {
+        buildOpeningRange();
+        if (openingRange && i < openingRange.endIdx) {
+          i = openingRange.endIdx - 1; /* loop will increment to endIdx */
+        }
+      }
       if (trade) {
         if (autoResetEnabled) {
           /* Simulate the live auto-reset so subsequent setups can be discovered
@@ -15023,9 +15032,12 @@ function processAllCandles() {
 
   /* NY Open Range: build range and process all candles through it */
   if (nyOpenRangeEnabled) {
-    buildNyOpenRange();
-    if (nyOpenRange) {
-      for (let i = nyOpenRange.endIdx + 1; i < candles.length; i++) {
+    for (let i = 0; i < candles.length; i++) {
+      maybeResetNyOpenRangeForNewDay(candles[i].epoch);
+      if (!nyOpenRange) {
+        buildNyOpenRange();
+      }
+      if (nyOpenRange && i > nyOpenRange.endIdx && nyOpenRangePhase !== "TRADE") {
         processNyOpenRangeCandle(i);
         if (nyOpenRangeTrade) break;
       }
@@ -15073,6 +15085,7 @@ function processLatestCandle() {
      (NY Open Range in particular) of every candle after the first trade. */
   if (_btSilent && _btActiveStrategyId && _btActiveStrategyId !== "breakout_retest") {
     if (nyOpenRangeEnabled) {
+      maybeResetNyOpenRangeForNewDay(candles[candles.length - 1].epoch);
       buildNyOpenRange();
       if (nyOpenRange && nyOpenRangePhase !== "TRADE") {
         processNyOpenRangeCandle(candles.length - 1);
@@ -15089,6 +15102,7 @@ function processLatestCandle() {
     if (phase === "WAITING" || phase === "RANGE") {
       /* NY Open Range: try to build / advance on each candle */
       if (nyOpenRangeEnabled) {
+        maybeResetNyOpenRangeForNewDay(candles[candles.length - 1].epoch);
         buildNyOpenRange();
         if (nyOpenRange && nyOpenRangePhase !== "TRADE") {
           processNyOpenRangeCandle(candles.length - 1);
@@ -15436,8 +15450,8 @@ function processCandle(idx) {
         return;
       }
       /* Apply session filter */
-      if (!isWithinActiveSession()) {
-        addLog(`Bullish breakout at #${idx} BLOCKED by session filter (${getActiveSessionName()})`);
+      if (!isWithinActiveSession(c.epoch)) {
+        addLog(`Bullish breakout at #${idx} BLOCKED by session filter (${getActiveSessionName(c.epoch)})`);
         return;
       }
       /* Log breakout strength (volume proxy) */
@@ -15482,8 +15496,8 @@ function processCandle(idx) {
         return;
       }
       /* Apply session filter */
-      if (!isWithinActiveSession()) {
-        addLog(`Bearish breakout at #${idx} BLOCKED by session filter (${getActiveSessionName()})`);
+      if (!isWithinActiveSession(c.epoch)) {
+        addLog(`Bearish breakout at #${idx} BLOCKED by session filter (${getActiveSessionName(c.epoch)})`);
         return;
       }
       const conviction = hasBreakoutConviction(c);
@@ -20130,6 +20144,20 @@ function resetNyOpenRange() {
   nyOpenRangeRetest   = null;
   nyOpenRangeTrade    = null;
   nyOpenRangePhase    = nyOpenRangeEnabled ? "WAITING" : "IDLE";
+}
+
+function maybeResetNyOpenRangeForNewDay(epoch) {
+  if (!nyOpenRangeEnabled || candles.length === 0) return;
+  const currentDay = Math.floor(epoch / 86400);
+  if (_btNyRangeDay !== currentDay) {
+    _btNyRangeDay = currentDay;
+    /* Day boundary crossed — reset range but preserve pending trades */
+    nyOpenRange         = null;
+    nyOpenRangeBreakout = null;
+    nyOpenRangeRetest   = null;
+    /* Keep nyOpenRangeTrade for outcome monitoring */
+    nyOpenRangePhase    = nyOpenRangeEnabled ? "WAITING" : "IDLE";
+  }
 }
 
 function monitorNyOpenRangeTradeOutcome(candle) {
@@ -28968,7 +28996,9 @@ function computeBacktestMetrics(trades, cfg) {
 
     if (balance > peak) peak = balance;
     const dd = peak - balance;
-    if (dd > maxDD) { maxDD = dd; maxDDPct = peak > 0 ? (dd / peak) * 100 : 0; }
+    if (dd > maxDD) maxDD = dd;
+    const ddPct = peak > 0 ? (dd / peak) * 100 : 0;
+    if (ddPct > maxDDPct) maxDDPct = ddPct;
 
     closed.push({
       strategy: sig.strategy, dir: sig.dir, result: sig.result,
@@ -29101,6 +29131,8 @@ function _btApplyRecommendedSettings(symbol, granularity) {
   pureTrailingEnabled     = false;
   teslaScalingEnabled     = false;
   scalpingModeEnabled     = false;
+  aggressiveEntryMinAtr   = AGGRESSIVE_ENTRY_PROGRESS_ATR_DEFAULT;
+  entryQualityMinAtr      = ENTRY_QUALITY_PROGRESS_ATR_DEFAULT;
 
   /* 2. The symbol's own recommended configuration. */
   const rec = getMarketRecommendations(symbol);
@@ -29123,6 +29155,10 @@ function _btApplyRecommendedSettings(symbol, granularity) {
   /* The timeframe/R:R/range locks keep their live meaning here too. */
   if (!lockRR)       minRRValue    = rec.rr.minRR;
   if (!lockRangeMin) RANGE_MINUTES = rec.range.minutes;
+  /* Override UI reward/risk inputs to match recommended R:R when lock is off */
+  if (!lockRR && UI.rewardInput && !Number.isNaN(parseFloat(rec.rr.minRR))) {
+    UI.rewardInput.value = Math.round(rec.rr.minRR * 10) / 10;
+  }
 
   return {
     mode: "recommended",
@@ -29341,8 +29377,12 @@ function resolveBacktestSymbols(symbol, scope, explicitList) {
  * be merged in chronological order to rebuild a portfolio equity curve and a
  * true combined drawdown. Trades are sequenced, not netted concurrently, so
  * the drawdown is a conservative single-account approximation.
+ *
+ * In risk-percent mode, per-symbol trades were sized against independent per-symbol
+ * balances, so we recalculate units and P&L against the combined shared balance
+ * at entry time to reflect true portfolio risk sizing.
  */
-function _btAggregateStrategyResults(rows, initialBalance) {
+function _btAggregateStrategyResults(rows, initialBalance, cfg) {
   const initial = Math.max(1, +initialBalance || 0);
   const all = [];
   for (const r of rows) {
@@ -29357,7 +29397,19 @@ function _btAggregateStrategyResults(rows, initialBalance) {
   const equityCurve = [{ idx: 0, epoch: null, balance: initial, equity: initial, pnl: 0 }];
 
   all.forEach((t, i) => {
-    const pnl = +t.pnl || 0;
+    let pnl = +t.pnl || 0;
+    
+    /* In risk-percent mode with configuration available, recalculate P&L against
+       the combined account balance at entry time, not the per-symbol balance. */
+    if (cfg && cfg.sizingMode === "risk" && !Number.isNaN(t.rMultiple) && Number.isFinite(t.entry) && Number.isFinite(t.exit)) {
+      const riskDist = Number.isFinite(t.sl) ? Math.abs(t.entry - t.sl) : 0;
+      if (riskDist > 0 && Number.isFinite(cfg.riskPercent)) {
+        const riskUnits = (balance * (+cfg.riskPercent || 0) / 100) / riskDist;
+        const dir = (t.dir === "BULL" ? 1 : -1);
+        pnl = dir * (t.exit - t.entry) * riskUnits;
+      }
+    }
+    
     balance += pnl;
     if (pnl > 0) grossProfit += pnl; else if (pnl < 0) grossLoss += -pnl;
     if (pnl > bestTrade)  bestTrade = pnl;
@@ -29370,7 +29422,9 @@ function _btAggregateStrategyResults(rows, initialBalance) {
     if (lossStreak > maxLossStreak) maxLossStreak = lossStreak;
     if (balance > peak) peak = balance;
     const dd = peak - balance;
-    if (dd > maxDD) { maxDD = dd; maxDDPct = peak > 0 ? (dd / peak) * 100 : 0; }
+    if (dd > maxDD) maxDD = dd;
+    const ddPct = peak > 0 ? (dd / peak) * 100 : 0;
+    if (ddPct > maxDDPct) maxDDPct = ddPct;
     equityCurve.push({ idx: i + 1, epoch: t.exitEpoch || t.epoch || null, balance: +balance.toFixed(4), equity: +balance.toFixed(4), pnl: +pnl.toFixed(4) });
   });
 
@@ -29551,7 +29605,7 @@ async function runStrategyBacktest(cfg) {
           strategyId: strategy.id,
           strategy: strategy.label,
           aggregate: true
-        }, _btAggregateStrategyResults(rows, +cfg.initialBalance)));
+        }, _btAggregateStrategyResults(rows, +cfg.initialBalance, cfg)));
       }
     }
 
