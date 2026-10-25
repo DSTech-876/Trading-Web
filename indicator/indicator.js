@@ -28598,7 +28598,7 @@ function updateBacktestUI() {
  *  and the report pick it up automatically.
  * ========================================================================== */
 
-const BT_MAX_HISTORY_PAGES   = 24;    /* ticks_history pages per run (5000 candles each) */
+const BT_MAX_HISTORY_PAGES   = 75;    /* ticks_history pages per run; accommodates capped 1000-candle responses (60K limit / 1K per page = 60) */
 const BT_PAGE_SIZE           = 5000;  /* Deriv hard limit for ticks_history `count` */
 const BT_MAX_CANDLES         = 60000; /* safety cap on a single replay */
 const BT_WARMUP_CANDLES      = 220;   /* bars fetched before startDate to warm indicators */
@@ -28847,6 +28847,7 @@ function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress)
     let pages = 0;
     let settled = false;
     let lastOldest = Infinity;   /* detects a provider that stops making backward progress */
+    let attemptedBelowStart = false;  /* tracks if we've tried to request below startSec */
 
     const timer = setTimeout(() => finish(new Error("Historical data request timed out.")), BT_FETCH_TIMEOUT_MS);
 
@@ -28917,16 +28918,39 @@ function backtestFetchHistory(symbol, granularity, startSec, endSec, onProgress)
          more data further back, so a short page must keep paging rather than
          stop. Only bail out — and flag the result as truncated — when the
          window still isn't covered and the feed stops making backward
-         progress (an empty page, or an oldest candle no older than last time). */
+         progress (an empty page, or an oldest candle no older than last time).
+         For non-aligned starts, when an empty page is received and all candles
+         are >= startSec (and we haven't tried below startSec), we have all
+         available data in the requested interval. */
       const windowCovered = Number.isFinite(oldest) ? oldest <= startSec : bySec.size > 0 && lastOldest <= startSec;
       if (windowCovered) { finish(null); return; }
-      if (page.length === 0 || (Number.isFinite(oldest) && oldest >= lastOldest)) {
+      if (page.length === 0) {
+        /* Empty page: we've reached the end of available data backward from cursorEnd.
+           If cursorEnd >= startSec, we know we requested data down to at least startSec
+           and got nothing below it. If minEpoch > startSec, startSec is before all data (truncated).
+           If cursorEnd < startSec, we've exhausted all attempts and can trust attemptedBelowStart. */
+        let minEpoch = Infinity;
+        for (const [epoch] of bySec) if (epoch < minEpoch) minEpoch = epoch;
+         
+        const truncated = cursorEnd >= startSec ? (minEpoch > startSec) : !attemptedBelowStart;
+        finish({ data: Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch), truncated });
+        return;
+      }
+      if (Number.isFinite(oldest) && oldest >= lastOldest) {
         finish({ data: Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch), truncated: true });
         return;
       }
       lastOldest = oldest;
       cursorEnd = oldest - 1;
-      if (cursorEnd <= startSec) { finish(null); return; }
+      /* Mark if we're attempting to request below or at startSec */
+      if (cursorEnd < startSec) attemptedBelowStart = true;
+      if (cursorEnd <= startSec) { 
+        /* We've hit or passed the startSec boundary. If we didn't reach it with our oldest candle,
+           the data is truncated (startSec is beyond available history). */
+        const truncated = oldest > startSec;
+        finish({ data: Array.from(bySec.values()).sort((a, b) => a.epoch - b.epoch), truncated });
+        return;
+      }
       requestPage();
     };
   });
@@ -29515,6 +29539,11 @@ async function runStrategyBacktest(cfg) {
     : (Array.isArray(cfg.strategyId) ? cfg.strategyId : [cfg.strategyId])
         .map(getBacktestStrategy).filter(Boolean);
   if (requested.length === 0) throw new Error("Select at least one strategy.");
+
+  /* Grid Scalper V2 uses fixed lot sizing and cannot honor risk % mode. */
+  if (sizingMode === "risk" && requested.some(s => s.id === "grid_scalper_v2")) {
+    throw new Error("Grid Scalper V2 uses fixed lot sizing and cannot be run in Risk % mode. Select Lot Size or disable Grid Scalper V2.");
+  }
 
   backtestEngineRunning = true;
   backtestAbortRequested = false;
