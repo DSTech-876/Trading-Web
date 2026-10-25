@@ -41,7 +41,9 @@ const EXPORTED = [
   'backtestExitPrice', 'computeBacktestMetrics', 'buildBacktestReportRows',
   'formatBacktestReport', 'exportBacktestCSV', 'getBacktestEquityCurve',
   'exportBacktestReport', '_btHarvest', '_btSnapshotStrategyState',
-  '_btRestoreStrategyState', '_btNum', '_btPF'
+  '_btRestoreStrategyState', '_btNum', '_btPF',
+  'getMarketType', 'getMarketTypeLabel', 'getBacktestSymbolUniverse',
+  'resolveBacktestSymbols', '_btAggregateStrategyResults'
 ];
 
 function loadEngine() {
@@ -49,7 +51,12 @@ function loadEngine() {
     'const BACKTEST_STRATEGY_REGISTRY = new Map();',
     'const _BT_NOOP = () => {};',
     'const BT_TERMINAL_RESULTS = ["WIN", "LOSS", "BREAKEVEN", "EXPIRED"];',
-    'const BACKTEST_REPORT_COLUMNS = ["Strategy","Trades","Win Rate","Profit","Profit %","Drawdown","Profit Factor"];',
+    'const BACKTEST_REPORT_COLUMNS = ["Symbol","Strategy","Trades","Win Rate","Profit","Profit %","Drawdown","Profit Factor"];',
+    'const MARKET_TYPE_LABELS = { step: "Step indices", volatility: "Volatility indices", boom: "Boom indices" };',
+    'let _multiPanelProcessing = null;',
+    'const UI = {};',
+    'const document = null;',
+    'function migrateSymbol(s) { return String(s || "").trim(); }',
     'let lastBacktestReport = null;',
     'const SYMBOL_SPECS = { R_100: { type: "synthetic", contractSize: 1 }, frxEURUSD: { type: "forex", contractSize: 100000 } };',
     'const STRATEGY_DISPLAY_LABELS = { demo_strat: "Demo Strategy" };',
@@ -221,11 +228,12 @@ test('profit factor is infinite with no losses and zero with no trades', () => {
   assert.equal(none.netProfit, 0);
 });
 
-test('report output is limited to the seven required columns', () => {
+test('report output is limited to the required columns', () => {
   const api = loadEngine();
   const report = {
+    config: { symbol: 'R_100' },
     results: [Object.assign(
-      { strategyId: 'demo_strat', strategy: 'Demo Strategy' },
+      { symbol: 'R_100', strategyId: 'demo_strat', strategy: 'Demo Strategy' },
       api.computeBacktestMetrics(
         [{ strategy: 'demo_strat', dir: 'BULL', result: 'WIN', entry: 100, sl: 90, tp: 120 }],
         { symbol: 'R_100', startSec: 0, endSec: 1, initialBalance: 1000, sizingMode: 'lot', lotSize: 1 }
@@ -236,12 +244,12 @@ test('report output is limited to the seven required columns', () => {
   const rows = api.buildBacktestReportRows(report);
   assert.equal(Object.keys(rows[0]).join(','), Array.from(api.BACKTEST_REPORT_COLUMNS).join(','));
   assert.deepEqual(Object.assign({}, rows[0]), {
-    Strategy: 'Demo Strategy', Trades: 1, 'Win Rate': '100.0%',
+    Symbol: 'R_100', Strategy: 'Demo Strategy', Trades: 1, 'Win Rate': '100.0%',
     Profit: '20.00', 'Profit %': '2.00%', Drawdown: '0.00%', 'Profit Factor': '∞'
   });
 
   const text = api.formatBacktestReport(report);
-  assert.ok(text.startsWith('Strategy'));
+  assert.ok(text.startsWith('Symbol'));
   assert.equal(text.split('\n').length, 3);
 
   const csv = api.exportBacktestCSV(report);
@@ -252,6 +260,48 @@ test('report output is limited to the seven required columns', () => {
   const exported = api.exportBacktestReport(report);
   assert.notEqual(exported, report, 'export is a deep clone');
   assert.equal(exported.results[0].strategyId, 'demo_strat');
+});
+
+test('a symbol scope expands to the whole instrument family', () => {
+  const api = loadEngine();
+  const universe = ['stpRNG', 'stpRNG2', 'stpRNG3', 'R_100', 'R_75', 'BOOM1000'];
+
+  assert.equal(api.resolveBacktestSymbols('stpRNG2', 'one', universe).join(','), 'stpRNG2');
+
+  const group = api.resolveBacktestSymbols('stpRNG2', 'group', universe);
+  assert.equal(group[0], 'stpRNG2', 'selected symbol runs first');
+  assert.equal(Array.from(group).sort().join(','), 'stpRNG,stpRNG2,stpRNG3');
+
+  const all = api.resolveBacktestSymbols('R_100', 'all', universe);
+  assert.equal(all.length, universe.length, 'every symbol is included exactly once');
+  assert.equal(all[0], 'R_100');
+
+  assert.equal(api.resolveBacktestSymbols('', 'group', universe).length, 0);
+  assert.equal(api.getMarketTypeLabel('step'), 'Step indices');
+  assert.equal(api.getMarketTypeLabel('mystery'), 'mystery instruments');
+});
+
+test('a multi-symbol run reports one combined row per strategy', () => {
+  const api = loadEngine();
+  const cfgFor = symbol => ({ symbol, startSec: 0, endSec: 1, initialBalance: 1000, sizingMode: 'lot', lotSize: 1 });
+  const rowA = Object.assign({ symbol: 'stpRNG', strategyId: 'demo_strat' }, api.computeBacktestMetrics(
+    [{ strategy: 'demo_strat', dir: 'BULL', result: 'WIN', entry: 100, sl: 90, tp: 120, exitEpoch: 10 }],
+    cfgFor('stpRNG')));
+  const rowB = Object.assign({ symbol: 'stpRNG2', strategyId: 'demo_strat' }, api.computeBacktestMetrics(
+    [{ strategy: 'demo_strat', dir: 'BULL', result: 'LOSS', entry: 100, sl: 90, tp: 120, exitEpoch: 5 }],
+    cfgFor('stpRNG2')));
+
+  const agg = api._btAggregateStrategyResults([rowA, rowB], 1000);
+  assert.equal(agg.totalTrades, 2);
+  assert.equal(agg.wins, 1);
+  assert.equal(agg.losses, 1);
+  assert.equal(agg.netProfit, rowA.netProfit + rowB.netProfit);
+  /* Trades are merged chronologically, so the loss (epoch 5) precedes the win. */
+  assert.equal(Array.from(agg.trades).map(t => t.symbol).join(','), 'stpRNG2,stpRNG');
+  assert.equal(agg.equityCurve.length, 3);
+  assert.ok(agg.maxDrawdownPct > 0, 'a losing symbol must show up in the combined drawdown');
+
+  assert.equal(api._btAggregateStrategyResults([], 1000).totalTrades, 0);
 });
 
 test('every live side effect is gated behind _btSilent', () => {

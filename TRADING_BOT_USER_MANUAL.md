@@ -874,6 +874,49 @@ IT Guru includes a **backtesting engine** that replays historical candle data th
 
 > Use backtesting to validate new settings before running them on a live account.
 
+#### Which settings a Strategy Backtest run uses
+
+The **Strategy Backtest** panel (per-strategy replay over downloaded history) picks its
+filter configuration automatically:
+
+- **Recommended mode (default).** Every advanced gate is reset to its documented
+  default and then the **recommended settings for the symbol being replayed** are
+  applied on top (timeframe, min R:R, range minutes, EMA/HTF/ATR/session/RSI/volume/
+  Fibonacci/MACD/Bollinger/ADX/Stochastic filters). Each symbol is therefore tested with
+  the configuration the app would actually recommend for it, instead of inheriting
+  whatever the live chart happens to be tuned to. A hand-tuned gate such as a 11/16
+  minimum-confluence threshold would otherwise silently reject every signal and the run
+  would report zero trades for every strategy except Live Scalp.
+- **Manual mode.** Turn on **Lock Strategy Filters** and the replay uses your manual
+  configuration verbatim — the lock means "these are my settings, do not touch them".
+  `Lock R:R` and `Lock Range Minutes` are honoured in recommended mode too.
+
+The run status line and the report config both state which filter mode a run used.
+
+#### Backtesting a whole family of symbols
+
+**Symbols to Test** controls how many instruments a single run covers:
+
+| Option | What it replays |
+| --- | --- |
+| Selected symbol only | Just the symbol in the Symbol dropdown (default) |
+| All *&lt;family&gt;* | Every symbol of the same market type as the selected one — e.g. pick any Step Index to replay **all Step Indices**, or any Boom index to replay all Boom indices |
+| All available symbols | Every instrument in the dropdown (slowest) |
+
+Notes:
+
+- Each symbol is downloaded and replayed independently and gets **its own recommended
+  settings**, so a family run compares instruments fairly instead of forcing one
+  symbol's configuration onto the rest.
+- The results table gains a **Symbol** column, and each strategy also gets a combined
+  **ALL (n symbols)** row: its trades are merged in chronological order to produce a
+  portfolio-level win rate, profit, profit factor and drawdown.
+- If one instrument's history cannot be downloaded the run logs it, marks it as skipped
+  and carries on with the rest of the family.
+- JSON/CSV exports contain every row, and the JSON report additionally carries
+  `config.symbols`, `config.settingsBySymbol` and a `perSymbol` section listing the
+  candle count (or skip reason) for each instrument.
+
 ---
 
 ### Advanced Signal Interpretation Examples
