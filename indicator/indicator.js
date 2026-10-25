@@ -29731,16 +29731,18 @@ function rankBacktestResults(report) {
  * net profitable, so the UI never recommends a strategy on weak evidence.
  */
 function computeBacktestRecommendation(report) {
+  if (report && report.aborted) {
+    return { ok: false, reason: "Backtest was interrupted — results are incomplete and cannot be reliably compared." };
+  }
   const ranked = rankBacktestResults(report);
   if (ranked.length === 0) return { ok: false, reason: "No results to rank yet." };
-  const top = ranked[0];
-  if (!top.totalTrades || top.totalTrades < BT_RECOMMENDATION_MIN_TRADES) {
-    return { ok: false, reason: `Too few trades (${top.totalTrades || 0}) in this window to recommend a strategy confidently — widen the date range or add more strategies.` };
+  // Filter for strategies that meet the minimum trade count and have positive net profit
+  const eligible = ranked.filter(r => r.totalTrades >= BT_RECOMMENDATION_MIN_TRADES && r.netProfit > 0);
+  if (eligible.length === 0) {
+    return { ok: false, reason: `Too few trades or no profitable strategy in this window — widen the date range or add more strategies.` };
   }
-  if (!(top.netProfit > 0)) {
-    return { ok: false, reason: "No strategy was net profitable over this window — none is recommended yet." };
-  }
-  const runnerUp = ranked.find(r => r !== top && r.strategyId !== top.strategyId);
+  const top = eligible[0];
+  const runnerUp = eligible.find(r => r !== top && r.strategyId !== top.strategyId);
   return {
     ok: true,
     strategy: top.strategy, strategyId: top.strategyId, symbol: top.symbol,
