@@ -112,3 +112,53 @@ test('backtestFetchHistory finishes cleanly (not truncated) when a single page a
   assert.equal(reqs.length, 1);
   assert.equal(result.data[0].epoch, startSec);
 });
+
+test('backtestFetchHistory accommodates capped responses with increased page limit (>24000 candles)', async () => {
+  /* Create a larger fixture to test the increased BT_MAX_HISTORY_PAGES limit.
+     With 1000 candles per page, 24 pages = 24,000 candles.
+     With increased limit to 75, we should support up to 75,000 candles (more than 60K safety cap). */
+  const TOTAL = 30000;  /* 30,000 candles: more than 24,000 but less than 60,000 cap */
+  const ALL_EPOCHS_LARGE = Array.from({ length: TOTAL }, (_, i) => BASE + i * GRAN);
+
+  const reqs = [];
+  class FakeWebSocket {
+    constructor() {
+      this.readyState = 1;
+      setTimeout(() => { if (this.onopen) this.onopen(); }, 0);
+    }
+    send(raw) {
+      const req = JSON.parse(raw);
+      reqs.push(req);
+      const matching = ALL_EPOCHS_LARGE.filter(e => e >= req.start && e <= req.end);
+      /* Simulate provider capping at 1000 per page */
+      const page = matching.slice(-1000).map(e => ({ epoch: e, open: 1, high: 1, low: 1, close: 1 }));
+      setTimeout(() => { if (this.onmessage) this.onmessage({ data: JSON.stringify({ candles: page }) }); }, 0);
+    }
+    close() {}
+  }
+
+  const ctx = {
+    WebSocket: FakeWebSocket,
+    PUBLIC_WS_URL: 'wss://fake',
+    BT_FETCH_TIMEOUT_MS: 5000,
+    BT_MAX_HISTORY_PAGES: 75,  /* increased from 24 */
+    BT_PAGE_SIZE: 5000,
+    BT_MAX_CANDLES: 60000,
+    setTimeout, clearTimeout, console, Array, Number, Math, JSON,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(`${extractFunction('backtestFetchHistory')}\nthis.backtestFetchHistory = backtestFetchHistory;`, ctx);
+  const backtestFetchHistory = ctx.backtestFetchHistory;
+
+  const startSec = BASE;
+  const endSec = BASE + (TOTAL - 1) * GRAN;
+
+  const result = await backtestFetchHistory('SYM', GRAN, startSec, endSec, () => {});
+
+  /* With 30,000 candles and 1000 per page, we need 30 pages.
+     The original limit of 24 would truncate at 24,000.
+     The new limit of 75 should allow 30 pages. */
+  assert.equal(result.data.length, TOTAL, `must retrieve all ${TOTAL} candles with increased page limit`);
+  assert.equal(result.truncated, false, 'should not be truncated when within 60K safety cap');
+  assert.ok(reqs.length >= 30, `must make at least 30 page requests for ${TOTAL} candles at 1K per page`);
+});
