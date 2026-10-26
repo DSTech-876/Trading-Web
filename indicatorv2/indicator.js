@@ -1161,9 +1161,13 @@ let _lastAuthorizeAcct   = null;  /* cached so badge tooltip restores when strea
 
 /* ---- Symbol spec helpers ---- */
 
-/** Return the active symbol from the UI or multi-panel context. */
+/** Return the active symbol from the UI or multi-panel context.
+ *  Guards against the literal strings "undefined"/"null" — these can end up
+ *  as a <select> option's `.value` if it was ever assigned a JS `undefined`
+ *  (the DOM silently coerces that to the string "undefined"). */
 function getActiveSymbol() {
-  return _multiPanelProcessing || (UI.symbolSelect ? UI.symbolSelect.value : "");
+  const sym = _multiPanelProcessing || (UI.symbolSelect ? UI.symbolSelect.value : "");
+  return (sym === "undefined" || sym === "null") ? "" : sym;
 }
 
 /** Look up pip / contract specs for a symbol. Falls back to sensible defaults. */

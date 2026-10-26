@@ -3103,9 +3103,15 @@ let _lastAuthorizeAcct   = null;  /* cached so badge tooltip restores when strea
 
 /* ---- Symbol spec helpers ---- */
 
-/** Return the active symbol from the UI or multi-panel context. */
+/** Return the active symbol from the UI or multi-panel context.
+ *  Guards against the literal strings "undefined"/"null" — these can end up
+ *  as a <select> option's `.value` if it was ever assigned a JS `undefined`
+ *  (the DOM silently coerces that to the string "undefined"), which would
+ *  otherwise flow straight into every signal/trade payload and get rejected
+ *  by ITGuruMt5Bridge.mq5 with "Symbol not found/selectable: undefined". */
 function getActiveSymbol() {
-  return _multiPanelProcessing || (UI.symbolSelect ? UI.symbolSelect.value : "");
+  const sym = _multiPanelProcessing || (UI.symbolSelect ? UI.symbolSelect.value : "");
+  return (sym === "undefined" || sym === "null") ? "" : sym;
 }
 
 /** Look up pip / contract specs for a symbol. Falls back to sensible defaults. */
@@ -17721,6 +17727,20 @@ function submitMt5BridgeTrade({
     return;
   }
 
+  /* Guard against dispatching a broker order with a missing/invalid symbol.
+     A JS `undefined` assigned to a <select> option's `.value` (e.g. a stale
+     active_symbols rebuild) silently becomes the *string* "undefined" in the
+     DOM, which otherwise flows straight through to the bridge payload and
+     only gets caught by ITGuruMt5Bridge.mq5 AFTER the order is queued —
+     "Symbol not found/selectable: undefined" — with no broker execution.
+     Catching it here surfaces the real cause immediately instead of an
+     opaque broker-side rejection. */
+  if (!symbol || typeof symbol !== "string" || symbol === "undefined" || symbol === "null") {
+    addLog(`⚠ MT5 bridge skipped — ${label} signal has an invalid symbol (${symbol}); reselect the chart symbol and retry`);
+    rejectSignal(`invalid symbol: ${symbol}`);
+    return;
+  }
+
   /* Guard against dispatching a broker order with missing/invalid SL or TP,
      or stops on the wrong side of entry for the trade direction actually
      being sent (effectiveDir, after opposite-mode swaps). Catching this here
@@ -25302,7 +25322,19 @@ function connect() {
 
     /* Handle active_symbols response — rebuild the symbol dropdown dynamically */
     if (msg.msg_type === "active_symbols" && msg.active_symbols) {
-      const validSet = new Set(msg.active_symbols.map(s => s.symbol));
+      /* Deriv has been deprecating/renaming fields on this response (see the
+         `product_type` removal above) and newer API revisions return the
+         symbol code under `underlying_symbol` instead of `symbol` for some
+         accounts/app_ids. Normalize onto `asset.symbol` up front so every
+         downstream read (validSet, option value, display fallback) sees a
+         real code instead of `undefined` — assigning `opt.value = undefined`
+         silently coerces to the *string* "undefined" in the DOM, which then
+         propagates into every signal/trade payload and gets queued/rejected
+         by ITGuruMt5Bridge.mq5 as "Symbol not found/selectable: undefined". */
+      for (const asset of msg.active_symbols) {
+        if (!asset.symbol && asset.underlying_symbol) asset.symbol = asset.underlying_symbol;
+      }
+      const validSet = new Set(msg.active_symbols.map(s => s.symbol).filter(Boolean));
       _cachedActiveSymbols = validSet;
       const currentSym = UI.symbolSelect ? UI.symbolSelect.value : symbol;
       if (!validSet.has(currentSym)) {
@@ -25344,6 +25376,7 @@ function connect() {
             const optgroup = document.createElement("optgroup");
             optgroup.label = label;
             for (const asset of assets) {
+              if (!asset.symbol) continue; /* skip entries with no resolvable symbol code */
               const opt = document.createElement("option");
               opt.value = asset.symbol;
               opt.textContent = asset.display_name || asset.symbol;
