@@ -15089,7 +15089,7 @@ function processAllCandles() {
   _historicalProcessing = false;
 }
 
-function processLatestCandle() {
+function processLatestCandle(isClosedCandle = true) {
   /* Fail-safe: drop any trade whose outcome is already resolved before any
      phase logic runs, so a closed trade can never block the next signal. */
   enforceTradeLifecycleIntegrity("per_candle_failsafe");
@@ -15106,22 +15106,23 @@ function processLatestCandle() {
   cleanupPendingSignalsForSymbol(getActiveSymbol(), "breakout_retest");
 
   /* Session Ranges: rebuild ranges and check for London sweep on each candle.
-     Always runs before any phase-based early return so sweeps are never missed
-     while the main indicator is in TRADE, WAITING, or RANGE phases.
-     Closed-candle only: when candleCloseOnlyEnabled + aggressiveEntryEnabled
-     are both on (the default), runIntrabarTimingOptimizations() re-invokes this
-     very function intrabar (entry mode = "aggressive_intrabar") so the
-     breakout-retest pipeline can react before the candle finishes forming.
-     Session Range has no aggressive-intrabar concept of its own — its sweep
-     test (`c.close <= aH` / `c.close >= aL`) is a close-based reversal
-     judgement, exactly like false-breakout/follow-through elsewhere in this
-     file. Without this guard, that nested intrabar call would evaluate the
-     still-forming last candle's live price as if it were the final close,
-     letting a transient wick-and-recover tick fire (or invalidate) a sweep
-     signal that the actual candle close may contradict. Skip it here; the
-     normal (non-intrabar) call on the real close event still runs every
-     candle as before. */
-  if (sessionRangesEnabled && getCurrentEntryMode() !== "aggressive_intrabar") {
+    Always runs before any phase-based early return so sweeps are never missed
+    while the main indicator is in TRADE, WAITING, or RANGE phases.
+    Closed-candle only: when candleCloseOnlyEnabled + aggressiveEntryEnabled
+    are both on (the default), runIntrabarTimingOptimizations() re-invokes this
+    very function intrabar (entry mode = "aggressive_intrabar") so the
+    breakout-retest pipeline can react before the candle finishes forming.
+    Session Range has no aggressive-intrabar concept of its own — its sweep
+    test (`c.close <= aH` / `c.close >= aL`) is a close-based reversal
+    judgement, exactly like false-breakout/follow-through elsewhere in this
+    file. Without this guard, that nested intrabar call would evaluate the
+    still-forming last candle's live price as if it were the final close,
+    letting a transient wick-and-recover tick fire (or invalidate) a sweep
+    signal that the actual candle close may contradict. Skip it here; the
+    normal (non-intrabar) call on the real close event still runs every
+    candle as before. To prevent premature sweep detection when candleCloseOnlyEnabled
+    is false, only process sweeps when we're on a truly closed candle. */
+  if (sessionRangesEnabled && getCurrentEntryMode() !== "aggressive_intrabar" && isClosedCandle) {
     buildSessionRanges();
     detectLondonAsianSweep();
   }
@@ -25503,7 +25504,7 @@ function connect() {
         logIndicatorSnapshot(symbol);
       }
       if (!candleCloseOnlyEnabled) {
-        processLatestCandle();
+        processLatestCandle(!sameEpoch);
         processLiveScalp();
         processCustomStrategies();
         monitorTradeOutcome(c);
@@ -33232,7 +33233,7 @@ function connectPanel(p) {
       computeEMA200();
       computeVWAP();
       if (!candleCloseOnlyEnabled) {
-        processLatestCandle();
+        processLatestCandle(!sameEpoch);
         processLiveScalp();
         processCustomStrategies();
         monitorTradeOutcome(c);
