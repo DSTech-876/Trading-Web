@@ -685,10 +685,19 @@ const BROKER_SYMBOL_HINTS = {
 };
 
 /** Returns the default broker MarketWatch symbol hint for a synthetic index
- *  code, or null when the symbol has no known alternate broker naming
- *  (e.g. forex/commodities, where the raw code is already broker-standard). */
+ *  or Deriv "frx"-prefixed forex/commodity code, or null when the symbol
+ *  has no known alternate broker naming (e.g. it's already broker-standard).
+ *
+ *  Deriv's forex/commodity feed symbols are prefixed with "frx" (e.g.
+ *  "frxXAUUSD", "frxEURUSD") but no MT5 broker lists a symbol with that
+ *  prefix — their MarketWatch name is the plain code ("XAUUSD", "EURUSD").
+ *  Without this hint, ResolveBrokerSymbol()'s exact-match and fuzzy-scan
+ *  attempts both fail (the "frx" prefix isn't stripped by normalization),
+ *  so every such signal is rejected with "Symbol not found/selectable". */
 function getBrokerSymbolHint(sym) {
-  return BROKER_SYMBOL_HINTS[sym] || null;
+  if (BROKER_SYMBOL_HINTS[sym]) return BROKER_SYMBOL_HINTS[sym];
+  if (typeof sym === 'string' && /^frx[A-Za-z0-9]+$/.test(sym)) return sym.slice(3);
+  return null;
 }
 
 /* ================= CREDENTIAL ENCRYPTION ================= */
