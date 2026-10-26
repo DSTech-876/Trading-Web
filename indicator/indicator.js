@@ -25273,7 +25273,7 @@ function connect() {
        handler below will surface it, but this also lets us cache the valid
        set so the UI can warn early on future switches. */
     if (thisWs.readyState === WebSocket.OPEN) {
-      thisWs.send(JSON.stringify({ active_symbols: "brief", product_type: "basic" }));
+      thisWs.send(JSON.stringify({ active_symbols: "brief" }));
     }
 
     /* Also open the authenticated trading connection if a token is set */
