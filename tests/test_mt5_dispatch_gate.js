@@ -144,6 +144,26 @@ test('submitMt5BridgeTrade skips dispatch when TP is on the wrong side of entry'
   assert.ok(logs.some(l => /wrong side of entry/.test(l)));
 });
 
+/*
+ * Regression for the Gold ("frxXAUUSD") auto-trade rejections seen after the
+ * Deriv active_symbols rebuild assigned the literal string "undefined" to a
+ * <select> option's value (a JS `undefined` silently coerces to that string
+ * in the DOM). submitMt5BridgeTrade() must refuse to dispatch — and never
+ * call fetch() — when `symbol` is missing or is that literal sentinel
+ * string, instead of letting an unresolvable symbol reach
+ * ITGuruMt5Bridge.mq5 and get rejected broker-side with no broker execution.
+ */
+const invalidSymbols = [['the string "undefined"', 'undefined'], ['the string "null"', 'null'], ['empty string', ''], ['undefined', undefined], ['null', null]];
+for (const [name, bad] of invalidSymbols) {
+  test(`submitMt5BridgeTrade skips dispatch when symbol is ${name}`, () => {
+    const { context, fetchCalls, logs } = makeContext();
+    const submitMt5BridgeTrade = run(context);
+    submitMt5BridgeTrade(baseArgs({ symbol: bad }));
+    assert.equal(fetchCalls.length, 0);
+    assert.ok(logs.some(l => /invalid symbol/.test(l)));
+  });
+}
+
 test('submitMt5BridgeTrade validates against effectiveDir, not the original signal dir', () => {
   const { context, fetchCalls } = makeContext();
   const submitMt5BridgeTrade = run(context);
