@@ -29175,7 +29175,9 @@ function _btHarvest(strategy, sink, candle) {
       partialTpHit: s.partialTpHit, _breakeven: s._breakeven,
       closedProfit: s.closedProfit || null,
       epoch: s.epoch || null,
-      exitEpoch: candle ? candle.epoch : null
+      exitEpoch: candle ? candle.epoch : null,
+      _origSl: s._origSl || null,
+      _origTp: s._origTp || null
     });
   }
 }
@@ -29381,8 +29383,12 @@ function _btMirrorBothHit(riskDist, rewardDist) {
 function _btMirrorOppositeTrade(t, data, epochIndex) {
   if (!Number.isFinite(t.entry) || !Number.isFinite(t.sl) || !Number.isFinite(t.tp)) return t;
 
-  const riskDist   = Math.abs(t.entry - t.sl);
-  const rewardDist = Math.abs(t.tp - t.entry);
+  /* Use original SL/TP if preserved (e.g. from partial exits), else use current sl/tp */
+  const origSl = t._origSl != null ? t._origSl : t.sl;
+  const origTp = t._origTp != null ? t._origTp : t.tp;
+
+  const riskDist   = Math.abs(t.entry - origSl);
+  const rewardDist = Math.abs(origTp - t.entry);
   const newDir = t.dir === "BULL" ? "BEAR" : "BULL";
   const newSl  = newDir === "BULL" ? t.entry - riskDist : t.entry + riskDist;
   const newTp  = newDir === "BULL" ? t.entry + rewardDist : t.entry - rewardDist;
