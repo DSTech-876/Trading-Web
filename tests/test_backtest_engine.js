@@ -43,7 +43,8 @@ const EXPORTED = [
   'exportBacktestReport', '_btHarvest', '_btSnapshotStrategyState',
   '_btRestoreStrategyState', '_btNum', '_btPF',
   'getMarketType', 'getMarketTypeLabel', 'getBacktestSymbolUniverse',
-  'resolveBacktestSymbols', '_btAggregateStrategyResults'
+  'resolveBacktestSymbols', '_btAggregateStrategyResults',
+  '_btMirrorBothHit', '_btMirrorOppositeTrade'
 ];
 
 function loadEngine() {
@@ -260,6 +261,67 @@ test('report output is limited to the required columns', () => {
   const exported = api.exportBacktestReport(report);
   assert.notEqual(exported, report, 'export is a deep clone');
   assert.equal(exported.results[0].strategyId, 'demo_strat');
+});
+
+test('opposite mode mirrors SL/TP around entry, preserving risk/reward distances', () => {
+  const api = loadEngine();
+  const data = [
+    { epoch: 100, open: 100, high: 101, low: 99,  close: 100 }, /* entry candle */
+    { epoch: 200, open: 100, high: 103, low: 96,  close: 97 },  /* mirrored BEAR→BULL: TP(110) not reached, SL(95) not reached */
+    { epoch: 300, open: 97,  high: 98,  low: 94,  close: 95 }   /* dips to 94 → hits mirrored SL (95) for the new BULL trade */
+  ];
+  const epochIndex = new Map(data.map((c, i) => [c.epoch, i]));
+
+  /* Original trade: BEAR, entry 100, sl 105 (risk 5), tp 90 (reward 10), resolved WIN at epoch 100. */
+  const original = { strategy: 's', dir: 'BEAR', result: 'WIN', entry: 100, sl: 105, tp: 90, epoch: 100, exitEpoch: 100 };
+  const mirrored = api._btMirrorOppositeTrade(original, data, epochIndex);
+
+  assert.equal(mirrored.dir, 'BULL');
+  assert.equal(mirrored.sl, 95, 'mirrored SL preserves the original 5-unit risk distance below entry');
+  assert.equal(mirrored.tp, 110, 'mirrored TP preserves the original 10-unit reward distance above entry');
+  assert.equal(mirrored.entry, 100);
+  assert.equal(mirrored.result, 'LOSS', 'price dipping to 94 hits the mirrored SL before ever reaching the mirrored TP');
+  assert.equal(mirrored.exitPrice, 95);
+  assert.equal(mirrored.exitEpoch, 300);
+});
+
+test('opposite mode resolves WIN when the mirrored TP is reached first', () => {
+  const api = loadEngine();
+  const data = [
+    { epoch: 100, open: 100, high: 101, low: 99, close: 100 },
+    { epoch: 200, open: 100, high: 112, low: 99, close: 111 } /* rallies through mirrored TP (110) */
+  ];
+  const epochIndex = new Map(data.map((c, i) => [c.epoch, i]));
+  const original = { strategy: 's', dir: 'BEAR', result: 'LOSS', entry: 100, sl: 105, tp: 90, epoch: 100, exitEpoch: 100 };
+  const mirrored = api._btMirrorOppositeTrade(original, data, epochIndex);
+
+  assert.equal(mirrored.dir, 'BULL');
+  assert.equal(mirrored.result, 'WIN');
+  assert.equal(mirrored.exitPrice, 110);
+  assert.equal(mirrored.exitEpoch, 200);
+});
+
+test('opposite mode expires when neither mirrored level is reached by the end of data', () => {
+  const api = loadEngine();
+  const data = [
+    { epoch: 100, open: 100, high: 101, low: 99, close: 100 },
+    { epoch: 200, open: 100, high: 102, low: 98, close: 101 }
+  ];
+  const epochIndex = new Map(data.map((c, i) => [c.epoch, i]));
+  const original = { strategy: 's', dir: 'BULL', result: 'WIN', entry: 100, sl: 90, tp: 120, epoch: 100, exitEpoch: 100 };
+  const mirrored = api._btMirrorOppositeTrade(original, data, epochIndex);
+
+  assert.equal(mirrored.dir, 'BEAR');
+  assert.equal(mirrored.result, 'EXPIRED');
+  assert.equal(mirrored.exitPrice, 101, 'expired trades close flat at the last candle close');
+  assert.equal(mirrored.exitEpoch, 200);
+});
+
+test('opposite mode both-hit tie-break favors the closer level, matching resolveScalpBothHit', () => {
+  const api = loadEngine();
+  assert.equal(api._btMirrorBothHit(5, 5), 'WIN', '1:1 risk/reward resolves WIN on tie');
+  assert.equal(api._btMirrorBothHit(10, 5), 'WIN', 'closer TP (smaller reward distance) resolves WIN');
+  assert.equal(api._btMirrorBothHit(5, 10), 'LOSS', 'closer SL (smaller risk distance) resolves LOSS');
 });
 
 test('a symbol scope expands to the whole instrument family', () => {
