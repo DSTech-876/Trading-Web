@@ -29354,11 +29354,86 @@ function _btStep(candle) {
 }
 
 /**
+ * Resolve a WIN/LOSS tie-break when both the mirrored SL and TP fall within
+ * the same candle's range. Mirrors `resolveScalpBothHit`'s convention: the
+ * level closer to entry is assumed to have been reached first, so on an
+ * exact 1:1 risk/reward the trade counts as a WIN.
+ */
+function _btMirrorBothHit(riskDist, rewardDist) {
+  return rewardDist <= riskDist ? "WIN" : "LOSS";
+}
+
+/**
+ * Re-simulate one harvested trade as though Opposite Mode had reversed it,
+ * the same way live auto-trade does in executeAutoTrade: direction flips and
+ * SL/TP are mirrored around the unchanged entry so the original risk and
+ * reward *distances* are preserved (not swapped), rather than naively
+ * swapping the SL/TP price levels. Because the mirrored trade can resolve
+ * completely differently from the original (it rides the same price action
+ * but against new stop/target levels), the outcome is re-derived from the
+ * raw candle series — not from inverting the original WIN/LOSS.
+ *
+ * @param {object} t          a harvested trade from _btHarvest()
+ * @param {object[]} data     the full candle series the replay ran over
+ * @param {Map<number,number>} epochIndex  candle epoch -> index in `data`
+ * @returns {object} a new harvested-trade object for the mirrored direction
+ */
+function _btMirrorOppositeTrade(t, data, epochIndex) {
+  if (!Number.isFinite(t.entry) || !Number.isFinite(t.sl) || !Number.isFinite(t.tp)) return t;
+
+  const riskDist   = Math.abs(t.entry - t.sl);
+  const rewardDist = Math.abs(t.tp - t.entry);
+  const newDir = t.dir === "BULL" ? "BEAR" : "BULL";
+  const newSl  = newDir === "BULL" ? t.entry - riskDist : t.entry + riskDist;
+  const newTp  = newDir === "BULL" ? t.entry + rewardDist : t.entry - rewardDist;
+
+  const startIdx = Number.isFinite(t.epoch) ? epochIndex.get(t.epoch) : undefined;
+  let result = "EXPIRED";
+  let exitPrice = t.entry;
+  let exitEpoch = t.exitEpoch;
+
+  if (startIdx != null) {
+    for (let i = startIdx + 1; i < data.length; i++) {
+      const c = data[i];
+      const slHit = newDir === "BULL" ? c.low <= newSl : c.high >= newSl;
+      const tpHit = newDir === "BULL" ? c.high >= newTp : c.low <= newTp;
+      if (slHit && tpHit) {
+        result = _btMirrorBothHit(riskDist, rewardDist);
+        exitPrice = result === "WIN" ? newTp : newSl;
+        exitEpoch = c.epoch;
+        break;
+      } else if (slHit) {
+        result = "LOSS"; exitPrice = newSl; exitEpoch = c.epoch; break;
+      } else if (tpHit) {
+        result = "WIN"; exitPrice = newTp; exitEpoch = c.epoch; break;
+      }
+    }
+    if (result === "EXPIRED") {
+      const last = data[data.length - 1];
+      exitPrice = last ? last.close : t.entry;
+      exitEpoch = last ? last.epoch : t.exitEpoch;
+    }
+  }
+
+  return {
+    strategy: t.strategy, dir: newDir, result,
+    entry: t.entry, sl: newSl, tp: newTp,
+    exitPrice, closedPrice: null, trailingSL: null,
+    partialTpHit: false, _breakeven: false,
+    closedProfit: null,
+    epoch: t.epoch, exitEpoch
+  };
+}
+
+/**
  * Replay `data` through one strategy and return its harvested trades.
  * Candles before `fromEpoch` only warm up indicators — their signals are
  * discarded so the reported range matches the user's start date exactly.
+ *
+ * @param {boolean} [opposite] when true, every harvested trade is reversed
+ *   and re-resolved against the raw candle series (see _btMirrorOppositeTrade).
  */
-async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
+async function _btReplayStrategy(strategy, data, fromEpoch, onProgress, opposite) {
   _btIsolateStrategy(strategy);
   _btResetWorld();
 
@@ -29404,12 +29479,18 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress) {
     }
   }
 
-  return harvested.filter(t => {
+  const filtered = harvested.filter(t => {
     /* Not every strategy stamps an entry epoch; fall back to the resolution
        candle so warm-up trades are still excluded from the reported range. */
     const ts = Number.isFinite(t.epoch) ? t.epoch : t.exitEpoch;
     return !Number.isFinite(ts) || ts >= fromEpoch;
   });
+
+  if (!opposite) return filtered;
+
+  const epochIndex = new Map();
+  for (let i = 0; i < data.length; i++) epochIndex.set(data[i].epoch, i);
+  return filtered.map(t => _btMirrorOppositeTrade(t, data, epochIndex));
 }
 
 /* ---------------------------------------------------------------------------
@@ -29578,17 +29659,21 @@ function _btAggregateStrategyResults(rows, initialBalance, cfg) {
  * @param {number} [cfg.riskPercent]
  * @param {"one"|"group"|"all"} [cfg.symbolScope]  expand cfg.symbol into a family
  * @param {string[]} [cfg.symbols]  explicit symbol list (overrides symbolScope)
+ * @param {boolean} [cfg.oppositeMode]  reverse every signal, mirroring entry
+ *   risk/reward around the same entry (as live Opposite Mode does), then
+ *   re-resolve WIN/LOSS/EXPIRED against the raw candle series
  * @param {Function} [cfg.onStatus]
  * @returns {Promise<object>} exportable backtest report
  */
 async function runStrategyBacktest(cfg) {
   if (backtestEngineRunning) throw new Error("A backtest is already running.");
 
-  const symbol      = resolveFeedSymbol(String(cfg.symbol || "").trim());
-  const granularity = parseInt(cfg.granularity, 10);
-  const startSec    = Math.floor(cfg.startSec);
-  const endSec      = Math.floor(cfg.endSec);
-  const status      = typeof cfg.onStatus === "function" ? cfg.onStatus : () => {};
+  const symbol       = resolveFeedSymbol(String(cfg.symbol || "").trim());
+  const granularity  = parseInt(cfg.granularity, 10);
+  const startSec     = Math.floor(cfg.startSec);
+  const endSec       = Math.floor(cfg.endSec);
+  const status       = typeof cfg.onStatus === "function" ? cfg.onStatus : () => {};
+  const oppositeMode = !!cfg.oppositeMode;
 
   if (!symbol) throw new Error("Select a symbol.");
   if (!Number.isFinite(granularity) || granularity <= 0) throw new Error("Select a timeframe.");
@@ -29622,6 +29707,7 @@ async function runStrategyBacktest(cfg) {
 
   backtestEngineRunning = true;
   backtestAbortRequested = false;
+  if (oppositeMode) addLog("🔄 Backtest Opposite Mode enabled — every signal will be replayed reversed.");
 
   const snapshot = _snapshotChartGlobals();
   const strategySnapshot = _btSnapshotStrategyState();
@@ -29698,7 +29784,7 @@ async function runStrategyBacktest(cfg) {
           const strategy = requested[s];
           const label = `${symTag}${strategy.label} (${s + 1}/${requested.length})`;
           const trades = await _btReplayStrategy(strategy, data, startSec,
-            (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`));
+            (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`), oppositeMode);
           const metrics = computeBacktestMetrics(trades, {
             symbol: sym, startSec, endSec,
             initialBalance: +cfg.initialBalance,
@@ -29740,6 +29826,7 @@ async function runStrategyBacktest(cfg) {
         sizingMode,
         lotSize: +cfg.lotSize || null,
         riskPercent: +cfg.riskPercent || null,
+        oppositeMode,
         settings: firstSettings,
         settingsBySymbol
       },
@@ -30070,6 +30157,7 @@ async function runStrategyBacktestFromUI() {
     sizingMode: val("btSizingMode") === "risk" ? "risk" : "lot",
     lotSize: parseFloat(val("btLotSize")),
     riskPercent: parseFloat(val("btRiskPercent")),
+    oppositeMode: !!document.getElementById("btOppositeMode") && document.getElementById("btOppositeMode").checked,
     onStatus: _btSetStatus
   };
 
@@ -30085,9 +30173,10 @@ async function runStrategyBacktestFromUI() {
     const skipped = (report.perSymbol || []).filter(p => p.error);
     const scope = report.config.scopeLabel || report.config.symbol;
     const skipNote = skipped.length > 0 ? ` · ${skipped.length} symbol(s) skipped` : "";
+    const oppNote = report.config.oppositeMode ? " · 🔄 Opposite Mode" : "";
     _btSetStatus(report.aborted
-      ? `Stopped early — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}.`
-      : `Done — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}.`);
+      ? `Stopped early — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}${oppNote}.`
+      : `Done — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}${oppNote}.`);
   } catch (e) {
     _btSetStatus(`Error: ${e.message}`);
   } finally {
