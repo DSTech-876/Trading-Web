@@ -604,6 +604,8 @@ The strategy always anchors to the current 1-hour block regardless of chart time
 
 **Trade setup:** Entry on the closing candle that sweeps but closes back inside the Asian range. SL beyond the sweep extreme.
 
+**Signal timing:** The sweep is judged only on a **completed** candle, and only while that candle is the one that just closed. If you open the app (or switch panel/symbol) part-way through London and a sweep already happened earlier in the session, it is marked on the chart as "swept" but **no signal, Telegram alert or auto-trade is generated** — that entry price is history. The same applies when a sweep is rejected by the Confluence Gate: the sweep is consumed for that session and will not resurface later with its original entry/SL/TP.
+
 **Best for:** Forex traders during the London session. Works especially well on tight Asian ranges.
 
 ---
