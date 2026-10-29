@@ -3674,6 +3674,17 @@ let sessionRangeTradeLosses = 0;     /* running loss count for session range tra
 let lastSessionRangeBuildDate = null; /* YYYY-MM-DD of last buildSessionRanges() call — detects day rollover */
 let sessionRangeHistory   = [];      /* alert history for strategy alerts panel */
 const SESSION_RANGE_MAX_HISTORY = 20;
+/* A London sweep is a close-based reversal judgement that is only actionable at
+   the moment the sweeping candle closes — its entry is that candle's close.
+   detectLondonAsianSweep() rescans the whole London window on every candle, so
+   without an age ceiling it happily emits a "new" signal for a sweep that closed
+   hours earlier (initial historical backfill, a mid-session page load, a panel /
+   symbol switch, or a re-scan after a previously rejected sweep). Those signals
+   carry a stale entry/SL/TP and are the cause of session-range alerts arriving
+   long after the move. Age is measured against the most recently *completed*
+   candle: 0 = the sweep is that candle. 1 candle of slack absorbs a dropped tick
+   or a panel-rotation hiccup; anything older is stale and must not trade. */
+const SESSION_RANGE_MAX_SIGNAL_AGE_CANDLES = 1;
 const ASIAN_TIGHT_ATR_MULT = 1.0;    /* threshold: range < 1× ATR = "tight" */
 
 /* Auto-apply recommended settings when symbol changes */
@@ -15081,7 +15092,8 @@ function processAllCandles() {
   /* Session Ranges: build ranges and detect London sweep */
   if (sessionRangesEnabled) {
     buildSessionRanges();
-    detectLondonAsianSweep();
+    /* Historical replay: every candle in the array is complete. */
+    detectLondonAsianSweep(true);
   }
 
   cleanupPendingSignalsForSymbol(getActiveSymbol(), "breakout_retest");
@@ -15124,7 +15136,13 @@ function processLatestCandle(isClosedCandle = true) {
     is false, only process sweeps when we're on a truly closed candle. */
   if (sessionRangesEnabled && getCurrentEntryMode() !== "aggressive_intrabar" && isClosedCandle) {
     buildSessionRanges();
-    detectLondonAsianSweep();
+    /* Which array slot holds the candle that just closed depends on the mode:
+       candle-close mode runs this pipeline *before* the new candle is appended
+       (so the last element is the completed candle), while tick mode appends
+       first (so the last element is the freshly opened candle and the completed
+       one sits at length - 2). Backtest replay and historical processing always
+       hand us a completed last candle. */
+    detectLondonAsianSweep(candleCloseOnlyEnabled || _historicalProcessing || _btSilent);
   }
 
   /* Backtest isolation: while the engine replays a *different* strategy the
@@ -20366,7 +20384,16 @@ function buildSessionRanges() {
   }
 }
 
-function detectLondonAsianSweep() {
+/**
+ * Detect the London sweep of the Asian range.
+ *
+ * @param {boolean} lastCandleClosed - true when `candles[candles.length - 1]`
+ *   is a completed candle (historical replay, backtest step, or the
+ *   candle-close pipeline which runs before the next candle is appended).
+ *   false when the final element is still forming, so it must not be judged.
+ *   Defaults to false — the conservative choice for ad-hoc callers.
+ */
+function detectLondonAsianSweep(lastCandleClosed = false) {
   if (!sessionRangesEnabled || !sessionRangeAsian || !sessionRangeLondon) return;
   if (londonSweepSignal) return; /* already detected for this session */
 
@@ -20378,6 +20405,18 @@ function detectLondonAsianSweep() {
   const scanEnd   = Math.min(sessionRangeLondon.endIdx, candles.length - 1);
   if (scanStart > scanEnd) return;  /* no London candles past Asian range yet */
 
+  /* Freshness gate — see SESSION_RANGE_MAX_SIGNAL_AGE_CANDLES.
+     `signalIdx` is the only candle whose close may produce a live signal: the
+     most recently *completed* candle. Anything before it is history (its entry
+     price has long since moved); anything after it is still forming. */
+  const newestIdx = candles.length - 1;
+  const signalIdx = lastCandleClosed ? newestIdx : newestIdx - 1;
+  const sweepAge  = (idx) => signalIdx - idx;
+  const isSweepFresh = (idx) => {
+    const age = sweepAge(idx);
+    return age >= 0 && age <= SESSION_RANGE_MAX_SIGNAL_AGE_CANDLES;
+  };
+
   for (let i = scanStart; i <= scanEnd; i++) {
     const c = candles[i];
     /* Check sweep of Asian HIGH — bearish reversal (SELL).
@@ -20385,7 +20424,18 @@ function detectLondonAsianSweep() {
        candle to close back at or below it (rejection = bearish reversal signal).
        A clean close above the Asian high is a breakout, not a sweep. */
     if (c.high > aH && c.close <= aH) {
+      /* Still-forming candle: its "close" is just the current tick and may be
+         contradicted by the real close. Do not latch, do not signal — the
+         closed-candle pass will judge it. */
+      if (sweepAge(i) < 0) return;
+
       londonSweepSignal = { dir: "HIGH", candleIdx: i, price: c.high };
+
+      if (!isSweepFresh(i)) {
+        addLog(`🌍 London Sweep (stale) — Asian HIGH swept at candle #${i}, ${sweepAge(i)} candles ago. Marked as swept; no live signal generated.`);
+        renderStrategyAlerts();
+        return;
+      }
 
       /* Compute trade levels: Entry at candle close, SL above the sweep wick
          (plus a small ATR buffer — every other strategy pads its SL past the
@@ -20406,7 +20456,12 @@ function detectLondonAsianSweep() {
           const confGate = checkConfluenceGate("BEAR", entry, i);
           if (!confGate.pass) {
             addLog(`⚠ London Sweep SELL REJECTED — ${confGate.reason}`);
-            londonSweepSignal = null;
+            /* Keep londonSweepSignal latched. Clearing it used to re-arm the
+               scan, so the very same (now stale) sweep candle was re-evaluated
+               on every subsequent candle and fired a trade minutes or hours
+               later — with the original candle's entry/SL/TP — as soon as the
+               confluence reading happened to flip. The sweep is a one-shot,
+               close-based event: once rejected, it is consumed for the session. */
             return;
           }
         }
@@ -20459,7 +20514,16 @@ function detectLondonAsianSweep() {
        candle to close back at or above it (rejection = bullish reversal signal).
        A clean close below the Asian low is a breakout, not a sweep. */
     if (c.low < aL && c.close >= aL) {
+      /* Still-forming candle — see the matching guard in the HIGH branch. */
+      if (sweepAge(i) < 0) return;
+
       londonSweepSignal = { dir: "LOW", candleIdx: i, price: c.low };
+
+      if (!isSweepFresh(i)) {
+        addLog(`🌍 London Sweep (stale) — Asian LOW swept at candle #${i}, ${sweepAge(i)} candles ago. Marked as swept; no live signal generated.`);
+        renderStrategyAlerts();
+        return;
+      }
 
       /* Compute trade levels: Entry at candle close, SL below the sweep wick
          (plus a small ATR buffer — see the matching comment in the HIGH-sweep
@@ -20475,7 +20539,8 @@ function detectLondonAsianSweep() {
           const confGate = checkConfluenceGate("BULL", entry, i);
           if (!confGate.pass) {
             addLog(`⚠ London Sweep BUY REJECTED — ${confGate.reason}`);
-            londonSweepSignal = null;
+            /* Keep londonSweepSignal latched — see the matching comment in the
+               HIGH-sweep branch above for why clearing it caused late signals. */
             return;
           }
         }
