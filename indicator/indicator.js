@@ -15232,6 +15232,13 @@ function runIntrabarTimingOptimizations(currentCandle) {
   if (currentCandle && monitoringTrade && trade) {
     monitorTradeOutcome(currentCandle);
   }
+  /* Same for Session Range / NY Open Range: MT5 closes these on the tick that
+     touches SL/TP, so the indicator must too instead of waiting for the close
+     and then guessing the order from the full candle range. */
+  if (currentCandle) {
+    monitorSessionRangeTradeOutcome(currentCandle);
+    monitorNyOpenRangeTradeOutcome(currentCandle);
+  }
   enforceTradeLifecycleIntegrity("intrabar_failsafe");
 
   if (!aggressiveEntryEnabled || !candleCloseOnlyEnabled) return;
@@ -20246,6 +20253,10 @@ function monitorNyOpenRangeTradeOutcome(candle) {
 
   const t = nyOpenRangeTrade;
 
+  /* Entry is the signal candle's close — its pre-entry high/low must not
+     resolve the trade (see monitorSessionRangeTradeOutcome). */
+  if (Number.isFinite(t.epoch) && candle && Number.isFinite(candle.epoch) && candle.epoch <= t.epoch) return;
+
   /* Track 1R profit level and fire exit alert if price reverses to entry */
   if (_checkProfitExitAlert(t, candle, "NY Open Range")) {
     /* no `changed` flag needed here — not an array-based monitor */
@@ -20320,12 +20331,17 @@ function buildSessionRanges() {
      `if (londonSweepSignal) return;` gate stays latched forever and no new
      sweep is ever detected again for this symbol/panel. Only clear when no
      trade is actively PENDING so an open position is never dropped mid-flight. */
-  if (lastSessionRangeBuildDate !== null && lastSessionRangeBuildDate !== todayUTC) {
-    if (!sessionRangeTrade || sessionRangeTrade.result !== "PENDING") {
-      resetSessionRanges();
-    }
+  const sessionRangeTradePending = !!(sessionRangeTrade && sessionRangeTrade.result === "PENDING");
+  if (lastSessionRangeBuildDate !== null && lastSessionRangeBuildDate !== todayUTC && !sessionRangeTradePending) {
+    resetSessionRanges();
   }
-  lastSessionRangeBuildDate = todayUTC;
+  /* While a trade carried over from the prior day is still PENDING, keep the
+     old date so the rollover reset runs as soon as that trade resolves.
+     Stamping today's date here used to skip the reset for the whole new day,
+     leaving yesterday's londonSweepSignal latched and missing every sweep. */
+  if (lastSessionRangeBuildDate === null || !sessionRangeTradePending) {
+    lastSessionRangeBuildDate = todayUTC;
+  }
 
   let asianHigh = -Infinity, asianLow = Infinity, asianStart = -1, asianEnd = -1;
   let londonHigh = -Infinity, londonLow = Infinity, londonStart = -1, londonEnd = -1;
@@ -20605,6 +20621,13 @@ function monitorSessionRangeTradeOutcome(candle) {
   if (sessionRangeTrade.result !== "PENDING") return;
 
   const srt = sessionRangeTrade;
+
+  /* Never grade the trade on its own entry candle. Entry is that candle's
+     close, so its high/low printed *before* the position existed — for a SELL
+     sweep the lower wick could "hit" TP and record a WIN that never happened
+     (MT5 filled at the close and later hit SL). Only candles that open after
+     the entry candle may resolve the trade. */
+  if (Number.isFinite(srt.epoch) && candle && Number.isFinite(candle.epoch) && candle.epoch <= srt.epoch) return;
 
   /* Track 1R profit level and fire exit alert if price reverses to entry */
   _checkProfitExitAlert(srt, candle, "Session Range");
@@ -25531,14 +25554,17 @@ function connect() {
         computeStochastic();
         computeEMA200();
         computeVWAP();
-        processLatestCandle();
-        processLiveScalp();
-        processCustomStrategies();
+        /* Resolve open trades on the closed candle *before* generating new
+           signals from it. A signal created on this candle enters at its
+           close, so its high/low must not grade that new trade. */
         monitorTradeOutcome(closedCandle);
         monitorScalpOutcomes(closedCandle);
         monitorCustomStrategyOutcomes(closedCandle);
         monitorSessionRangeTradeOutcome(closedCandle);
         monitorNyOpenRangeTradeOutcome(closedCandle);
+        processLatestCandle();
+        processLiveScalp();
+        processCustomStrategies();
       }
 
       if (sameEpoch) {
@@ -28929,13 +28955,18 @@ function auditBacktestRegistry() {
       getCooldown: () => ({
         a: sessionRangeAsian, l: sessionRangeLondon, n: sessionRangeNY,
         t: asianRangeTight, s: londonSweepSignal, x: sessionRangeTrade,
-        w: sessionRangeTradeWins, o: sessionRangeTradeLosses
+        w: sessionRangeTradeWins, o: sessionRangeTradeLosses, d: lastSessionRangeBuildDate
       }),
       setCooldown: s => {
-        if (!s) { resetSessionRanges(); sessionRangeTradeWins = 0; sessionRangeTradeLosses = 0; return; }
+        if (!s) {
+          resetSessionRanges(); sessionRangeTradeWins = 0; sessionRangeTradeLosses = 0;
+          lastSessionRangeBuildDate = null;
+          return;
+        }
         sessionRangeAsian = s.a; sessionRangeLondon = s.l; sessionRangeNY = s.n;
         asianRangeTight = s.t; londonSweepSignal = s.s; sessionRangeTrade = s.x;
         sessionRangeTradeWins = s.w; sessionRangeTradeLosses = s.o;
+        lastSessionRangeBuildDate = s.d !== undefined ? s.d : null;
       } },
     { id: "live_scalp",
       isEnabled: () => liveScalpEnabled, setEnabled: v => { liveScalpEnabled = v; },
@@ -29410,14 +29441,20 @@ function _btComputeIndicators() {
 /** Run the exact live per-candle pipeline for the candle just appended. */
 function _btStep(candle) {
   _btComputeIndicators();
-  processLatestCandle();
-  processLiveScalp();
-  processCustomStrategies();
+  /* Same order as the live candle-close pipeline: resolve trades already open
+     against this candle first, then let strategies signal on its close. The
+     old order graded every new signal on its own entry candle — whose pre-entry
+     wick could hit TP — inflating normal-mode win rates while the opposite-mode
+     re-simulation (_btMirrorOppositeTrade) correctly starts at entry + 1, which
+     biased the normal-vs-opposite recommendation. */
   monitorTradeOutcome(candle);
   monitorScalpOutcomes(candle);
   monitorCustomStrategyOutcomes(candle);
   monitorSessionRangeTradeOutcome(candle);
   monitorNyOpenRangeTradeOutcome(candle);
+  processLatestCandle();
+  processLiveScalp();
+  processCustomStrategies();
 }
 
 /**
@@ -33360,14 +33397,17 @@ function connectPanel(p) {
         computeStochastic();
         computeEMA200();
         computeVWAP();
-        processLatestCandle();
-        processLiveScalp();
-        processCustomStrategies();
+        /* Resolve open trades on the closed candle *before* generating new
+           signals from it. A signal created on this candle enters at its
+           close, so its high/low must not grade that new trade. */
         monitorTradeOutcome(closedCandle);
         monitorScalpOutcomes(closedCandle);
         monitorCustomStrategyOutcomes(closedCandle);
         monitorSessionRangeTradeOutcome(closedCandle);
         monitorNyOpenRangeTradeOutcome(closedCandle);
+        processLatestCandle();
+        processLiveScalp();
+        processCustomStrategies();
       }
 
       if (sameEpoch) {
