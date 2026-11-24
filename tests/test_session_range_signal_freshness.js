@@ -211,3 +211,106 @@ for (const variant of ['v1', 'v2']) {
     assert.equal(ctx.sessionRangeHistory.length, 0);
   });
 }
+
+function makeMonitorContext(variant, trade) {
+  const ctx = {
+    console,
+    sessionRangesEnabled: true,
+    sessionRangeTrade: trade,
+    sessionRangeHistory: [trade],
+    sessionRangeTradeWins: 0,
+    sessionRangeTradeLosses: 0,
+    telegramSessionRangeOutcomeSend: false,
+    _historicalProcessing: false,
+    _multiPanelProcessing: null,
+    _checkProfitExitAlert: () => false,
+    resolveBothHit: () => 'LOSS',
+    sendStrategyOutcomeTelegram: () => {},
+    sendSessionRangeOutcomeTelegram: () => {},
+    addLog: () => {}, showToast: () => {}, playPhaseAlert: () => {}, renderStrategyAlerts: () => {},
+    fmt: (v) => String(v), fmtPrice: (v) => String(v),
+    setTimeout: () => 0,
+    module: { exports: {} }
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    `${extractFunction(SOURCES[variant], 'monitorSessionRangeTradeOutcome')}\nmodule.exports = { monitorSessionRangeTradeOutcome };`,
+    ctx
+  );
+  return ctx;
+}
+
+function makeBuildContext(variant, overrides) {
+  const ctx = {
+    console,
+    SESSION_ASIAN: { start: 0, end: 9 },
+    SESSION_LONDON: { start: 7, end: 16 },
+    SESSION_NEW_YORK: { start: 12, end: 21 },
+    ASIAN_TIGHT_ATR_MULT: 1.0,
+    sessionRangesEnabled: true,
+    atrValue: 2,
+    asianRangeTight: false,
+    sessionRangeAsian: null, sessionRangeLondon: null, sessionRangeNY: null,
+    telegramSessionRangeAutoSend: false,
+    _historicalProcessing: true,
+    _multiPanelProcessing: null,
+    CHART_RENDER_DELAY_MS: 0,
+    setTimeout: () => 0,
+    module: { exports: {} },
+    ...overrides
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    [
+      extractFunction(SOURCES[variant], 'getCandleSessionFlags'),
+      extractFunction(SOURCES[variant], 'resetSessionRanges'),
+      extractFunction(SOURCES[variant], 'buildSessionRanges')
+    ].join('\n') + '\nmodule.exports = { buildSessionRanges };',
+    ctx
+  );
+  return ctx;
+}
+
+for (const variant of ['v1', 'v2']) {
+  test(`[${variant}] entry candle's pre-entry wick cannot mark the trade a WIN`, () => {
+    /* SELL sweep candle: high 111, close 109, low 100 — the low already sits
+       below TP (105), but it printed before entry at the close. */
+    const trade = { entry: 109, sl: 112, tp: 103, dir: 'BEAR', rr: 2, result: 'PENDING', epoch: 600 };
+    const ctx = makeMonitorContext(variant, trade);
+
+    ctx.module.exports.monitorSessionRangeTradeOutcome({ open: 105, high: 111, low: 100, close: 109, epoch: 600 });
+    assert.equal(trade.result, 'PENDING', 'entry candle must not resolve the trade');
+    assert.equal(ctx.sessionRangeTradeWins, 0);
+
+    /* Next candle runs up through the stop — that is the real outcome (MT5 SL). */
+    ctx.module.exports.monitorSessionRangeTradeOutcome({ open: 109, high: 113, low: 108, close: 112, epoch: 660 });
+    assert.equal(trade.result, 'LOSS');
+    assert.equal(ctx.sessionRangeTradeLosses, 1);
+    assert.equal(ctx.sessionRangeTradeWins, 0);
+  });
+
+  test(`[${variant}] day rollover reset is deferred, not skipped, while a trade is PENDING`, () => {
+    const day1 = Date.UTC(2026, 0, 1, 15, 0, 0) / 1000;
+    const day2 = Date.UTC(2026, 0, 2, 1, 0, 0) / 1000;
+    const pending = { entry: 100, sl: 95, tp: 110, dir: 'BULL', result: 'PENDING' };
+    const ctx = makeBuildContext(variant, {
+      candles: [{ epoch: day1, high: 105, low: 95 }, { epoch: day2, high: 106, low: 96 }],
+      londonSweepSignal: { dir: 'LOW', candleIdx: 0, price: 95 },
+      sessionRangeTrade: pending,
+      lastSessionRangeBuildDate: '2026-01-01'
+    });
+
+    ctx.module.exports.buildSessionRanges();
+    assert.equal(ctx.sessionRangeTrade, pending, 'open trade survives the rollover');
+    assert.ok(ctx.londonSweepSignal, 'latch stays while the trade is open');
+
+    /* Trade resolves later on day 2 — the next build must now clear
+       yesterday's latch so today's London sweep can still be detected. */
+    pending.result = 'WIN';
+    ctx.sessionRangeTrade = null;
+    ctx.candles.push({ epoch: day2 + 60, high: 106, low: 96 });
+    ctx.module.exports.buildSessionRanges();
+    assert.equal(ctx.londonSweepSignal, null, "yesterday's sweep latch must be cleared once the trade closes");
+    assert.equal(ctx.lastSessionRangeBuildDate, '2026-01-02');
+  });
+}

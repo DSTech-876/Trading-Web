@@ -2750,6 +2750,10 @@ function monitorNyOpenRangeTradeOutcome(candle) {
 
   const t = nyOpenRangeTrade;
 
+  /* Entry is the signal candle's close — its pre-entry high/low must not
+     resolve the trade (see monitorSessionRangeTradeOutcome). */
+  if (Number.isFinite(t.epoch) && candle && Number.isFinite(candle.epoch) && candle.epoch <= t.epoch) return;
+
   /* Track 1R profit level and fire exit alert if price reverses to entry */
   if (_checkProfitExitAlert(t, candle, "NY Open Range")) {
     /* no `changed` flag needed here — not an array-based monitor */
@@ -2835,12 +2839,17 @@ function buildSessionRanges() {
      `if (londonSweepSignal) return;` gate stays latched forever and no new
      sweep is ever detected again for this symbol/panel. Only clear when no
      trade is actively PENDING so an open position is never dropped mid-flight. */
-  if (lastSessionRangeBuildDate !== null && lastSessionRangeBuildDate !== todayUTC) {
-    if (!sessionRangeTrade || sessionRangeTrade.result !== "PENDING") {
-      resetSessionRanges();
-    }
+  const sessionRangeTradePending = !!(sessionRangeTrade && sessionRangeTrade.result === "PENDING");
+  if (lastSessionRangeBuildDate !== null && lastSessionRangeBuildDate !== todayUTC && !sessionRangeTradePending) {
+    resetSessionRanges();
   }
-  lastSessionRangeBuildDate = todayUTC;
+  /* While a trade carried over from the prior day is still PENDING, keep the
+     old date so the rollover reset runs as soon as that trade resolves.
+     Stamping today's date here used to skip the reset for the whole new day,
+     leaving yesterday's londonSweepSignal latched and missing every sweep. */
+  if (lastSessionRangeBuildDate === null || !sessionRangeTradePending) {
+    lastSessionRangeBuildDate = todayUTC;
+  }
 
   let asianHigh = -Infinity, asianLow = Infinity, asianStart = -1, asianEnd = -1;
   let londonHigh = -Infinity, londonLow = Infinity, londonStart = -1, londonEnd = -1;
@@ -3120,6 +3129,11 @@ function monitorSessionRangeTradeOutcome(candle) {
   if (sessionRangeTrade.result && sessionRangeTrade.result !== "PENDING") return;
 
   const srt = sessionRangeTrade;
+
+  /* Never grade the trade on its own entry candle: entry is that candle's
+     close, so its earlier high/low could fake a TP hit (indicator WIN while
+     the real fill later hit SL). Only later candles may resolve it. */
+  if (Number.isFinite(srt.epoch) && candle && Number.isFinite(candle.epoch) && candle.epoch <= srt.epoch) return;
 
   /* Track 1R profit level and fire exit alert if price reverses to entry */
   if (srt.result === "PENDING") {

@@ -388,3 +388,21 @@ test('the replay pipeline mirrors the live candle pipeline, with no duplicated s
     assert.ok(step.includes(call), `_btStep() must reuse the live ${call} call`);
   }
 });
+
+test('the replay pipeline resolves open trades before generating signals on the same candle', () => {
+  /* Signals enter at the candle close, so grading them against that same
+     candle's pre-entry high/low inflated normal-mode wins vs. the opposite-mode
+     re-simulation, which starts at entry + 1. */
+  const step = extractFunction('_btStep');
+  const firstSignal = step.indexOf('processLatestCandle()');
+  for (const call of ['monitorTradeOutcome(candle)', 'monitorScalpOutcomes(candle)',
+                      'monitorCustomStrategyOutcomes(candle)',
+                      'monitorSessionRangeTradeOutcome(candle)',
+                      'monitorNyOpenRangeTradeOutcome(candle)']) {
+    assert.ok(step.indexOf(call) < firstSignal, `${call} must run before processLatestCandle()`);
+  }
+  for (const call of ['processLiveScalp()', 'processCustomStrategies()']) {
+    assert.ok(step.indexOf(call) > step.indexOf('monitorNyOpenRangeTradeOutcome(candle)'),
+      `${call} must run after outcome monitoring`);
+  }
+});
