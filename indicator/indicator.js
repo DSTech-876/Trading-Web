@@ -1970,13 +1970,14 @@ function processAdaptiveResolvedSignals() {
   let touched = false;
   for (const arr of buckets) {
     for (const s of arr) {
-      if (!s || (s.result !== "WIN" && s.result !== "LOSS")) continue;
+      const effectiveResult = getEffectiveSignalResult(s);
+      if (!s || (effectiveResult !== "WIN" && effectiveResult !== "LOSS")) continue;
       const signalScopeKey = String(s.adaptiveScopeKey || "").trim();
       if (!signalScopeKey || signalScopeKey !== currentScopeKey) continue;
       if (!s.signalId) stampSignalLifecycle(s);
       const id = s.signalId
         ? `sid:${s.signalId}`
-        : [s.time || "", s.symbol || "--", s.strategyType || s.type || "breakout_retest", s.entry || "", s.result].join("|");
+        : [s.time || "", s.symbol || "--", s.strategyType || s.type || "breakout_retest", s.entry || "", effectiveResult].join("|");
       if (adaptiveRuntime.wasProcessed(id) || s._adaptiveProcessed) continue;
 
       const ctx = buildAdaptiveContext({
@@ -1992,14 +1993,14 @@ function processAdaptiveResolvedSignals() {
       const sl = Number.isFinite(s.sl) ? s.sl : null;
       const exit = Number.isFinite(s.exitPrice)
         ? s.exitPrice
-        : (s.result === "WIN" ? (Number.isFinite(s.tp) ? s.tp : null) : (Number.isFinite(s.sl) ? s.sl : null));
+        : (effectiveResult === "WIN" ? (Number.isFinite(s.tp) ? s.tp : null) : (Number.isFinite(s.sl) ? s.sl : null));
       const risk = (entry != null && sl != null) ? Math.abs(entry - sl) : null;
       let rr = Number.isFinite(s.rMultiple) ? s.rMultiple : null;
       if (!Number.isFinite(rr) && risk != null && risk > 0 && exit != null) {
         const pnl = s.dir === "BEAR" ? (entry - exit) : (exit - entry);
         rr = pnl / risk;
       }
-      if (!Number.isFinite(rr)) rr = isBreakeven ? 0 : (s.result === "WIN" ? (Number.isFinite(s.rr) ? s.rr : 1) : -1);
+      if (!Number.isFinite(rr)) rr = isBreakeven ? 0 : (effectiveResult === "WIN" ? (Number.isFinite(s.rr) ? s.rr : 1) : -1);
       const atrRef = Number.isFinite(s.atrAtSignal) ? s.atrAtSignal : (Number.isFinite(s.atrAtEntry) ? s.atrAtEntry : null);
       const atrExpansion = (Number.isFinite(atrRef) && atrRef > 0 && Number.isFinite(s.exitPrice) && Number.isFinite(s.entry))
         ? Math.abs(s.exitPrice - s.entry) / atrRef
@@ -2007,17 +2008,17 @@ function processAdaptiveResolvedSignals() {
       const progressGate = Math.max(0.0001, getAdaptiveAppliedNumber("minProgressAtr", aggressiveEntryMinAtr, ctx));
       const entryEfficiency = Number.isFinite(s.entryProgressAtr) ? clamp01(s.entryProgressAtr / progressGate) : null;
       const confirmationQuality = Number.isFinite(s.confluenceScore) ? clamp01(s.confluenceScore / 16) : null;
-      const earlyStopLoss = s.result === "LOSS" && Number.isFinite(s.entryIdx) && Number.isFinite(s.outcomeCandleIdx)
+      const earlyStopLoss = effectiveResult === "LOSS" && Number.isFinite(s.entryIdx) && Number.isFinite(s.outcomeCandleIdx)
         ? ((s.outcomeCandleIdx - s.entryIdx) <= 3)
         : false;
 
       adaptiveRuntime.recordOutcome(ctx, {
-        result: s.result,
+        result: effectiveResult,
         rMultiple: rr,
         atrExpansionPostSignal: atrExpansion,
         entryEfficiency,
         confirmationQuality,
-        retestSuccess: s.result === "WIN",
+        retestSuccess: effectiveResult === "WIN",
         earlyStopLoss
       });
       adaptiveRuntime.markProcessed(id);
@@ -9675,7 +9676,8 @@ function trackOppositeExecutions(candle) {
       if (!s._oppExecChecked) {
         s._oppExecChecked = true;
         const entryKnown = Number.isFinite(Number(s.epoch)) && series.some(c => c && c.epoch === s.epoch);
-        if (entryKnown && isSignalTypeOppositeActive(type)) {
+        /* Use the Opposite Mode state captured at signal creation time, not current state */
+        if (entryKnown && (s._oppMode || isSignalTypeOppositeActive(type))) {
           const ex = buildOppositeExecution(s, type);
           if (ex) s._oppExec = ex;
         }
@@ -9733,7 +9735,6 @@ async function sendOppositeOutcomeTelegram(s) {
     return;
   }
   if (!canSendTradeResolutionNotification(s, `OPPOSITE_${ex.result}`)) return;
-  s._oppOutcomeSent = true;
   try {
     const activeSym = s.symbol || getActiveSymbol() || "";
     const sym = getSymbolLabel(activeSym);
@@ -9751,6 +9752,7 @@ async function sendOppositeOutcomeTelegram(s) {
     ];
     await sendTelegramMessage(lines.join("\n"));
     addLog(`📤 Telegram: Opposite ${label} ${ex.result} sent`);
+    s._oppOutcomeSent = true;
   } catch (err) {
     addLog(`📤 Opposite outcome Telegram error: ${err.message}`);
   }
@@ -17196,6 +17198,9 @@ function recordSignal(confirmPattern, retestCandleIdx) {
   }
   if (signal.breakoutDetectedAtMs == null && breakout) signal.breakoutDetectedAtMs = breakout.detectedAtMs;
   stampSignalLifecycle(signal, { atrAtSignal: trade.atrAtEntry });
+  /* Capture Opposite Mode state at signal creation time, not at tracker scan time */
+  signal._oppMode = isStrategyOppositeEnabled("breakout_retest");
+  signal._oppExecChecked = false;
   trade.signalId = signal.signalId;
   trade.breakoutDetectedAtMs = signal.breakoutDetectedAtMs;
 
@@ -22919,9 +22924,9 @@ function restoreSignalHistory() {
       );
       const migratedSignalIds = ensureAllKnownSignalIds();
       if (migratedSignalIds) persistSignalHistory();
-      signalWins = signalHistory.filter(s => s && s.result === "WIN").length;
+      signalWins = signalHistory.filter(s => s && getEffectiveSignalResult(s) === "WIN").length;
       signalBreakevens = signalHistory.filter(s => isBreakevenSignal(s)).length;
-      signalLosses = signalHistory.filter(s => s && s.result === "LOSS" && !isBreakevenSignal(s)).length;
+      signalLosses = signalHistory.filter(s => s && getEffectiveSignalResult(s) === "LOSS" && !isBreakevenSignal(s)).length;
       updateStatsUI();
       if (typeof runLifecycleHealthCheck === "function") runLifecycleHealthCheck();
     }
