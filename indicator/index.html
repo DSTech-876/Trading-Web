@@ -1428,8 +1428,13 @@
               </div>
 
               <label class="toggle-row" for="btOppositeMode">
-                <input type="checkbox" id="btOppositeMode" />
-                🔄 Opposite Mode — replay every signal reversed (mirrors entry risk/reward around the same entry, as live Opposite Mode does)
+                🔄 Opposite Mode
+                <select id="btOppositeMode" title="Opposite trades mirror the entry risk/reward around the same entry and close on their own SL/TP, exactly as live Opposite Mode executes on MT5">
+                  <option value="">Normal — trade every signal as generated</option>
+                  <option value="all">Opposite — replay every signal reversed</option>
+                  <option value="live">Live settings — reverse only strategies whose Opposite Mode is ON</option>
+                  <option value="compare">Compare — report Normal and Opposite for each strategy</option>
+                </select>
               </label>
 
               <div class="backtest-controls">

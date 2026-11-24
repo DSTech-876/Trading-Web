@@ -5659,6 +5659,15 @@ function renderStrategyAlerts() {
   updateStrategyWinRatesUI();
 }
 
+/** Badge showing the reversed trade Opposite Mode actually took and its result. */
+function _oppExecBadgeHtml(s) {
+  const ex = s && s._oppExec;
+  if (!ex) return "";
+  const color = ex.result === "WIN" ? "#22c55e" : ex.result === "LOSS" ? "#ef4444" : "#94a3b8";
+  const res = ex.result === "WIN" ? "WIN ✓" : ex.result === "LOSS" ? "LOSS ✗" : "PENDING…";
+  return ` <span style="color:${color};font-weight:700;" title="Opposite Mode traded the reverse: SL ${fmt(ex.sl, 4)} | TP ${fmt(ex.tp, 4)}">🔄 Traded ${ex.dir === "BULL" ? "BUY" : "SELL"} ${res}</span>`;
+}
+
 function _renderAlertList(listEl, countEl, history, emoji, label) {
   if (!listEl) return;
   if (countEl) countEl.textContent = history.length;
@@ -5668,7 +5677,7 @@ function _renderAlertList(listEl, countEl, history, emoji, label) {
    * the full rebuild when nothing has changed, avoiding layout thrashing on
    * every tick.  Null-coalesce each field to prevent 'undefined' literals from
    * causing false cache misses. */
-  const digest = history.map(s => `${s.epoch ?? ""}|${s.dir ?? ""}|${s.result ?? ""}`).join(",");
+  const digest = history.map(s => `${s.epoch ?? ""}|${s.dir ?? ""}|${s.result ?? ""}|${s._oppExec ? s._oppExec.result : ""}`).join(",");
   if (listEl._alertDigest === digest) return;  /* no changes — skip rebuild */
   listEl._alertDigest = digest;
 
@@ -5693,6 +5702,7 @@ function _renderAlertList(listEl, countEl, history, emoji, label) {
                  + `| SL ${fmt(s.sl, 4)} | TP ${fmt(s.tp, 4)}`
                  + confBadge
                  + resultBadge
+                 + _oppExecBadgeHtml(s)
                  + ` <small style="opacity:0.5;">${ts}</small>`;
     listEl.appendChild(li);
   }
@@ -5712,7 +5722,7 @@ function _renderGridScalperMAAlerts() {
   /* Digest includes probability so the cache busts if prob is computed late;
      trailing token is the adaptive verdict ("P"=pass, "F"=fail, ""=none) */
   const digest = history.map(s =>
-    `${s.epoch ?? ""}|${s.dir ?? ""}|${s.result ?? ""}|${s.origTPProb != null ? Math.round(s.origTPProb * 100) : ""}|${s.adaptiveQuality ? (s.adaptiveQuality.pass ? "P" : "F") : ""}`
+    `${s.epoch ?? ""}|${s.dir ?? ""}|${s.result ?? ""}|${s._oppExec ? s._oppExec.result : ""}|${s.origTPProb != null ? Math.round(s.origTPProb * 100) : ""}|${s.adaptiveQuality ? (s.adaptiveQuality.pass ? "P" : "F") : ""}`
   ).join(",");
   if (listEl._alertDigest === digest) return;
   listEl._alertDigest = digest;
@@ -5786,6 +5796,7 @@ function _renderGridScalperMAAlerts() {
                  + `| SL ${fmt(s.sl, 4)} | TP ${fmt(s.tp, 4)}`
                  + confBadge
                  + resultBadge
+                 + _oppExecBadgeHtml(s)
                  + ` <small style="opacity:0.5;">${ts}</small>`
                  + adaptiveHtml
                  + probHtml;
@@ -9563,6 +9574,188 @@ function processCustomStrategies() {
 let _oppTracker = null;        /* per-panel tracker instance */
 let _oppTrackerBaselined = false;
 
+/* ── Opposite-mode execution mirror ─────────────────────────────────────
+ * When a strategy's Opposite Mode is on, MT5/auto-trade takes the REVERSED
+ * trade (executeAutoTrade mirrors the risk/reward distances around the
+ * signal entry) and the broker closes it on that trade's own SL/TP. Grading
+ * only the original signal made the indicator show WIN while MT5 hit SL.
+ * Each signal is stamped once with the reversed trade (`_oppExec`) using the
+ * toggles active at signal time, then resolved candle-by-candle exactly like
+ * the backtest's _btMirrorOppositeTrade so live stats and backtest agree. */
+function getOppositeExecutionHistories() {
+  /* Read live bindings each call — activatePanel() swaps these arrays per panel. */
+  return [
+    [typeof signalHistory !== "undefined" ? signalHistory : null, "breakout_retest"],
+    [typeof liquiditySweepHistory !== "undefined" ? liquiditySweepHistory : null, "liquidity_sweep"],
+    [typeof stopLossHuntHistory !== "undefined" ? stopLossHuntHistory : null, "stop_loss_hunt"],
+    [typeof failedPinBarHistory !== "undefined" ? failedPinBarHistory : null, "failed_pin_bar"],
+    [typeof fibScalpHistory !== "undefined" ? fibScalpHistory : null, "fib_scalp"],
+    [typeof po3History !== "undefined" ? po3History : null, "power_of_3"],
+    [typeof gridScalperMAHistory !== "undefined" ? gridScalperMAHistory : null, "grid_scalper_ma"],
+    [typeof gridScalperV2History !== "undefined" ? gridScalperV2History : null, "grid_scalper_v2"],
+    [typeof fvgStratHistory !== "undefined" ? fvgStratHistory : null, "fvg_strat"],
+    [typeof mtfTopDownHistory !== "undefined" ? mtfTopDownHistory : null, "mtf_top_down"],
+    [typeof nyOpenRangeHistory !== "undefined" ? nyOpenRangeHistory : null, "ny_open_range"],
+    [typeof sessionRangeHistory !== "undefined" ? sessionRangeHistory : null, "session_range"],
+    [typeof tiktokHistory !== "undefined" ? tiktokHistory : null, "tiktok"],
+    [typeof orderblockHistory !== "undefined" ? orderblockHistory : null, "orderblock"],
+    [typeof candleInterpHistory !== "undefined" ? candleInterpHistory : null, "candle_interp"],
+    [typeof po3_4hHistory !== "undefined" ? po3_4hHistory : null, "po3_4h"],
+    [typeof breakerBlockHistory !== "undefined" ? breakerBlockHistory : null, "breaker_block"],
+    [typeof oteGoldenPocketHistory !== "undefined" ? oteGoldenPocketHistory : null, "ote_golden_pocket"],
+    [typeof orbHistory !== "undefined" ? orbHistory : null, "orb"],
+    [typeof crtTbsHistory !== "undefined" ? crtTbsHistory : null, "crt_tbs"],
+    [typeof liveScalpHistory !== "undefined" ? liveScalpHistory : null, "scalp"]
+  ];
+}
+
+/** True when live auto-trading would reverse a signal of this strategy type. */
+function isSignalTypeOppositeActive(type) {
+  if (type === "breakout_retest") return typeof autoTradeBreakoutOpposite !== "undefined" && !!autoTradeBreakoutOpposite;
+  if (type === "scalp") return typeof autoTradeScalpOpposite !== "undefined" && !!autoTradeScalpOpposite;
+  if (type === "grid_scalper_ma" && typeof gridScalperMAOppositeEnabled !== "undefined" && gridScalperMAOppositeEnabled) return true;
+  return isStrategyOppositeEnabled(type);
+}
+
+/** Result of the trade actually taken: the reversed trade when opposite mode applied. */
+function getEffectiveSignalResult(s) {
+  if (!s) return undefined;
+  return s._oppExec ? s._oppExec.result : s.result;
+}
+
+/** Build the reversed trade for a signal (same entry, mirrored risk/reward distances). */
+function buildOppositeExecution(s, type) {
+  const entry = Number(s.entry);
+  const origSl = Number(s._origSl != null ? s._origSl : s.sl);
+  const origTp = Number(s._origTp != null ? s._origTp : s.tp);
+  if (!Number.isFinite(entry) || !Number.isFinite(origSl) || !Number.isFinite(origTp)) return null;
+  if (s.dir !== "BULL" && s.dir !== "BEAR") return null;
+  const riskDist = Math.abs(entry - origSl);
+  const rewardDist = Math.abs(origTp - entry);
+  if (!(riskDist > 0) || !(rewardDist > 0)) return null;
+  const dir = s.dir === "BULL" ? "BEAR" : "BULL";
+  return {
+    type, dir, entry,
+    sl: dir === "BULL" ? entry - riskDist : entry + riskDist,
+    tp: dir === "BULL" ? entry + rewardDist : entry - rewardDist,
+    riskDist, rewardDist,
+    startEpoch: Number(s.epoch),
+    lastClosedEpoch: Number(s.epoch),
+    result: "PENDING", exitPrice: null, exitEpoch: null
+  };
+}
+
+/** Check one candle against a pending reversed trade. Returns true when resolved. */
+function _resolveOppositeExecutionOnCandle(ex, c) {
+  if (!c || !(Number(c.epoch) > ex.startEpoch)) return false;
+  const slHit = ex.dir === "BULL" ? c.low <= ex.sl : c.high >= ex.sl;
+  const tpHit = ex.dir === "BULL" ? c.high >= ex.tp : c.low <= ex.tp;
+  if (!slHit && !tpHit) return false;
+  /* Same tie-break as the backtest mirror (_btMirrorBothHit). */
+  ex.result = slHit && tpHit ? (ex.rewardDist <= ex.riskDist ? "WIN" : "LOSS") : (tpHit ? "WIN" : "LOSS");
+  ex.exitPrice = ex.result === "WIN" ? ex.tp : ex.sl;
+  ex.exitEpoch = Number(c.epoch);
+  return true;
+}
+
+/**
+ * Stamp new signals with their opposite-mode execution and resolve pending
+ * ones. Closed candles are scanned once (tracked via lastClosedEpoch); the
+ * last/forming candle is re-checked every call since its range still grows.
+ */
+function trackOppositeExecutions(candle) {
+  if (typeof _btSilent !== "undefined" && _btSilent) return [];
+  const resolved = [];
+  const series = Array.isArray(candles) ? candles : [];
+  const lastIdx = series.length - 1;
+  for (const [history, type] of getOppositeExecutionHistories()) {
+    if (!Array.isArray(history)) continue;
+    for (const s of history) {
+      if (!s || typeof s !== "object") continue;
+      if (!s._oppExecChecked) {
+        s._oppExecChecked = true;
+        const entryKnown = Number.isFinite(Number(s.epoch)) && series.some(c => c && c.epoch === s.epoch);
+        if (entryKnown && isSignalTypeOppositeActive(type)) {
+          const ex = buildOppositeExecution(s, type);
+          if (ex) s._oppExec = ex;
+        }
+      }
+      const ex = s._oppExec;
+      if (!ex || ex.result !== "PENDING") continue;
+      let done = false;
+      for (let i = 0; i <= lastIdx && !done; i++) {
+        const c = series[i];
+        if (!c || !(Number(c.epoch) > ex.lastClosedEpoch)) continue;
+        done = _resolveOppositeExecutionOnCandle(ex, c);
+        if (!done && i < lastIdx) ex.lastClosedEpoch = Number(c.epoch);
+      }
+      if (!done && candle) done = _resolveOppositeExecutionOnCandle(ex, candle);
+      if (done) resolved.push(s);
+    }
+  }
+  for (const s of resolved) onOppositeExecutionResolved(s);
+  return resolved;
+}
+
+function onOppositeExecutionResolved(s) {
+  const ex = s._oppExec;
+  const label = resolveStrategyDisplayLabel(ex.type === "scalp" ? "live_scalp" : ex.type, ex.type);
+  addLog(`🔄 Opposite ${label} ${ex.result === "WIN" ? "✅ WIN" : "❌ LOSS"} — signal ${s.dir}, traded ${ex.dir} @ ${fmt(ex.entry, 4)} → ${ex.result === "WIN" ? "TP" : "SL"} ${fmt(ex.exitPrice, 4)}`);
+  if (typeof renderStrategyAlerts === "function") renderStrategyAlerts();
+  if (typeof updateStrategyWinRatesUI === "function") updateStrategyWinRatesUI();
+  if (!_historicalProcessing) sendOppositeOutcomeTelegram(s);
+}
+
+/** Channel toggle that would have carried the original outcome message. */
+function isOppositeOutcomeTelegramChannelOn(s) {
+  const type = s._oppExec.type;
+  if (type === "breakout_retest") return !!telegramOutcomeSend;
+  if (type === "scalp") return !!telegramScalpOutcomeSend;
+  if (type === "session_range" && telegramSessionRangeOutcomeSend) return true;
+  return !!telegramStrategyOutcomeSend && s._sentViaTelegram === true;
+}
+
+/**
+ * Outcome message for the reversed trade. Replaces the original-signal
+ * outcome (suppressed in the regular senders while `_oppExec` exists) so
+ * Telegram reports the WIN/LOSS that MT5 actually booked.
+ */
+async function sendOppositeOutcomeTelegram(s) {
+  const ex = s && s._oppExec;
+  if (!ex || (ex.result !== "WIN" && ex.result !== "LOSS") || s._oppOutcomeSent) return;
+  if (!isOppositeOutcomeTelegramChannelOn(s)) return;
+  if (!isNotificationKindEnabled(ex.result === "WIN" ? "tp" : "sl")) { s._oppOutcomeSent = true; return; }
+  try {
+    const { token, chatId } = getTelegramCredentials();
+    validateTelegramCredentials(token, chatId);
+  } catch (err) {
+    addLog(`📤 Opposite outcome Telegram skipped: ${err.message}`);
+    return;
+  }
+  if (!canSendTradeResolutionNotification(s, `OPPOSITE_${ex.result}`)) return;
+  s._oppOutcomeSent = true;
+  try {
+    const activeSym = s.symbol || getActiveSymbol() || "";
+    const sym = getSymbolLabel(activeSym);
+    const label = resolveStrategyDisplayLabel(ex.type === "scalp" ? "live_scalp" : ex.type, ex.type);
+    const dirTxt = d => d === "BULL" ? "📈 BUY" : "📉 SELL";
+    const lines = [
+      `${ex.result === "WIN" ? "✅" : "❌"} <b>${label} ${ex.result}</b> — 🔄 Opposite Mode ${dirTxt(ex.dir)} ${sym}`,
+      "",
+      `<b>Signal:</b> ${dirTxt(s.dir)} → <b>Traded:</b> ${dirTxt(ex.dir)}`,
+      `<b>📍 Entry:</b> <code>${fmtPrice(ex.entry, activeSym)}</code>`,
+      `<b>🛑 SL:</b> <code>${fmtPrice(ex.sl, activeSym)}</code>`,
+      `<b>🎯 TP:</b> <code>${fmtPrice(ex.tp, activeSym)}</code>`,
+      `<b>Exit:</b> <code>${fmtPrice(ex.exitPrice, activeSym)}</code> (${ex.result === "WIN" ? "TP" : "SL"} hit)`,
+      `<i>${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC</i>`
+    ];
+    await sendTelegramMessage(lines.join("\n"));
+    addLog(`📤 Telegram: Opposite ${label} ${ex.result} sent`);
+  } catch (err) {
+    addLog(`📤 Opposite outcome Telegram error: ${err.message}`);
+  }
+}
+
 function sweepOppositeTradeTracking(candle) {
   const tracker = _oppTracker || (typeof window !== "undefined" ? window.oppositeTradeTracker : null);
   if (!tracker || !candle) return;
@@ -9654,6 +9847,9 @@ function applyRecoveryAdviceToCandleInterp() {
 }
 
 function monitorCustomStrategyOutcomes(candle) {
+  /* Before the per-strategy monitors so a signal's original SL/TP is
+     captured before breakeven/trailing logic mutates it. */
+  trackOppositeExecutions(candle);
   monitorLiquiditySweepOutcomes(candle);
   monitorStopLossHuntOutcomes(candle);
   monitorFailedPinBarOutcomes(candle);
@@ -12043,6 +12239,7 @@ async function sendTelegramScalpAlert(scalp, force = false) {
  */
 async function sendScalpOutcomeTelegram(scalp) {
   if (!telegramScalpOutcomeSend) return;
+  if (scalp && scalp._oppExec) return;  /* Opposite Mode outcome is sent by sendOppositeOutcomeTelegram */
 
   /* Sync credentials from DOM */
   /* #14: credentials kept in sync by the DOM input listener — no need to re-read here */
@@ -12920,6 +13117,8 @@ function canSendTradeResolutionNotification(signal, resolutionType) {
  */
 async function sendStrategyOutcomeTelegram(signal) {
   if (!telegramStrategyOutcomeSend) return;
+  /* Opposite Mode traded the reverse — sendOppositeOutcomeTelegram reports that result. */
+  if (signal && signal._oppExec) return;
   if (signal.result && !canSendTradeResolutionNotification(signal, signal.result)) return;
 
   /* Per-user notification-type toggle: EXPIRED outcome summaries respect
@@ -13319,6 +13518,7 @@ function buildSessionRangeTelegramCaption(signalType) {
 async function sendSessionRangeOutcomeTelegram(resolvedTrade, panelSymbol) {
   if (!telegramSessionRangeOutcomeSend) return;
   if (resolvedTrade._stratOutcomeSent) return;  /* Already sent */
+  if (resolvedTrade._oppExec) return;  /* Opposite Mode outcome is sent by sendOppositeOutcomeTelegram */
   if (resolvedTrade.result && !canSendTradeResolutionNotification(resolvedTrade, resolvedTrade.result)) return;
 
   /* Sync credentials from DOM */
@@ -15238,6 +15438,8 @@ function runIntrabarTimingOptimizations(currentCandle) {
   if (currentCandle) {
     monitorSessionRangeTradeOutcome(currentCandle);
     monitorNyOpenRangeTradeOutcome(currentCandle);
+    /* Opposite Mode trades are broker-managed too — resolve them on the touch. */
+    trackOppositeExecutions(currentCandle);
   }
   enforceTradeLifecycleIntegrity("intrabar_failsafe");
 
@@ -21348,6 +21550,7 @@ async function sendTeslaLevelTelegram(signal, levelLabel, levelPrice, plan) {
 }
 async function sendTradeOutcomeTelegram(signal) {
   if (!telegramOutcomeSend) return;
+  if (signal && signal._oppExec) return;  /* Opposite Mode outcome is sent by sendOppositeOutcomeTelegram */
   if (signal._outcomeSent || signal._outcomeSending) return;
   signal._outcomeSending = true;
   try {
@@ -22792,8 +22995,9 @@ function updateStrategyWinRatesUI() {
   for (const r of rows) {
     const el = document.getElementById(r.id);
     if (!el) continue;
-    const wins   = r.history.filter(s => s && s.result === "WIN").length;
-    const losses = r.history.filter(s => s && s.result === "LOSS").length;
+    /* Grade the trade actually taken: the reversed trade when Opposite Mode applied. */
+    const wins   = r.history.filter(s => s && getEffectiveSignalResult(s) === "WIN").length;
+    const losses = r.history.filter(s => s && getEffectiveSignalResult(s) === "LOSS").length;
     const total  = wins + losses;
     if (total === 0) { el.innerHTML = ""; el.style.display = "none"; continue; }
     el.style.display = "";
@@ -29595,10 +29799,32 @@ async function _btReplayStrategy(strategy, data, fromEpoch, onProgress, opposite
   });
 
   if (!opposite) return filtered;
+  return _btMirrorTrades(filtered, data);
+}
 
+/** Reverse every harvested trade and re-resolve it against the raw candles. */
+function _btMirrorTrades(trades, data) {
   const epochIndex = new Map();
   for (let i = 0; i < data.length; i++) epochIndex.set(data[i].epoch, i);
-  return filtered.map(t => _btMirrorOppositeTrade(t, data, epochIndex));
+  return trades.map(t => _btMirrorOppositeTrade(t, data, epochIndex));
+}
+
+/** Normalise cfg.oppositeMode: false | "all" | "live" | "compare" (true → "all"). */
+function _btNormalizeOppositeMode(v) {
+  if (v === "live" || v === "compare" || v === "all") return v;
+  return v === true ? "all" : false;
+}
+
+/**
+ * Which variants (false = normal, true = opposite) to grade for a strategy.
+ * "live" mirrors exactly what auto-trade/MT5 would execute right now, using
+ * the same per-strategy toggles as executeAutoTrade().
+ */
+function _btOppositeVariantsFor(strategyId, mode) {
+  if (mode === "compare") return [false, true];
+  if (mode === "all") return [true];
+  if (mode === "live") return [isSignalTypeOppositeActive(strategyId === "live_scalp" ? "scalp" : strategyId)];
+  return [false];
 }
 
 /* ---------------------------------------------------------------------------
@@ -29767,9 +29993,11 @@ function _btAggregateStrategyResults(rows, initialBalance, cfg) {
  * @param {number} [cfg.riskPercent]
  * @param {"one"|"group"|"all"} [cfg.symbolScope]  expand cfg.symbol into a family
  * @param {string[]} [cfg.symbols]  explicit symbol list (overrides symbolScope)
- * @param {boolean} [cfg.oppositeMode]  reverse every signal, mirroring entry
- *   risk/reward around the same entry (as live Opposite Mode does), then
- *   re-resolve WIN/LOSS/EXPIRED against the raw candle series
+ * @param {boolean|"all"|"live"|"compare"} [cfg.oppositeMode]  reverse signals,
+ *   mirroring entry risk/reward around the same entry (as live Opposite Mode
+ *   does), then re-resolve WIN/LOSS/EXPIRED against the raw candle series.
+ *   true/"all" reverses every strategy; "live" reverses only strategies whose
+ *   live Opposite Mode toggle is on; "compare" reports both variants.
  * @param {Function} [cfg.onStatus]
  * @returns {Promise<object>} exportable backtest report
  */
@@ -29781,7 +30009,7 @@ async function runStrategyBacktest(cfg) {
   const startSec     = Math.floor(cfg.startSec);
   const endSec       = Math.floor(cfg.endSec);
   const status       = typeof cfg.onStatus === "function" ? cfg.onStatus : () => {};
-  const oppositeMode = !!cfg.oppositeMode;
+  const oppositeMode = _btNormalizeOppositeMode(cfg.oppositeMode);
 
   if (!symbol) throw new Error("Select a symbol.");
   if (!Number.isFinite(granularity) || granularity <= 0) throw new Error("Select a timeframe.");
@@ -29815,7 +30043,13 @@ async function runStrategyBacktest(cfg) {
 
   backtestEngineRunning = true;
   backtestAbortRequested = false;
-  if (oppositeMode) addLog("🔄 Backtest Opposite Mode enabled — every signal will be replayed reversed.");
+  if (oppositeMode === "all") addLog("🔄 Backtest Opposite Mode enabled — every signal will be replayed reversed.");
+  else if (oppositeMode === "live") addLog("🔄 Backtest using each strategy's live Opposite Mode setting.");
+  else if (oppositeMode === "compare") addLog("🔄 Backtest comparing Normal vs Opposite Mode for every strategy.");
+  /* Resolve per-strategy variants up front — live toggles are read before the
+     replay mutates any global state. */
+  const variantsById = {};
+  for (const st of requested) variantsById[st.id] = _btOppositeVariantsFor(st.id, oppositeMode);
 
   const snapshot = _snapshotChartGlobals();
   const strategySnapshot = _btSnapshotStrategyState();
@@ -29891,16 +30125,23 @@ async function runStrategyBacktest(cfg) {
           if (backtestAbortRequested) break;
           const strategy = requested[s];
           const label = `${symTag}${strategy.label} (${s + 1}/${requested.length})`;
-          const trades = await _btReplayStrategy(strategy, data, startSec,
-            (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`), oppositeMode);
-          const metrics = computeBacktestMetrics(trades, {
-            symbol: sym, startSec, endSec,
-            initialBalance: +cfg.initialBalance,
-            sizingMode,
-            lotSize: +cfg.lotSize || 0,
-            riskPercent: +cfg.riskPercent || 0
-          });
-          results.push(Object.assign({ symbol: sym, strategyId: strategy.id, strategy: strategy.label }, metrics));
+          const normalTrades = await _btReplayStrategy(strategy, data, startSec,
+            (i, n) => status(`${label} — ${Math.round(i / n * 100)}%`), false);
+          for (const opposite of variantsById[strategy.id]) {
+            const trades = opposite ? _btMirrorTrades(normalTrades, data) : normalTrades;
+            const metrics = computeBacktestMetrics(trades, {
+              symbol: sym, startSec, endSec,
+              initialBalance: +cfg.initialBalance,
+              sizingMode,
+              lotSize: +cfg.lotSize || 0,
+              riskPercent: +cfg.riskPercent || 0
+            });
+            results.push(Object.assign({
+              symbol: sym, strategyId: strategy.id,
+              strategy: opposite ? `${strategy.label} 🔄 Opposite` : strategy.label,
+              opposite
+            }, metrics));
+          }
         }
       } finally {
         _btSilent = false;
@@ -29911,14 +30152,17 @@ async function runStrategyBacktest(cfg) {
     const testedSymbols = perSymbol.filter(p => !p.error).map(p => p.symbol);
     if (testedSymbols.length > 1) {
       for (const strategy of requested) {
-        const rows = results.filter(r => r.strategyId === strategy.id && !r.aggregate);
-        if (rows.length === 0) continue;
-        results.push(Object.assign({
-          symbol: `ALL (${rows.length} symbols)`,
-          strategyId: strategy.id,
-          strategy: strategy.label,
-          aggregate: true
-        }, _btAggregateStrategyResults(rows, +cfg.initialBalance, cfg)));
+        for (const opposite of variantsById[strategy.id]) {
+          const rows = results.filter(r => r.strategyId === strategy.id && !!r.opposite === opposite && !r.aggregate);
+          if (rows.length === 0) continue;
+          results.push(Object.assign({
+            symbol: `ALL (${rows.length} symbols)`,
+            strategyId: strategy.id,
+            strategy: opposite ? `${strategy.label} 🔄 Opposite` : strategy.label,
+            opposite,
+            aggregate: true
+          }, _btAggregateStrategyResults(rows, +cfg.initialBalance, cfg)));
+        }
       }
     }
 
@@ -30016,6 +30260,7 @@ function computeBacktestRecommendation(report) {
   return {
     ok: true,
     strategy: top.strategy, strategyId: top.strategyId, symbol: top.symbol,
+    mode: top.opposite ? "opposite" : "normal",
     trades: top.totalTrades, winRate: top.winRate, profitPct: top.profitPct,
     profitFactor: top.profitFactor, drawdown: top.maxDrawdownPct,
     runnerUp: runnerUp ? runnerUp.strategy : null
@@ -30188,7 +30433,8 @@ function _btRenderRecommendation(report) {
   }
   const scopeNote = rec.symbol && String(rec.symbol).startsWith("ALL") ? ` across ${rec.symbol}` : (rec.symbol ? ` on ${rec.symbol}` : "");
   const runnerUpNote = rec.runnerUp ? ` (runner-up: ${rec.runnerUp})` : "";
-  el.innerHTML = `⭐ <b>Recommended: ${rec.strategy}</b>${scopeNote} — ` +
+  const modeNote = rec.mode === "opposite" ? " — turn <b>Opposite Mode ON</b> for this strategy" : " — <b>Normal mode</b> (Opposite OFF)";
+  el.innerHTML = `⭐ <b>Recommended: ${rec.strategy}</b>${scopeNote}${modeNote} — ` +
     `${_btNum(rec.winRate, 1)}% win rate, ${_btNum(rec.profitPct, 2)}% profit, ` +
     `PF ${_btPF(rec.profitFactor)}, ${_btNum(rec.drawdown, 2)}% max drawdown over ${rec.trades} trades.${runnerUpNote}`;
 }
@@ -30265,7 +30511,7 @@ async function runStrategyBacktestFromUI() {
     sizingMode: val("btSizingMode") === "risk" ? "risk" : "lot",
     lotSize: parseFloat(val("btLotSize")),
     riskPercent: parseFloat(val("btRiskPercent")),
-    oppositeMode: !!document.getElementById("btOppositeMode") && document.getElementById("btOppositeMode").checked,
+    oppositeMode: _btNormalizeOppositeMode(val("btOppositeMode")),
     onStatus: _btSetStatus
   };
 
@@ -30281,7 +30527,7 @@ async function runStrategyBacktestFromUI() {
     const skipped = (report.perSymbol || []).filter(p => p.error);
     const scope = report.config.scopeLabel || report.config.symbol;
     const skipNote = skipped.length > 0 ? ` · ${skipped.length} symbol(s) skipped` : "";
-    const oppNote = report.config.oppositeMode ? " · 🔄 Opposite Mode" : "";
+    const oppNote = { all: " · 🔄 Opposite Mode", live: " · 🔄 Live per-strategy Opposite", compare: " · 🔄 Normal vs Opposite" }[report.config.oppositeMode] || "";
     _btSetStatus(report.aborted
       ? `Stopped early — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}${oppNote}.`
       : `Done — ${scope}: ${report.results.length} result row(s) from ${report.candlesLoaded} candles · ${mode}${skipNote}${oppNote}.`);
